@@ -21,26 +21,37 @@ import {
   CMD,
   Demux,
   ERR,
+  LEGACY_WIFI_KEYS,
+  MAX_WIFI_NETWORKS,
   PROTOCOL,
   RequestTracker,
   SETTING_KEYS,
+  TIMEOUT_MS,
   buildRequest,
   buildSettingsArgs,
+  buildWifiAddArgs,
+  buildWifiRemoveArgs,
   byteLength,
   errorHead,
+  errorText,
   formatUptime,
   formatWifi,
+  helloSupports,
   isUnsupported,
   readHello,
+  readNetworkCount,
+  readNetworkList,
   readPasswordState,
   readScanResults,
   readSettings,
   readStatus,
+  supportsMultiWifi,
   validateChannel,
   validatePassword,
   validatePort,
   validateSettings,
   validateSsid,
+  validateWifiEntry,
 } from '../js/protocol.js';
 
 const RS = PROTOCOL.REQ_PREFIX;
@@ -71,7 +82,7 @@ test('引数に予約キー (id / cmd) は使えない', () => {
 });
 
 test('非 ASCII は \\uXXXX に逃がして純 ASCII の行にする', () => {
-  const line = buildRequest(3, CMD.SETTINGS_SET, { kv: { [SETTING_KEYS.SSID]: 'わが家' } });
+  const line = buildRequest(3, CMD.WIFI_ADD, { ssid: 'わが家' });
   assert.match(line, /\\u308f\\u304c\\u5bb6/);
   // 行の本体が全部 ASCII の印字文字であること
   for (const ch of line.slice(1, -1)) {
@@ -432,138 +443,292 @@ test('ポート: 1〜65535 の整数、必須', () => {
   assert.ok(validatePort('-1'));
 });
 
-test('validateSettings は問題のあるフィールド名を返す', () => {
-  const bad = validateSettings({ ssid: '', password: 'abc', channel: '99', host: '', port: '0' });
+test('validateSettings は音声サーバの 2 つだけを見る (Wi-Fi は含まない)', () => {
+  const bad = validateSettings({ host: '', port: '0' });
   assert.equal(bad.ok, false);
-  assert.deepEqual(Object.keys(bad.errors).sort(), ['channel', 'host', 'password', 'port', 'ssid']);
+  assert.deepEqual(Object.keys(bad.errors).sort(), ['host', 'port']);
 
-  const good = validateSettings({
-    ssid: 'home-ap', password: '', channel: '', host: '192.168.1.10', port: '5555',
-  });
+  const good = validateSettings({ host: '192.168.1.10', port: '5555' });
   assert.equal(good.ok, true);
   assert.deepEqual(good.errors, {});
 });
 
 // ===========================================================================
-// settings.set の引数
+// Wi-Fi の追加フォームの検証
 // ===========================================================================
 
-test('空のパスワードはキーごと省く (今の値を保つ)', () => {
-  const a = buildSettingsArgs({ ssid: 'ap', password: '', host: 'h', port: '1' });
-  assert.equal(SETTING_KEYS.PASSWORD in a.kv, false);
-  assert.equal(a.kv[SETTING_KEYS.SSID], 'ap');
+test('validateWifiEntry は問題のあるフィールド名を返す', () => {
+  const bad = validateWifiEntry({ ssid: '', password: 'abc', channel: '99' });
+  assert.equal(bad.ok, false);
+  assert.deepEqual(Object.keys(bad.errors).sort(), ['channel', 'password', 'ssid']);
 });
 
-test('パスワードの明示的な消去は null (= 行を消す) を送る', () => {
-  const c = buildSettingsArgs({ ssid: 'ap', password: '', host: 'h', port: '1', clearPassword: true });
-  assert.equal(c.kv[SETTING_KEYS.PASSWORD], null);
+test('SSID は必須、UTF-8 で 32 バイトまで', () => {
+  assert.equal(validateWifiEntry({ ssid: '', password: '', channel: '' }).ok, false);
+  assert.equal(validateWifiEntry({ ssid: 'a'.repeat(32), password: '', channel: '' }).ok, true);
+  assert.equal(validateWifiEntry({ ssid: 'a'.repeat(33), password: '', channel: '' }).ok, false);
+  // 日本語は文字数ではなくバイト数 (UTF-8 で 3 バイト/文字)
+  assert.equal(validateWifiEntry({ ssid: 'あ'.repeat(10) }).ok, true);   // 30 バイト
+  assert.equal(validateWifiEntry({ ssid: 'あ'.repeat(11) }).ok, false);  // 33 バイト
 });
 
-test('チャネル未指定は null (= 行を消す)、指定ありは文字列', () => {
-  assert.equal(buildSettingsArgs({ ssid: 'a', host: 'h', port: '1' }).kv[SETTING_KEYS.CHANNEL], null);
-  assert.equal(buildSettingsArgs({ ssid: 'a', channel: '  ', host: 'h', port: '1' }).kv[SETTING_KEYS.CHANNEL], null);
-  assert.equal(buildSettingsArgs({ ssid: 'a', channel: 6, host: 'h', port: '1' }).kv[SETTING_KEYS.CHANNEL], '6');
+test('パスワードは空 (暗号なし) か 8〜63 文字', () => {
+  assert.equal(validateWifiEntry({ ssid: 'ap', password: '' }).ok, true);
+  assert.equal(validateWifiEntry({ ssid: 'ap', password: '1234567' }).ok, false);
+  assert.equal(validateWifiEntry({ ssid: 'ap', password: '12345678' }).ok, true);
+  assert.equal(validateWifiEntry({ ssid: 'ap', password: 'x'.repeat(63) }).ok, true);
+  assert.equal(validateWifiEntry({ ssid: 'ap', password: 'x'.repeat(64) }).ok, false);
 });
 
-test('値は必ず文字列か null になる (デバイスは notstr で拒否する)', () => {
-  const kv = buildSettingsArgs({ ssid: 'ap', password: 'secret12', channel: 6, host: 'h', port: 5555 }).kv;
-  for (const [k, v] of Object.entries(kv)) {
-    assert.ok(v === null || typeof v === 'string', k + ' = ' + typeof v);
+test('チャネルは空 (自動) か 1〜14', () => {
+  for (const ch of ['', '  ', '1', '14']) {
+    assert.equal(validateWifiEntry({ ssid: 'ap', channel: ch }).ok, true, ch);
   }
-  assert.equal(kv[SETTING_KEYS.PORT], '5555');
-  assert.equal(kv[SETTING_KEYS.PASSWORD], 'secret12');
+  for (const ch of ['0', '15', '6.5', 'six', '-1']) {
+    assert.equal(validateWifiEntry({ ssid: 'ap', channel: ch }).ok, false, ch);
+  }
 });
 
-test('書き換え対象は ALLOWED_KEYS の 5 つだけ (CIRCUITPY_* を送らない)', () => {
-  const kv = buildSettingsArgs({ ssid: 'a', password: 'secret12', channel: '6', host: 'h', port: '1' }).kv;
-  assert.deepEqual(Object.keys(kv).sort(), [
-    'STACKEE_HOST', 'STACKEE_PORT', 'STACKEE_WIFI_CHANNEL',
-    'STACKEE_WIFI_PASSWORD', 'STACKEE_WIFI_SSID',
+test('★ 8 件の上限はページでは弾かない (デバイスの "full" に任せる)', () => {
+  // ページの手元の一覧は古いことがある。数の判定はデバイスだけが正しい。
+  assert.equal(validateWifiEntry({ ssid: 'ap9', password: '' }).ok, true);
+  assert.equal(MAX_WIFI_NETWORKS, 8);
+  assert.match(errorText(ERR.FULL, CMD.WIFI_ADD), /8 件/);
+});
+
+// ===========================================================================
+// wifi.add / wifi.remove の引数
+// ===========================================================================
+
+test('wifi.add は ssid / password / channel を要求の直下に置く', () => {
+  const args = buildWifiAddArgs({ ssid: 'home-ap', password: 'secret12', channel: '10' });
+  assert.deepEqual(args, { ssid: 'home-ap', password: 'secret12', channel: 10 });
+  const line = buildRequest(1, CMD.WIFI_ADD, args);
+  assert.equal(line, PROTOCOL.REQ_PREFIX
+    + '{"id":1,"cmd":"wifi.add","ssid":"home-ap","password":"secret12","channel":10}\n');
+});
+
+test('チャネルは整数で送る。空欄は null (= 自動)', () => {
+  assert.equal(buildWifiAddArgs({ ssid: 'a' }).channel, null);
+  assert.equal(buildWifiAddArgs({ ssid: 'a', channel: '' }).channel, null);
+  assert.equal(buildWifiAddArgs({ ssid: 'a', channel: '  ' }).channel, null);
+  assert.equal(buildWifiAddArgs({ ssid: 'a', channel: null }).channel, null);
+  assert.equal(buildWifiAddArgs({ ssid: 'a', channel: 6 }).channel, 6);
+  assert.equal(buildWifiAddArgs({ ssid: 'a', channel: ' 13 ' }).channel, 13);
+});
+
+test('★ 空のパスワードも必ず送る (省くと「暗号なし」と区別できない)', () => {
+  const args = buildWifiAddArgs({ ssid: 'open-ap', password: '' });
+  assert.equal('password' in args, true);
+  assert.equal(args.password, '');
+});
+
+test('wifi.add の値の型は ssid/password が文字列、channel が整数か null', () => {
+  const args = buildWifiAddArgs({ ssid: 'ap', password: 'secret12', channel: 6 });
+  assert.equal(typeof args.ssid, 'string');
+  assert.equal(typeof args.password, 'string');
+  assert.ok(args.channel === null || Number.isInteger(args.channel));
+});
+
+test('wifi.add の要求行は純 ASCII の 1 行になる (日本語 SSID / 制御文字)', () => {
+  const line = buildRequest(2, CMD.WIFI_ADD,
+    buildWifiAddArgs({ ssid: 'わが家', password: 'a\x03bcdefgh' }));
+  assert.equal(line.indexOf('\x03'), -1);
+  assert.equal(line.indexOf('\n'), line.length - 1);
+  const obj = JSON.parse(line.slice(1, -1));
+  assert.equal(obj.cmd, 'wifi.add');
+  assert.equal(obj.ssid, 'わが家');
+  assert.equal(obj.password, 'a\x03bcdefgh');
+});
+
+test('wifi.remove は ssid だけを送る', () => {
+  assert.deepEqual(buildWifiRemoveArgs('home-ap'), { ssid: 'home-ap' });
+  assert.deepEqual(buildWifiRemoveArgs(null), { ssid: '' });
+  assert.equal(buildRequest(3, CMD.WIFI_REMOVE, buildWifiRemoveArgs('ap')),
+    PROTOCOL.REQ_PREFIX + '{"id":3,"cmd":"wifi.remove","ssid":"ap"}\n');
+});
+
+test('★ wifi.add / wifi.remove のタイムアウトは 10 秒以上 (打鍵ガードのぶん)', () => {
+  // デバイスは書き込み前に無打鍵 300 ms を待ち、最大 3 秒で諦めて実行する。
+  assert.ok(TIMEOUT_MS[CMD.WIFI_ADD] >= 10000);
+  assert.ok(TIMEOUT_MS[CMD.WIFI_REMOVE] >= 10000);
+});
+
+// ===========================================================================
+// settings.set の引数 (音声サーバだけになった)
+// ===========================================================================
+
+test('settings.set が送るのは STACKEE_HOST / STACKEE_PORT の 2 つだけ', () => {
+  // proto 2 のデバイスは STACKEE_WIFI_* を "denied:<KEY>" で拒否する
+  const kv = buildSettingsArgs({ host: '192.168.1.10', port: '5555' }).kv;
+  assert.deepEqual(Object.keys(kv).sort(), ['STACKEE_HOST', 'STACKEE_PORT']);
+  for (const key of LEGACY_WIFI_KEYS) {
+    assert.equal(key in kv, false, key);
+  }
+});
+
+test('値は必ず文字列になる (デバイスは notstr で拒否する)', () => {
+  const kv = buildSettingsArgs({ host: ' h ', port: 5555 }).kv;
+  for (const [k, v] of Object.entries(kv)) {
+    assert.equal(typeof v, 'string', k + ' = ' + typeof v);
+  }
+  assert.equal(kv[SETTING_KEYS.HOST], 'h');     // 前後の空白は落とす
+  assert.equal(kv[SETTING_KEYS.PORT], '5555');
+});
+
+// ===========================================================================
+// wifi.list の応答
+// ===========================================================================
+
+test('wifi.list を一覧として読む', () => {
+  const list = readNetworkList({
+    id: 1,
+    networks: [
+      { ssid: 'home-ap', channel: 10, has_password: true },
+      { ssid: 'open-ap', channel: null, has_password: false },
+    ],
+    n: 2,
+  });
+  assert.equal(list.count, 2);
+  assert.deepEqual(list.networks, [
+    { ssid: 'home-ap', channel: 10, hasPassword: true },
+    { ssid: 'open-ap', channel: null, hasPassword: false },
   ]);
 });
 
-test('settings.set の引数はそのまま 1 行にできる', () => {
-  const args = buildSettingsArgs({ ssid: 'わが家', password: 'secret12', host: 'h', port: '1' });
-  const line = buildRequest(1, CMD.SETTINGS_SET, args);
-  assert.equal(line.indexOf('\x03'), -1);
-  assert.equal(JSON.parse(line.slice(1, -1)).kv[SETTING_KEYS.SSID], 'わが家');
+test('★ wifi.list の応答にパスワードは入らない (入っていても持ち出さない)', () => {
+  // デバイスは値を返さない設計。仮に返ってきても、読み取り結果に出さない。
+  const list = readNetworkList({
+    networks: [{ ssid: 'ap', channel: 6, has_password: true, password: 'leaked!!' }],
+    n: 1,
+  });
+  assert.deepEqual(Object.keys(list.networks[0]).sort(), ['channel', 'hasPassword', 'ssid']);
+  assert.equal(JSON.stringify(list).indexOf('leaked'), -1);
+});
+
+test('チャネル無しは null (画面では「自動」)', () => {
+  const list = readNetworkList({ networks: [{ ssid: 'a' }, { ssid: 'b', channel: '6' }] });
+  assert.equal(list.networks[0].channel, null);
+  assert.equal(list.networks[1].channel, null);   // 文字列は整数ではないので null
+});
+
+test('壊れた要素・空の SSID は落とし、n が無ければ数える', () => {
+  const list = readNetworkList({
+    networks: [null, 'x', { ssid: '' }, { ssid: 'ok', has_password: 1 }],
+  });
+  assert.equal(list.networks.length, 1);
+  assert.equal(list.networks[0].ssid, 'ok');
+  assert.equal(list.networks[0].hasPassword, true);
+  assert.equal(list.count, 1);
+});
+
+test('networks が無い / 応答が無くても落ちない', () => {
+  assert.deepEqual(readNetworkList({ id: 1 }), { networks: [], count: 0 });
+  assert.deepEqual(readNetworkList(null), { networks: [], count: 0 });
+});
+
+test('wifi.add / wifi.remove の応答から登録件数を読む', () => {
+  assert.equal(readNetworkCount({ id: 1, ok: 1, n: 3 }), 3);
+  assert.equal(readNetworkCount({ id: 1, ok: 1 }), null);
+  assert.equal(readNetworkCount(null), null);
+});
+
+// ===========================================================================
+// wifi.add / wifi.remove の失敗コード
+// ===========================================================================
+
+test('デバイスの失敗コードを読める日本語にする', () => {
+  const cases = [
+    [ERR.FULL, /8 件/],
+    [ERR.BAD_SSID, /SSID/],
+    [ERR.BAD_PASSWORD, /8〜63/],
+    [ERR.BAD_CHANNEL, /1〜14/],
+    [ERR.WRITE_FAILED, /wifi_networks\.json/],
+    [ERR.NOT_FOUND, /登録されていません/],
+  ];
+  for (const [code, re] of cases) {
+    assert.match(errorText(code, CMD.WIFI_ADD), re, code);
+    // 「デバイス側でエラーが起きました (…)」のような素通しになっていないこと
+    assert.equal(errorText(code, CMD.WIFI_ADD).indexOf(code), -1, code);
+  }
+});
+
+test('失敗コードは Error になり、コードが読める', async () => {
+  const tr = new RequestTracker({ now: () => 0 });
+  const r = tr.create(CMD.WIFI_ADD);
+  tr.onFrame({ id: r.id, error: ERR.FULL });
+  await assert.rejects(r.promise, (e) => {
+    assert.equal(e.code, ERR.FULL);
+    assert.equal(e.cmd, CMD.WIFI_ADD);
+    assert.equal(isUnsupported(e), false);   // 「未対応」ではない = 機能は隠さない
+    return true;
+  });
+});
+
+test('旧 Wi-Fi キーの denied は「wifi.add を使え」と案内する', () => {
+  const msg = errorText('denied:STACKEE_WIFI_SSID', CMD.SETTINGS_SET);
+  assert.match(msg, /STACKEE_WIFI_SSID/);
+  assert.match(msg, /Wi-Fi ネットワーク/);
 });
 
 // ===========================================================================
 // 応答の読み取り
 // ===========================================================================
 
-test('settings.get は keys の中を読み、パスワードは有無だけを扱う', () => {
+test('settings.get から音声サーバの 2 つを読む', () => {
   const s = readSettings({
     id: 1,
-    keys: {
-      STACKEE_WIFI_SSID: 'home-ap',
-      STACKEE_WIFI_CHANNEL: '6',
-      STACKEE_HOST: '192.168.1.10',
-      STACKEE_PORT: '5555',
-      STACKEE_WIFI_PASSWORD: true,
-    },
+    keys: { STACKEE_HOST: '192.168.1.10', STACKEE_PORT: '5555' },
     secret: ['STACKEE_WIFI_PASSWORD'],
     bytes: 420,
   });
-  assert.equal(s.ssid, 'home-ap');
-  assert.equal(s.channel, '6');
   assert.equal(s.host, '192.168.1.10');
   assert.equal(s.port, '5555');
-  assert.equal(s.passwordSet, true);
   assert.equal(s.missing, false);
-  assert.equal(s.legacyWifiKey, false);
+  assert.deepEqual(s.legacyWifiKeys, []);
+  assert.deepEqual(s.bootSlowingKeys, []);
 });
 
 test('settings.toml が無い応答を missing として読む', () => {
   const s = readSettings({ id: 1, keys: {}, missing: 1 });
   assert.equal(s.missing, true);
-  assert.equal(s.ssid, '');
-  assert.equal(s.passwordSet, false);   // 応答は来ている = 未設定 (不明ではない)
+  assert.equal(s.host, '');
+  assert.equal(s.port, '');
 });
 
 test('設定済みのキーしか返らない実機の応答を、欠けたぶんを空欄として読む', () => {
-  // 実機の応答 (2026-09-10): SSID もチャネルもパスワードも入っていない
   const s = readSettings({
     id: 1,
-    keys: { STACKEE_HOST: '192.168.0.106', STACKEE_PORT: '5555' },
+    keys: { STACKEE_HOST: '192.168.0.106' },
     secret: ['STACKEE_WIFI_PASSWORD', 'CIRCUITPY_WIFI_PASSWORD', 'CIRCUITPY_WEB_API_PASSWORD'],
     bytes: 1234,
   });
   assert.equal(s.host, '192.168.0.106');
-  assert.equal(s.port, '5555');
-  assert.equal(s.ssid, '');            // 欠けている = 空欄。エラーにしない
-  assert.equal(s.channel, '');
-  assert.equal(s.passwordSet, false);  // 欠けている = 未設定
+  assert.equal(s.port, '');            // 欠けている = 空欄。エラーにしない
   assert.equal(s.missing, false);
   assert.deepEqual(s.secretKeys, [
     'STACKEE_WIFI_PASSWORD', 'CIRCUITPY_WIFI_PASSWORD', 'CIRCUITPY_WEB_API_PASSWORD',
   ]);
 });
 
-test('秘密キーは真偽値でも伏せ字文字列でも「設定済み」になる', () => {
-  const withBool = readSettings({ keys: { STACKEE_WIFI_PASSWORD: true } });
-  assert.equal(withBool.passwordSet, true);
-  const withMask = readSettings({ keys: { STACKEE_WIFI_PASSWORD: '***' } });
-  assert.equal(withMask.passwordSet, true);
-  const withFalse = readSettings({ keys: { STACKEE_WIFI_PASSWORD: false } });
-  assert.equal(withFalse.passwordSet, false);
-});
-
-test('応答そのものが無ければ「不明」のまま (未設定と区別する)', () => {
-  assert.equal(readSettings(null).passwordSet, null);
-  assert.equal(readSettings({ id: 1 }).passwordSet, null);
+test('1 件だけだった頃の STACKEE_WIFI_* の残存を見つける (無視される旧設定)', () => {
+  const s = readSettings({
+    id: 1,
+    keys: { STACKEE_WIFI_SSID: 'old-ap', STACKEE_WIFI_PASSWORD: true, STACKEE_HOST: 'h' },
+  });
+  assert.deepEqual(s.legacyWifiKeys, ['STACKEE_WIFI_SSID', 'STACKEE_WIFI_PASSWORD']);
+  assert.deepEqual(s.bootSlowingKeys, []);
 });
 
 test('起動を遅くする CIRCUITPY_WIFI_SSID の残存を見つける', () => {
   const s = readSettings({ id: 1, keys: { CIRCUITPY_WIFI_SSID: 'old-ap' } });
-  assert.equal(s.legacyWifiKey, true);
+  assert.deepEqual(s.bootSlowingKeys, ['CIRCUITPY_WIFI_SSID']);
 });
 
 test('真偽値で来た秘密キーを値として表示しない', () => {
   // keys の値が boolean なら、その中身は絶対に文字列化しない
-  const s = readSettings({ id: 1, keys: { STACKEE_WIFI_SSID: false } });
-  assert.equal(s.ssid, '');
+  const s = readSettings({ id: 1, keys: { STACKEE_HOST: false } });
+  assert.equal(s.host, '');
 });
 
 test('パスワードの有無は true/false/"***"/空文字/欠落のどれでも読める', () => {
@@ -576,12 +741,53 @@ test('パスワードの有無は true/false/"***"/空文字/欠落のどれで�
   assert.equal(readPasswordState(undefined), null);
 });
 
-test('hello を読む (対応コマンドの一覧は返らない)', () => {
-  const h = readHello({ id: 1, proto: 1, fw: 'stackee-console/1', cp: '10.3.0', board: 'M5Stack CoreS3' });
-  assert.deepEqual(h, {
-    version: 1, firmware: 'stackee-console/1', circuitpython: '10.3.0', board: 'M5Stack CoreS3',
+test('hello を読む (proto 2 は対応コマンドの一覧を返す)', () => {
+  const h = readHello({
+    id: 1, proto: 2, fw: 'stackee-console/2', cp: '10.3.0', board: 'M5Stack CoreS3',
+    features: ['wifi.list', 'wifi.add', 'wifi.remove', 'wifi.scan'],
   });
-  assert.deepEqual(readHello({}), { version: null, firmware: '', circuitpython: '', board: '' });
+  assert.deepEqual(h, {
+    version: 2,
+    firmware: 'stackee-console/2',
+    circuitpython: '10.3.0',
+    board: 'M5Stack CoreS3',
+    features: ['wifi.list', 'wifi.add', 'wifi.remove', 'wifi.scan'],
+  });
+  assert.deepEqual(readHello({}), {
+    version: null, firmware: '', circuitpython: '', board: '', features: [],
+  });
+});
+
+test('★ proto 1 (features を返さない) では複数 Wi-Fi の機能を隠す', () => {
+  // 旧ファーム: 複数 Wi-Fi 非対応。ページはこの欄ごと出さない。
+  const old = readHello({ id: 1, proto: 1, fw: 'stackee-console/1', cp: '10.3.0' });
+  assert.deepEqual(old.features, []);
+  assert.equal(supportsMultiWifi(old), false);
+  assert.equal(helloSupports(old, CMD.WIFI_ADD), false);
+  assert.equal(helloSupports(old, CMD.WIFI_SCAN), false);
+  assert.equal(old.version, 1);
+});
+
+test('機能の有無は版番号ではなく features で決める', () => {
+  // proto 2 と名乗っていても Wi-Fi を切ったビルドなら features に出ない
+  const noWifi = readHello({ proto: PROTOCOL.VERSION_MULTI_WIFI, features: ['status'] });
+  assert.equal(supportsMultiWifi(noWifi), false);
+
+  // 逆に、版番号が分からなくても features にあれば使う
+  const onlyFeatures = readHello({ features: ['wifi.list', 'wifi.add', 'wifi.remove'] });
+  assert.equal(onlyFeatures.version, null);
+  assert.equal(supportsMultiWifi(onlyFeatures), true);
+
+  const now = readHello({ proto: 2, features: ['wifi.list', 'wifi.add', 'wifi.remove', 'wifi.scan'] });
+  assert.equal(supportsMultiWifi(now), true);
+  assert.equal(helloSupports(now, CMD.WIFI_REMOVE), true);
+  assert.equal(helloSupports(now, 'wifi.forget'), false);
+  assert.equal(helloSupports(null, CMD.WIFI_LIST), false);
+});
+
+test('ページが想定するプロトコル版は 2 (複数 Wi-Fi)', () => {
+  assert.equal(PROTOCOL.VERSION, PROTOCOL.VERSION_MULTI_WIFI);
+  assert.equal(PROTOCOL.VERSION, 2);
 });
 
 test('status を日本語の表示値にする', () => {

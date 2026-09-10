@@ -22,8 +22,17 @@ export const PROTOCOL = {
   RES_PREFIX: '\x1e',
   /** デバイス → ホスト。行末。 */
   RES_TERM: '\n',
-  /** プロトコル世代。hello の応答と突き合わせる。 */
-  VERSION: 1,
+  /**
+   * プロトコル世代。hello の応答と突き合わせる。
+   *
+   * 2 で「Wi-Fi を 1 件だけ settings.toml に書く」から
+   * 「最大 8 件を /wifi_networks.json に持つ」へ変わった。
+   * ★ ただし機能の有無は版番号ではなく hello の features で見る
+   *   (supportsMultiWifi() を使う)。版番号は表示と警告のためだけに使う。
+   */
+  VERSION: 2,
+  /** 複数 Wi-Fi (wifi.list / wifi.add / wifi.remove) が入った版。 */
+  VERSION_MULTI_WIFI: 2,
 
   // JSON のキー名 (stackee_console.py の _handle() / _send() と同じ)
   KEY_ID: 'id',     // 要求 ID。デバイスはエコーするだけ
@@ -37,15 +46,27 @@ export const PROTOCOL = {
   //   したがって引数に "id" / "cmd" というキーは使えない。
 };
 
-/** v1 のコマンド名。 */
+/** コマンド名。 */
 export const CMD = {
-  HELLO: 'hello',                 // 疎通確認 + 対応コマンド一覧
+  HELLO: 'hello',                 // 疎通確認 + 対応コマンド一覧 (features)
   STATUS: 'status',               // 電池・送信先・Wi-Fi・版・稼働時間
   SETTINGS_GET: 'settings.get',   // settings.toml の読み (パスワードの値は返らない)
-  SETTINGS_SET: 'settings.set',   // settings.toml の書き (指定キーだけ差し替え)
-  WIFI_SCAN: 'wifi.scan',         // Wi-Fi スキャン (複数行応答。非対応機あり)
+  SETTINGS_SET: 'settings.set',   // settings.toml の書き (STACKEE_HOST / STACKEE_PORT だけ)
+  WIFI_LIST: 'wifi.list',         // 登録済み Wi-Fi の一覧 (proto 2〜。パスワードは返らない)
+  WIFI_ADD: 'wifi.add',           // Wi-Fi の登録・上書き (proto 2〜)
+  WIFI_REMOVE: 'wifi.remove',     // Wi-Fi の削除 (proto 2〜)
+  WIFI_SCAN: 'wifi.scan',         // Wi-Fi スキャン (非対応機あり)
   RESET: 'reset',                 // 再起動
 };
+
+/**
+ * デバイスに登録できる Wi-Fi の上限。
+ * ★ これはあくまで画面の案内用。実際に弾くのはデバイス側 ("full")。
+ */
+export const MAX_WIFI_NETWORKS = 8;
+
+/** 登録した Wi-Fi の置き場所 (デバイス内)。画面の説明文に出す。 */
+export const WIFI_NETWORKS_PATH = '/wifi_networks.json';
 
 /**
  * 失敗コード。デバイスは "error" キーに文字列を入れて返す。
@@ -70,6 +91,20 @@ export const ERR = {
   WRITE: 'write',
   /** ファイルの読み込み失敗。"read:<詳細>" */
   READ: 'read',
+
+  // --- wifi.add / wifi.remove (proto 2〜) ---
+  /** 登録数が上限に達している (MAX_WIFI_NETWORKS 件)。 */
+  FULL: 'full',
+  /** SSID が空、または 32 バイトを超えている。 */
+  BAD_SSID: 'bad_ssid',
+  /** パスワードが 8 文字未満 / 63 文字超 (空はオープンなので通る)。 */
+  BAD_PASSWORD: 'bad_password',
+  /** チャネルが 1〜14 の整数でも null でもない。 */
+  BAD_CHANNEL: 'bad_channel',
+  /** /wifi_networks.json を書けなかった。 */
+  WRITE_FAILED: 'write_failed',
+  /** wifi.remove で、その SSID が登録されていない。 */
+  NOT_FOUND: 'not_found',
   /** 応答が来なかった (ページ側で作るコード。デバイスは送らない)。 */
   TIMEOUT: 'timeout',
   /** 接続が切れた (ページ側で作るコード)。 */
@@ -83,14 +118,32 @@ export function errorHead(code) {
   return i < 0 ? s : s.slice(0, i);
 }
 
-/** settings.toml のキー名。firmware/kmk/settings.toml.example と同じ綴り。 */
+/**
+ * settings.toml のうち、このページが書き換えるキー。
+ *
+ * ★ proto 2 で Wi-Fi の 3 キーは settings.set の対象から外れた。
+ *   送るとデバイスが "denied:<KEY>" で拒否する。Wi-Fi は wifi.add で登録する。
+ */
 export const SETTING_KEYS = {
-  SSID: 'STACKEE_WIFI_SSID',
-  PASSWORD: 'STACKEE_WIFI_PASSWORD',
-  CHANNEL: 'STACKEE_WIFI_CHANNEL',
   HOST: 'STACKEE_HOST',
   PORT: 'STACKEE_PORT',
 };
+
+/**
+ * 昔の 1 件だけの Wi-Fi 設定。**もう書き換えられないし、読まれもしない。**
+ * settings.get にまだ残っていたら「無視される古い設定」として知らせる。
+ */
+export const LEGACY_WIFI_KEYS = [
+  'STACKEE_WIFI_SSID',
+  'STACKEE_WIFI_PASSWORD',
+  'STACKEE_WIFI_CHANNEL',
+];
+
+/**
+ * CircuitPython 本体の自動接続キー。残っていると **起動が最大 19 秒延びる**
+ * (wifi_autoconnect_design.md §1.1 の実測)。このページからは消せない。
+ */
+export const BOOT_SLOWING_KEYS = ['CIRCUITPY_WIFI_SSID'];
 
 // reset に引数は無い。stackee_console.py は必ず microcontroller.reset() を行う
 // (supervisor.reload() は BLE が死ぬ既知の不具合があるので実装されていない)。
@@ -333,6 +386,14 @@ export const TIMEOUT_MS = {
   // さらに打鍵中は無打鍵 300 ms を待ち、最大 3 秒で諦めて実行する。
   // 実測の往復は 243 ms だが、打鍵ガードの 3 秒を足して余裕を持たせる。
   [CMD.SETTINGS_SET]: 10000,
+  // wifi.list はファイルを読むだけ。
+  [CMD.WIFI_LIST]: 5000,
+  // ★ wifi.add / wifi.remove は settings.set と同じフラッシュ書き込み。
+  //   本体は 250 ms ほどだが、打鍵中はデバイスが無打鍵の隙を最大 3 秒待つ。
+  //   だから 10 秒。この間デバイスは他のコマンドを読まないので、
+  //   ページ側は他のボタンも押せなくする (app.js の setLongJobBusy)。
+  [CMD.WIFI_ADD]: 10000,
+  [CMD.WIFI_REMOVE]: 10000,
   // wifi.scan は全 13 チャネルを 1 応答で返す。実機で 5.09 秒。
   // (1〜11ch は settle 300 ms、12ch 以上はパッシブ走査なので 800 ms)
   [CMD.WIFI_SCAN]: 25000,
@@ -504,7 +565,24 @@ export function errorText(code, cmd) {
     case ERR.NOKV:
       return '書き換える項目がありません';
     case ERR.DENIED:
+      if (LEGACY_WIFI_KEYS.indexOf(detail) >= 0) {
+        return detail + ' はもう使いません。Wi-Fi は「Wi-Fi ネットワーク」から登録してください';
+      }
       return 'デバイスが書き換えを許していないキーです: ' + detail;
+    case ERR.FULL:
+      return '登録できるのは ' + MAX_WIFI_NETWORKS + ' 件までです。'
+        + 'いらないネットワークを削除してから追加してください';
+    case ERR.BAD_SSID:
+      return 'SSID をデバイスが受け付けませんでした (空、または 32 バイトを超えています)';
+    case ERR.BAD_PASSWORD:
+      return 'パスワードをデバイスが受け付けませんでした '
+        + '(8〜63 文字。暗号なしの Wi-Fi なら空)';
+    case ERR.BAD_CHANNEL:
+      return 'チャネルをデバイスが受け付けませんでした (1〜14、または空欄で自動)';
+    case ERR.WRITE_FAILED:
+      return WIFI_NETWORKS_PATH + ' を書けませんでした。もう一度試してください';
+    case ERR.NOT_FOUND:
+      return 'そのネットワークは登録されていません (先に消えていた可能性があります)';
     case ERR.NOTSTR:
       return '値の型が正しくありません: ' + detail;
     case ERR.VERIFY:
@@ -553,11 +631,14 @@ export function validateSsid(v) {
   return null;
 }
 
-/** パスワード: 空 (= 変更しない/未設定) か、8〜63 文字。WPA2-PSK の規定。 */
+/**
+ * パスワード: 空 (= 暗号なしのオープンなネットワーク) か、8〜63 文字。
+ * 8〜63 は WPA2-PSK の規定そのもの。
+ */
 export function validatePassword(v) {
   const s = String(v == null ? '' : v);
   if (s.length === 0) return null;
-  if (s.length < 8) return 'パスワードは 8 文字以上です';
+  if (s.length < 8) return 'パスワードは 8 文字以上です (暗号なしの Wi-Fi なら空のまま)';
   if (s.length > 63) return 'パスワードは 63 文字以内です';
   if (/[\x00-\x1f\x7f]/.test(s)) return 'パスワードに制御文字は使えません';
   return null;
@@ -593,18 +674,37 @@ export function validateHost(v) {
 }
 
 /**
- * フォーム全体を検証する。
- * @param {{ssid?, password?, channel?, host?, port?}} v
+ * 音声サーバの入力欄を検証する。
+ * ★ proto 2 では Wi-Fi はここに含まれない (wifi.add で別に登録する)。
+ * @param {{host?, port?}} v
  * @returns {{ok: boolean, errors: Object<string,string>}}
  */
 export function validateSettings(v) {
   const errors = {};
   const put = (k, msg) => { if (msg) errors[k] = msg; };
+  put('host', validateHost(v.host));
+  put('port', validatePort(v.port));
+  return { ok: Object.keys(errors).length === 0, errors };
+}
+
+/**
+ * Wi-Fi の追加・更新フォームを検証する。
+ *
+ * - ssid: 必須。UTF-8 で 32 バイトまで
+ * - password: 空 (= 暗号なし) か 8〜63 文字
+ * - channel: 空 (= 自動) か 1〜14
+ *
+ * ★ 「8 件まで」はここでは見ない。デバイスが "full" で返すのを訳して出す
+ *   (ページの手元の一覧が古い可能性があるので、判定はデバイスに任せる)。
+ * @param {{ssid?, password?, channel?}} v
+ * @returns {{ok: boolean, errors: Object<string,string>}}
+ */
+export function validateWifiEntry(v) {
+  const errors = {};
+  const put = (k, msg) => { if (msg) errors[k] = msg; };
   put('ssid', validateSsid(v.ssid));
   put('password', validatePassword(v.password));
   put('channel', validateChannel(v.channel));
-  put('host', validateHost(v.host));
-  put('port', validatePort(v.port));
   return { ok: Object.keys(errors).length === 0, errors };
 }
 
@@ -613,27 +713,48 @@ export function validateSettings(v) {
  *
  * - 値は必ず文字列にする (settings.toml は全部クォート付き文字列で書く)。
  * - **null は「その行を消す」** の意味になる (stackee_console.py の
- *   rewrite_settings())。チャネル未指定と、パスワードの明示的な消去に使う。
- * - パスワードは、空なら **キーごと省く** = デバイス側は今の値を保つ。
- *   明示的に消したいときだけ clearPassword:true を渡す (null を送る)。
+ *   rewrite_settings())。今は使っていない。
+ * - ★ Wi-Fi のキーは絶対に入れない。デバイスが "denied:<KEY>" で拒否する。
  *
- * @param {{ssid, password, channel, host, port, clearPassword?}} v
+ * @param {{host, port}} v
  * @returns {{kv: Object<string, string|null>}}
  */
 export function buildSettingsArgs(v) {
   const kv = {};
-  kv[SETTING_KEYS.SSID] = String(v.ssid == null ? '' : v.ssid);
   kv[SETTING_KEYS.HOST] = String(v.host == null ? '' : v.host).trim();
   kv[SETTING_KEYS.PORT] = String(v.port == null ? '' : v.port).trim();
-  const ch = String(v.channel == null ? '' : v.channel).trim();
-  kv[SETTING_KEYS.CHANNEL] = ch === '' ? null : ch;
-  const pw = String(v.password == null ? '' : v.password);
-  if (pw.length > 0) {
-    kv[SETTING_KEYS.PASSWORD] = pw;
-  } else if (v.clearPassword) {
-    kv[SETTING_KEYS.PASSWORD] = null;
-  }
   return { kv };
+}
+
+/**
+ * wifi.add に渡す引数を作る。同じ SSID があればデバイス側が上書きする。
+ *
+ * - ssid:     文字列 (必須)
+ * - password: 文字列。**空文字は「暗号なし」の意味**で、省略ではない
+ * - channel:  1〜14 の整数か null (null = 自動)
+ *
+ * ★ password を省くのではなく必ず送る。省くと「今の値を保つ」なのか
+ *   「暗号なし」なのかがデバイス側で決められない。
+ * @param {{ssid, password?, channel?}} v
+ * @returns {{ssid: string, password: string, channel: number|null}}
+ */
+export function buildWifiAddArgs(v) {
+  const ch = String(v.channel == null ? '' : v.channel).trim();
+  const n = ch === '' ? null : Number(ch);
+  return {
+    ssid: String(v.ssid == null ? '' : v.ssid),
+    password: String(v.password == null ? '' : v.password),
+    channel: Number.isInteger(n) ? n : null,
+  };
+}
+
+/**
+ * wifi.remove に渡す引数を作る。
+ * @param {string} ssid
+ * @returns {{ssid: string}}
+ */
+export function buildWifiRemoveArgs(ssid) {
+  return { ssid: String(ssid == null ? '' : ssid) };
 }
 
 // ---------------------------------------------------------------------------
@@ -654,34 +775,31 @@ export function readSettings(frame) {
   const keys = answered ? f.keys : {};
   // ★ デバイスは **設定済みのキーしか返さない**。実機の応答は
   //   {"keys":{"STACKEE_HOST":"192.168.0.106","STACKEE_PORT":"5555"}, ...} のように
-  //   SSID やチャネルが丸ごと欠ける。欠けているのは「未設定」であって異常ではない。
+  //   ほかのキーが丸ごと欠ける。欠けているのは「未設定」であって異常ではない。
   const get = (k) => {
     const val = keys[k];
     return val == null || typeof val === 'boolean' ? '' : String(val);
   };
+  const has = (k) => Object.prototype.hasOwnProperty.call(keys, k);
   // secret はデバイスが「これは秘密扱いのキーだ」と宣言している名前の一覧で、
-  // 「設定済み」の意味ではない。値そのものは keys 側に真偽値で入る
-  // (古い/別の実装では "***" のような伏せ字文字列で来ることもある)。
+  // 「設定済み」の意味ではない。
   const secretKeys = Array.isArray(f.secret) ? f.secret.map(String) : [];
-  let passwordSet = readPasswordState(keys[SETTING_KEYS.PASSWORD]);
-  if (passwordSet === null && answered) {
-    // 応答は返ってきたのにキーが無い = 未設定。「不明」にはしない。
-    passwordSet = false;
-  }
   return {
-    ssid: get(SETTING_KEYS.SSID),
-    channel: get(SETTING_KEYS.CHANNEL),
     host: get(SETTING_KEYS.HOST),
     port: get(SETTING_KEYS.PORT),
-    passwordSet,
     secretKeys,
     /** settings.toml がそもそも無い。 */
     missing: f.missing === 1 || f.missing === true,
     /**
-     * ★ 起動を 19 秒延ばす CIRCUITPY_WIFI_SSID が残っていないか。
+     * 1 件だけの旧 Wi-Fi 設定の残骸。**読まれないし書き換えられない**ので、
+     * 「残っているが無視される」とだけ知らせる。
+     */
+    legacyWifiKeys: LEGACY_WIFI_KEYS.filter(has),
+    /**
+     * ★ 起動を最大 19 秒延ばす CIRCUITPY_WIFI_SSID が残っていないか。
      *   残っていたらページ側で警告する (wifi_autoconnect_design.md §1.1)。
      */
-    legacyWifiKey: Object.prototype.hasOwnProperty.call(keys, 'CIRCUITPY_WIFI_SSID'),
+    bootSlowingKeys: BOOT_SLOWING_KEYS.filter(has),
   };
 }
 
@@ -690,6 +808,7 @@ export function readSettings(frame) {
  *
  * デバイス側は真偽値 (true/false) で返すのを想定しているが、設計書の
  * 「"***" を返す」案でも動くようにしてある。
+ * wifi.list の has_password と settings.get の秘密キーの両方で使う。
  * @returns {boolean|null} null は「不明」
  */
 export function readPasswordState(v) {
@@ -705,10 +824,14 @@ export function readPasswordState(v) {
 /**
  * hello の応答を読む。
  *
- * デバイスは {"proto":1,"fw":"stackee-console/1","cp":"10.3.0","board":"..."}
- * を返す。**対応コマンドの一覧は返さない** ので、使えるかどうかは
- * 実際に呼んで "unknown:<cmd>" / "unsupported" が返るかで判断する。
- * @returns {{version: number|null, firmware: string, circuitpython: string, board: string}}
+ * proto 2 のデバイスは対応コマンドの一覧を返す:
+ *   {"proto":2,"fw":"...","cp":"10.3.0","board":"...",
+ *    "features":["wifi.list","wifi.add","wifi.remove","wifi.scan"]}
+ *
+ * ★ proto 1 のデバイスは features を返さない。その場合は空配列になり、
+ *   supportsMultiWifi() が false になる = 複数 Wi-Fi の画面を出さない。
+ * @returns {{version: number|null, firmware: string, circuitpython: string,
+ *            board: string, features: string[]}}
  */
 export function readHello(frame) {
   const f = frame || {};
@@ -717,7 +840,66 @@ export function readHello(frame) {
     firmware: f.fw == null ? '' : String(f.fw),
     circuitpython: f.cp == null ? '' : String(f.cp),
     board: f.board == null ? '' : String(f.board),
+    features: Array.isArray(f.features) ? f.features.map(String) : [],
   };
+}
+
+/**
+ * hello が「このコマンドを持っている」と言っているか。
+ * @param {{features?: string[]}} hello readHello() の戻り
+ * @param {string} cmd
+ */
+export function helloSupports(hello, cmd) {
+  if (!hello || !Array.isArray(hello.features)) return false;
+  return hello.features.indexOf(String(cmd)) >= 0;
+}
+
+/**
+ * 複数 Wi-Fi の登録 (wifi.list / wifi.add / wifi.remove) に対応しているか。
+ *
+ * ★ 判定に使うのは版番号ではなく features。版番号だけを見ると、
+ *   Wi-Fi を切ったビルド (allow_wifi=False) を取りこぼす。
+ */
+export function supportsMultiWifi(hello) {
+  return helloSupports(hello, CMD.WIFI_LIST);
+}
+
+/**
+ * wifi.list の応答を読む。
+ *
+ * デバイスは {"networks":[{"ssid":"..","channel":10,"has_password":true},...],"n":N}
+ * を返す。★ **パスワードそのものは絶対に入らない** (デバイス側が返さない)。
+ * このページも「設定済み / なし」しか扱わない。
+ * @param {object} frame
+ * @returns {{networks: {ssid: string, channel: number|null, hasPassword: boolean}[],
+ *            count: number}}
+ */
+export function readNetworkList(frame) {
+  const f = frame || {};
+  const raw = Array.isArray(f.networks) ? f.networks : [];
+  const networks = [];
+  for (const n of raw) {
+    if (!n || typeof n !== 'object') continue;
+    const ssid = n.ssid == null ? '' : String(n.ssid);
+    if (ssid === '') continue;
+    networks.push({
+      ssid,
+      channel: Number.isInteger(n.channel) ? n.channel : null,
+      // 真偽値で来る想定。1/0 や伏せ字文字列で来ても読めるようにしておく。
+      hasPassword: readPasswordState(n.has_password) === true,
+    });
+  }
+  // n はデバイスが数えた件数。無ければこちらで数える。
+  return { networks, count: Number.isInteger(f.n) ? f.n : networks.length };
+}
+
+/**
+ * wifi.add / wifi.remove の応答 ({"ok":1,"n":N}) から登録件数を読む。
+ * @returns {number|null} 分からなければ null
+ */
+export function readNetworkCount(frame) {
+  const f = frame || {};
+  return Number.isInteger(f.n) ? f.n : null;
 }
 
 /**

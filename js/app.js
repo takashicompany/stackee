@@ -5,15 +5,23 @@
 
 import {
   CMD,
+  MAX_WIFI_NETWORKS,
   PROTOCOL,
   SETTING_KEYS,
+  WIFI_NETWORKS_PATH,
+  buildSettingsArgs,
+  buildWifiAddArgs,
+  buildWifiRemoveArgs,
   isUnsupported,
   readHello,
+  readNetworkCount,
+  readNetworkList,
   readScanResults,
   readSettings,
   readStatus,
+  supportsMultiWifi,
   validateSettings,
-  buildSettingsArgs,
+  validateWifiEntry,
 } from './protocol.js';
 import { StackeeSerial, unsupportedReason, USB_FILTER } from './serial.js';
 
@@ -131,6 +139,11 @@ function onConnState(state, info) {
     stopAutoStatus();
     unsupportedCommands.clear();
     $('btn-scan').hidden = false;
+    // 次に繋ぐのが別のファームかもしれないので、機能の判定はやり直す。
+    multiWifiOk = false;
+    knownSsids = new Set();
+    $('wifi-multi').hidden = false;
+    hide($('wifi-unsupported'));
   }
 }
 
@@ -161,23 +174,26 @@ async function probeHello(attempts = 6, gapMs = 500) {
 async function afterConnect() {
   hide($('proto-warning'));
   const frame = await probeHello();
+  const hello = readHello(frame);
   if (frame) {
-    const hello = readHello(frame);
     if (hello.firmware) $('st-fwver').textContent = hello.firmware;
     $('st-cpver').textContent =
       (hello.circuitpython || '—') + (hello.board ? ' / ' + hello.board : '');
-    // 自己確認: ページとファームのプロトコル版が違えば目に見える形で知らせる。
-    if (hello.version !== PROTOCOL.VERSION) {
+    // 自己確認: デバイスがページより新しいプロトコルなら、知らせるだけ知らせる。
+    // (古い側は「複数 Wi-Fi 非対応」として Wi-Fi 欄で個別に案内する)
+    if (hello.version !== null && hello.version > PROTOCOL.VERSION) {
       show($('proto-warning'),
-        'デバイスのプロトコル版は ' + (hello.version === null ? '不明' : hello.version)
+        'デバイスのプロトコル版は ' + hello.version
         + '、このページは ' + PROTOCOL.VERSION + ' です。'
-        + '表示されない項目や、保存できない設定があるかもしれません。'
-        + 'ファームウェアかこのページのどちらかを更新してください。');
+        + 'このページが古いので、表示されない項目があるかもしれません。');
     }
   }
+  // hello に答えなかった場合は「非対応」と決めつけない (null を渡す)。
+  applyWifiFeature(frame ? hello : null);
   startAutoStatus();
   await refreshStatus();
   await loadSettings();
+  await refreshNetworks();
 }
 
 $('btn-connect').addEventListener('click', async () => {
@@ -231,15 +247,24 @@ let statusBusy = false;
  * ページ側のタイムアウトには間に合わない。だから自動更新を止め、
  * ほかのボタンも押せなくする。
  *   実測: settings.set = 224 ms + 打鍵ガード最大 3 秒 / wifi.scan = 5.09 秒
+ *   wifi.add / wifi.remove も同じフラッシュ書き込みなので同じ扱いにする。
  */
 let longJobBusy = false;
 
 /** 長い仕事の間に押せなくするボタン。 */
-const LONG_JOB_BUTTONS = ['btn-save', 'btn-load', 'btn-scan', 'btn-status', 'btn-reset'];
+const LONG_JOB_BUTTONS = [
+  'btn-save', 'btn-load', 'btn-scan', 'btn-status', 'btn-reset',
+  'btn-net-reload', 'btn-net-add',
+];
 
 function setLongJobBusy(busy) {
   longJobBusy = busy;
-  for (const id of LONG_JOB_BUTTONS) $(id).disabled = busy;
+  for (const id of LONG_JOB_BUTTONS) {
+    const el = $(id);
+    if (el) el.disabled = busy;
+  }
+  // 一覧の「削除」は動的に作るので、まとめて拾う。
+  for (const b of document.querySelectorAll('.btn-net-del')) b.disabled = busy;
 }
 
 async function refreshStatus() {
@@ -270,34 +295,172 @@ function showStatus(frame) {
 }
 
 // ---------------------------------------------------------------------------
-// Wi-Fi と音声サーバ
+// Wi-Fi ネットワーク (最大 8 件)
 // ---------------------------------------------------------------------------
 
-const FIELD_IDS = {
-  ssid: 'in-ssid',
-  password: 'in-pw',
-  channel: 'in-ch',
-  host: 'in-host',
-  port: 'in-port',
-};
+/** デバイスが複数 Wi-Fi (wifi.list / wifi.add / wifi.remove) を持っているか。 */
+let multiWifiOk = false;
 
-function readForm() {
-  return {
-    ssid: $('in-ssid').value.trim(),
-    password: $('in-pw').value,
-    channel: $('in-ch').value.trim(),
-    host: $('in-host').value.trim(),
-    port: $('in-port').value.trim(),
-    clearPassword: $('chk-pw-clear').checked,
-  };
-}
+/**
+ * 直近の wifi.list に入っていた SSID。
+ * 「追加」なのか「上書き」なのかの言い分けにだけ使う。
+ */
+let knownSsids = new Set();
 
-function showFieldErrors(errors) {
-  for (const key of Object.keys(FIELD_IDS)) {
+/** Wi-Fi の入力欄 (エラー表示の対応付け)。 */
+const WIFI_FIELDS = ['ssid', 'password', 'channel'];
+/** 音声サーバの入力欄。 */
+const SERVER_FIELDS = ['host', 'port'];
+
+function showFieldErrors(fields, errors) {
+  for (const key of fields) {
     const el = $('err-' + key);
     if (!el) continue;
     if (errors[key]) show(el, errors[key]); else hide(el);
   }
+}
+
+/**
+ * hello の features を見て、複数 Wi-Fi の画面を出すかどうかを決める。
+ *
+ * ★ 版番号ではなく features で判断する (protocol.js の supportsMultiWifi)。
+ *   持っていないファームには、機能そのものを見せない。
+ */
+function applyWifiFeature(hello) {
+  multiWifiOk = supportsMultiWifi(hello);
+  $('wifi-multi').hidden = !multiWifiOk;
+  if (multiWifiOk) {
+    hide($('wifi-unsupported'));
+    return;
+  }
+  knownSsids = new Set();
+  if (hello == null) {
+    // hello 自体に応答が無かった。非対応と決めつけない。
+    show($('wifi-unsupported'),
+      'デバイスが hello に答えないので、複数 Wi-Fi に対応しているか分かりません。'
+      + '「接続する」を押し直すか、USB を挿し直してください。');
+    return;
+  }
+  show($('wifi-unsupported'),
+    '旧ファーム: 複数 Wi-Fi 非対応 — このデバイス (プロトコル '
+    + (hello.version == null ? '不明' : hello.version)
+    + ') は Wi-Fi を複数登録する機能を持っていません。'
+    + 'ファームウェアを更新すると、この欄から最大 ' + MAX_WIFI_NETWORKS
+    + ' 件まで登録できるようになります。');
+}
+
+$('btn-net-reload').addEventListener('click', () => { void refreshNetworks(); });
+
+async function refreshNetworks() {
+  if (!link.connected || !multiWifiOk || longJobBusy) return;
+  try {
+    renderNetworks(readNetworkList(await link.request(CMD.WIFI_LIST)));
+    hide($('net-error'));
+  } catch (e) {
+    if (isUnsupported(e)) {
+      // features には出ていたのに実際は使えなかった。機能ごと引っ込める。
+      unsupportedCommands.add(CMD.WIFI_LIST);
+      applyWifiFeature({ version: null, features: [] });
+      return;
+    }
+    show($('net-error'), '登録済みの Wi-Fi を読み出せません: ' + e.message);
+  }
+}
+
+/**
+ * 一覧を表に描く。
+ * ★ パスワードそのものは受け取っていないし、描かない。出すのは有無だけ。
+ */
+function renderNetworks(list) {
+  knownSsids = new Set(list.networks.map((n) => n.ssid));
+  $('net-count').textContent =
+    '登録 ' + list.count + ' / ' + MAX_WIFI_NETWORKS + ' 件';
+  $('net-table').hidden = list.networks.length === 0;
+  $('net-empty').hidden = list.networks.length > 0;
+
+  const rows = document.createDocumentFragment();
+  for (const n of list.networks) {
+    const tr = document.createElement('tr');
+    const ssid = document.createElement('td');
+    ssid.className = 'net-ssid';
+    ssid.textContent = n.ssid;
+    const ch = document.createElement('td');
+    ch.className = 'net-ch';
+    ch.textContent = n.channel == null ? '自動' : 'ch' + n.channel;
+    const pw = document.createElement('td');
+    pw.textContent = n.hasPassword ? '設定済み' : 'なし';
+    const act = document.createElement('td');
+    act.className = 'net-act';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn-net-del';
+    del.textContent = '削除';
+    del.addEventListener('click', () => { void removeNetwork(n.ssid); });
+    act.append(del);
+    tr.append(ssid, ch, pw, act);
+    rows.append(tr);
+  }
+  $('net-rows').replaceChildren(rows);
+  // 今作ったボタンにも、今の「取り込み中」状態を反映させる。
+  setLongJobBusy(longJobBusy);
+}
+
+$('btn-net-add').addEventListener('click', async () => {
+  if (!link.connected || !multiWifiOk) return;
+  hide($('net-error'));
+  hide($('net-ok'));
+  const form = {
+    ssid: $('in-ssid').value.trim(),
+    password: $('in-pw').value,
+    channel: $('in-ch').value.trim(),
+  };
+  const { ok, errors } = validateWifiEntry(form);
+  showFieldErrors(WIFI_FIELDS, errors);
+  if (!ok) return;
+
+  // 「上書きしました」と言えるかは、送る前の一覧で決める。
+  const overwrite = knownSsids.has(form.ssid);
+  setLongJobBusy(true);
+  $('net-state').textContent =
+    '書き込み中… (デバイスが打鍵の切れ目を待つので、打っていると数秒かかります)';
+  try {
+    // ★ 送る中身はログに出さない (パスワードが混ざる)。
+    const n = readNetworkCount(await link.request(CMD.WIFI_ADD, buildWifiAddArgs(form)));
+    const count = n == null ? '' : ' (登録 ' + n + ' / ' + MAX_WIFI_NETWORKS + ' 件)';
+    show($('net-ok'),
+      (overwrite ? '上書きしました' : '追加しました') + '「' + form.ssid + '」' + count
+      + '。自動接続は今後のファーム更新で有効になります。');
+    // 入力欄からパスワードを消す。ページには一切残さない。
+    $('in-pw').value = '';
+    $('in-ssid').value = '';
+    $('in-ch').value = '';
+    showFieldErrors(WIFI_FIELDS, {});
+  } catch (e) {
+    show($('net-error'), '登録できませんでした: ' + e.message);
+  } finally {
+    $('net-state').textContent = '';
+    setLongJobBusy(false);
+  }
+  await refreshNetworks();
+});
+
+async function removeNetwork(ssid) {
+  if (!link.connected || !multiWifiOk || longJobBusy) return;
+  if (!window.confirm('「' + ssid + '」の登録を消します。よろしいですか?')) return;
+  hide($('net-error'));
+  hide($('net-ok'));
+  setLongJobBusy(true);
+  $('net-state').textContent = '削除中…';
+  try {
+    await link.request(CMD.WIFI_REMOVE, buildWifiRemoveArgs(ssid));
+    show($('net-ok'), '「' + ssid + '」を削除しました。');
+  } catch (e) {
+    show($('net-error'), '削除できませんでした: ' + e.message);
+  } finally {
+    $('net-state').textContent = '';
+    setLongJobBusy(false);
+  }
+  await refreshNetworks();
 }
 
 $('btn-pw-toggle').addEventListener('click', () => {
@@ -308,74 +471,69 @@ $('btn-pw-toggle').addEventListener('click', () => {
   $('btn-pw-toggle').setAttribute('aria-pressed', String(!showing));
 });
 
-$('btn-load').addEventListener('click', () => { void loadSettings(); });
+// ---------------------------------------------------------------------------
+// 音声サーバ (STACKEE_HOST / STACKEE_PORT のみ)
+// ---------------------------------------------------------------------------
 
-function showPasswordState(state) {
-  $('pw-state').textContent =
-    state === true ? '設定済み' : state === false ? '未設定' : '不明';
-}
+$('btn-load').addEventListener('click', () => { void loadSettings(); });
 
 async function loadSettings() {
   if (!link.connected) return;
   try {
     const cur = readSettings(await link.request(CMD.SETTINGS_GET));
-    $('in-ssid').value = cur.ssid;
-    $('in-ch').value = cur.channel;
     $('in-host').value = cur.host;
     $('in-port').value = cur.port;
-    showPasswordState(cur.passwordSet);
-    hide($('wifi-error'));
+    hide($('srv-error'));
     const notes = [];
     if (cur.missing) {
       notes.push('デバイスに settings.toml がまだありません。保存すると作られます。');
     }
-    if (cur.legacyWifiKey) {
+    if (cur.legacyWifiKeys.length) {
+      notes.push('settings.toml に ' + cur.legacyWifiKeys.join(' / ')
+        + ' が残っています。これは 1 件だけ Wi-Fi を書いていた頃の設定で、'
+        + '今のファームは読みません。書き換えもできません (消すのは手作業です)。');
+    }
+    if (cur.bootSlowingKeys.length) {
       // wifi_autoconnect_design.md §1.1 の実測: AP 不在の場所で起動が 19 秒延びる
-      notes.push('settings.toml に CIRCUITPY_WIFI_SSID が残っています。'
-        + 'これがあると Wi-Fi が無い場所で起動が最大 19 秒遅くなります。'
+      notes.push('settings.toml に ' + cur.bootSlowingKeys.join(' / ')
+        + ' が残っています。これがあると Wi-Fi が無い場所で起動が最大 19 秒遅くなります。'
         + '手で削除することをおすすめします (このページからは消せません)。');
     }
-    if (notes.length) show($('wifi-note'), notes.join(' ')); else hide($('wifi-note'));
+    if (notes.length) show($('srv-note'), notes.join(' ')); else hide($('srv-note'));
   } catch (e) {
     if (isUnsupported(e)) unsupportedCommands.add(CMD.SETTINGS_GET);
-    show($('wifi-error'), isUnsupported(e) ? e.message : '設定を読み出せません: ' + e.message);
+    show($('srv-error'), isUnsupported(e) ? e.message : '設定を読み出せません: ' + e.message);
   }
 }
 
 $('btn-save').addEventListener('click', async () => {
   if (!link.connected) return;
-  hide($('wifi-error'));
-  hide($('wifi-ok'));
-  const form = readForm();
+  hide($('srv-error'));
+  hide($('srv-ok'));
+  const form = { host: $('in-host').value.trim(), port: $('in-port').value.trim() };
   const { ok, errors } = validateSettings(form);
-  showFieldErrors(errors);
+  showFieldErrors(SERVER_FIELDS, errors);
   if (!ok) return;
 
   setLongJobBusy(true);
   $('save-state').textContent =
     '保存中… (デバイスが打鍵の切れ目を待つので、打っていると数秒かかります)';
   try {
-    // ★ 保存の中身はログに出さない (パスワードが混ざる)。
     await link.request(CMD.SETTINGS_SET, buildSettingsArgs(form));
     // 書けたことをデバイスに読み直させて確かめる。
     const cur = readSettings(await link.request(CMD.SETTINGS_GET));
-    showPasswordState(cur.passwordSet);
     const mismatch = [];
-    if (cur.ssid !== form.ssid) mismatch.push(SETTING_KEYS.SSID);
     if (cur.host !== form.host) mismatch.push(SETTING_KEYS.HOST);
     if (cur.port !== form.port) mismatch.push(SETTING_KEYS.PORT);
     if (mismatch.length) {
-      show($('wifi-error'), '保存したはずの値がデバイス側と一致しません: ' + mismatch.join(', '));
+      show($('srv-error'), '保存したはずの値がデバイス側と一致しません: ' + mismatch.join(', '));
     } else {
-      show($('wifi-ok'), '保存しました。反映するには再起動してください。');
+      show($('srv-ok'), '保存しました。反映するには再起動してください。');
     }
-    // 入力欄からパスワードを消す。ページには一切残さない。
-    $('in-pw').value = '';
-    $('chk-pw-clear').checked = false;
     $('save-state').textContent = '';
   } catch (e) {
     $('save-state').textContent = '';
-    show($('wifi-error'), isUnsupported(e) ? e.message : '保存に失敗しました: ' + e.message);
+    show($('srv-error'), isUnsupported(e) ? e.message : '保存に失敗しました: ' + e.message);
   } finally {
     setLongJobBusy(false);
   }
@@ -397,7 +555,8 @@ $('btn-scan').addEventListener('click', async () => {
       $('scan-note').textContent = 'アクセスポイントが見つかりませんでした。SSID は手入力もできます。';
       return;
     }
-    $('scan-note').textContent = nets.length + ' 件見つかりました。選ぶと SSID 欄に入ります。';
+    $('scan-note').textContent =
+      nets.length + ' 件見つかりました (電波の強い順)。選ぶと SSID とチャネルが入ります。';
     const frag = document.createDocumentFragment();
     for (const n of nets) {
       const li = document.createElement('li');
@@ -534,6 +693,8 @@ function boot() {
     $('btn-connect').disabled = true;
   }
   for (const sec of document.querySelectorAll('.needs-conn')) sec.classList.add('locked');
+  // ★ 生の値は protocol.js の 1 か所だけに置く (README「プロトコル定数の置き場所」)。
+  $('wifi-path').textContent = WIFI_NETWORKS_PATH;
   const hex = (n) => n.toString(16).toUpperCase().padStart(4, '0');
   $('conn-detail').textContent = '対象: VID ' + hex(USB_FILTER.usbVendorId)
     + ' / PID ' + hex(USB_FILTER.usbProductId) + ' (M5Stack CoreS3)';

@@ -77,50 +77,99 @@
   <p id="status-error" class="notice notice-error" hidden></p>
 </section>
 
-<!-- ===================== Wi-Fi と音声サーバ ===================== -->
+<!-- ===================== Wi-Fi ネットワーク ===================== -->
 <section id="sec-wifi" class="needs-conn">
-  <h2>Wi-Fi と音声サーバ</h2>
+  <h2>Wi-Fi ネットワーク (最大 8 件)</h2>
   <p class="muted small">
-    デバイスの <code>settings.toml</code> の該当キーだけを書き換えます。
+    デバイスの <code id="wifi-path">/wifi_networks.json</code> に保存します。
+    <strong>パスワードはデバイスからも読み出せません。</strong>
+    このページに出るのは「設定済み」「なし」だけです。
+  </p>
+  <p class="muted small">
+    保存しただけでは、まだ Wi-Fi につなぎに行きません。
+    <strong>自動接続は今後のファーム更新で有効になります。</strong>
+  </p>
+
+  <!-- proto 1 (複数 Wi-Fi 非対応) のときに出す。中身は app.js が入れる。 -->
+  <p id="wifi-unsupported" class="notice notice-warn" hidden></p>
+
+  <div id="wifi-multi">
+    <div class="row">
+      <button id="btn-net-reload" type="button">読み直し</button>
+      <span id="net-count" class="muted small"></span>
+    </div>
+
+    <table class="net-table" id="net-table" hidden>
+      <thead>
+        <tr>
+          <th scope="col">SSID</th>
+          <th scope="col">チャネル</th>
+          <th scope="col">パスワード</th>
+          <th scope="col"><span class="visually-hidden">操作</span></th>
+        </tr>
+      </thead>
+      <tbody id="net-rows"></tbody>
+    </table>
+    <p id="net-empty" class="muted small" hidden>まだ 1 件も登録されていません。</p>
+
+    <h3>追加・更新</h3>
+    <p class="muted small">
+      すでに登録してある SSID を指定すると、その 1 件を上書きします。
+    </p>
+
+    <!-- ★ <form> に入れない。Chrome のパスワードマネージャに拾われにくくするため。 -->
+    <div class="fields">
+      <div class="field">
+        <label for="in-ssid">SSID <span class="req">必須</span></label>
+        <div class="row">
+          <input id="in-ssid" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="つなぐ Wi-Fi の名前">
+          <button id="btn-scan" type="button">スキャンして選ぶ</button>
+        </div>
+        <p class="err" id="err-ssid" hidden></p>
+        <div id="scan-result" hidden>
+          <p class="muted small" id="scan-note"></p>
+          <ul class="scan-list" id="scan-list"></ul>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="in-pw">パスワード <span class="opt">暗号なしなら空</span></label>
+        <div class="row">
+          <input id="in-pw" type="password" autocomplete="off" spellcheck="false" placeholder="8〜63 文字">
+          <button id="btn-pw-toggle" type="button" aria-pressed="false">表示</button>
+        </div>
+        <p class="muted small">
+          空のまま追加すると「暗号なしのネットワーク」として登録します。
+        </p>
+        <p class="err" id="err-password" hidden></p>
+      </div>
+
+      <div class="field">
+        <label for="in-ch">チャネル <span class="opt">任意</span></label>
+        <input id="in-ch" type="text" inputmode="numeric" maxlength="2" autocomplete="off" placeholder="空欄なら自動 (1〜14)">
+        <p class="err" id="err-channel" hidden></p>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="btn-net-add" type="button" class="primary">追加・更新</button>
+      <span id="net-state" class="muted small"></span>
+    </div>
+    <p id="net-error" class="notice notice-error" hidden></p>
+    <p id="net-ok" class="notice notice-ok" hidden></p>
+  </div>
+</section>
+
+<!-- ===================== 音声サーバ ===================== -->
+<section id="sec-server" class="needs-conn">
+  <h2>音声サーバ</h2>
+  <p class="muted small">
+    デバイスの <code>settings.toml</code> の
+    <code>STACKEE_HOST</code> と <code>STACKEE_PORT</code> だけを書き換えます。
     ほかの行とコメントはそのまま残ります。
   </p>
 
-  <!-- ★ <form> に入れない。Chrome のパスワードマネージャに拾われにくくするため。 -->
   <div class="fields">
-    <div class="field">
-      <label for="in-ssid">SSID <span class="req">必須</span></label>
-      <div class="row">
-        <input id="in-ssid" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="つなぐ Wi-Fi の名前">
-        <button id="btn-scan" type="button">スキャン</button>
-      </div>
-      <p class="err" id="err-ssid" hidden></p>
-      <div id="scan-result" hidden>
-        <p class="muted small" id="scan-note"></p>
-        <ul class="scan-list" id="scan-list"></ul>
-      </div>
-    </div>
-
-    <div class="field">
-      <label for="in-pw">パスワード</label>
-      <div class="row">
-        <input id="in-pw" type="password" autocomplete="off" spellcheck="false" placeholder="変更しないときは空のまま">
-        <button id="btn-pw-toggle" type="button" aria-pressed="false">表示</button>
-      </div>
-      <p class="muted small">
-        現在の設定: <strong id="pw-state">—</strong>。
-        保存済みのパスワードはデバイスからも読み出しません。
-        空のまま保存すると今の値を保ちます。
-      </p>
-      <label class="check"><input type="checkbox" id="chk-pw-clear"> 保存済みのパスワードを消去する</label>
-      <p class="err" id="err-password" hidden></p>
-    </div>
-
-    <div class="field">
-      <label for="in-ch">チャネル <span class="opt">任意</span></label>
-      <input id="in-ch" type="text" inputmode="numeric" maxlength="2" autocomplete="off" placeholder="空欄なら自動 (1〜14)">
-      <p class="err" id="err-channel" hidden></p>
-    </div>
-
     <div class="field">
       <label for="in-host">音声サーバのアドレス (STACKEE_HOST) <span class="req">必須</span></label>
       <input id="in-host" type="text" autocomplete="off" spellcheck="false" placeholder="192.168.1.10">
@@ -139,9 +188,9 @@
     <button id="btn-load" type="button">デバイスから読み直す</button>
     <span id="save-state" class="muted small"></span>
   </div>
-  <p id="wifi-note" class="notice notice-warn" hidden></p>
-  <p id="wifi-error" class="notice notice-error" hidden></p>
-  <p id="wifi-ok" class="notice notice-ok" hidden></p>
+  <p id="srv-note" class="notice notice-warn" hidden></p>
+  <p id="srv-error" class="notice notice-error" hidden></p>
+  <p id="srv-ok" class="notice notice-ok" hidden></p>
 </section>
 
 <!-- ===================== 再起動 ===================== -->
