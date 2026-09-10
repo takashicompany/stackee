@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  外部との通信をページ自身の記述で禁じる。
+  connect-src 'none' が止めるのは fetch() / fetchLater() / XMLHttpRequest /
+  WebSocket / EventSource / navigator.sendBeacon() / <a ping> の 7 つ。
+  (https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/connect-src)
+
+  Web Serial はこの一覧に入っていない = connect-src の対象ではない。
+  シリアルを制御するのは Permissions-Policy の serial ディレクティブで、
+  既定の allowlist が self なので、自分のオリジンでは何も書かなくても使える。
+  (https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy/serial)
+  つまりこの CSP は Web Serial を妨げないまま「外に一切出ない」ことを保証する。
+
+  meta 版の CSP では frame-ancestors / report-uri / sandbox は無視される。
+  埋め込み防止は GitHub Pages ではヘッダを書けないので実現できない。
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>stackee 操作盤</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<header class="head">
+  <h1>stackee 操作盤</h1>
+  <p class="lead">
+    USB でつないだ stackee (M5Stack CoreS3) の状態を見て、Wi-Fi と音声サーバの設定を書き込むページ。
+  </p>
+  <p class="privacy">
+    このページには裏側の仕組みがありません。入力した内容は
+    <strong>ブラウザから USB ケーブルを通ってデバイスへ行くだけ</strong>で、
+    どこにも送信されず、ブラウザにも保存されません。
+    Wi-Fi のパスワードも同じ経路しか通りません。
+  </p>
+</header>
+
+<main>
+
+<!-- ===================== 接続 ===================== -->
+<section id="sec-connect">
+  <h2>接続</h2>
+  <div id="browser-warning" class="notice notice-error" hidden></div>
+  <div class="row">
+    <button id="btn-connect" type="button" class="primary">接続する</button>
+    <button id="btn-disconnect" type="button" hidden>切断する</button>
+    <span id="conn-state" class="badge badge-off">未接続</span>
+  </div>
+  <p id="conn-detail" class="muted"></p>
+  <p id="proto-warning" class="notice notice-warn" hidden></p>
+  <p class="muted small">
+    「接続する」を押すとブラウザのデバイス選択ダイアログが出ます。
+    一覧に出るのは M5Stack CoreS3 (VID 303A / PID 811A) だけです。
+  </p>
+</section>
+
+<!-- ===================== 状態 ===================== -->
+<section id="sec-status" class="needs-conn">
+  <h2>状態</h2>
+  <div class="row">
+    <button id="btn-status" type="button">更新</button>
+    <label class="check"><input type="checkbox" id="chk-autostatus" checked> 10 秒ごとに自動更新</label>
+    <span id="status-updated" class="muted small"></span>
+  </div>
+  <dl class="grid" id="status-grid">
+    <div><dt>電池</dt><dd id="st-bat">—</dd></div>
+    <div><dt>充電</dt><dd id="st-chg">—</dd></div>
+    <div><dt>送信先</dt><dd id="st-hid">—</dd></div>
+    <div><dt>BLE</dt><dd id="st-ble">—</dd></div>
+    <div><dt>Wi-Fi</dt><dd id="st-wifi">—</dd></div>
+    <div><dt>CircuitPython</dt><dd id="st-cpver">—</dd></div>
+    <div><dt>stackee ファーム</dt><dd id="st-fwver">—</dd></div>
+    <div><dt>起動からの経過</dt><dd id="st-up">—</dd></div>
+  </dl>
+  <p id="status-error" class="notice notice-error" hidden></p>
+</section>
+
+<!-- ===================== Wi-Fi と音声サーバ ===================== -->
+<section id="sec-wifi" class="needs-conn">
+  <h2>Wi-Fi と音声サーバ</h2>
+  <p class="muted small">
+    デバイスの <code>settings.toml</code> の該当キーだけを書き換えます。
+    ほかの行とコメントはそのまま残ります。
+  </p>
+
+  <!-- ★ <form> に入れない。Chrome のパスワードマネージャに拾われにくくするため。 -->
+  <div class="fields">
+    <div class="field">
+      <label for="in-ssid">SSID <span class="req">必須</span></label>
+      <div class="row">
+        <input id="in-ssid" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="つなぐ Wi-Fi の名前">
+        <button id="btn-scan" type="button">スキャン</button>
+      </div>
+      <p class="err" id="err-ssid" hidden></p>
+      <div id="scan-result" hidden>
+        <p class="muted small" id="scan-note"></p>
+        <ul class="scan-list" id="scan-list"></ul>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="in-pw">パスワード</label>
+      <div class="row">
+        <input id="in-pw" type="password" autocomplete="off" spellcheck="false" placeholder="変更しないときは空のまま">
+        <button id="btn-pw-toggle" type="button" aria-pressed="false">表示</button>
+      </div>
+      <p class="muted small">
+        現在の設定: <strong id="pw-state">—</strong>。
+        保存済みのパスワードはデバイスからも読み出しません。
+        空のまま保存すると今の値を保ちます。
+      </p>
+      <label class="check"><input type="checkbox" id="chk-pw-clear"> 保存済みのパスワードを消去する</label>
+      <p class="err" id="err-password" hidden></p>
+    </div>
+
+    <div class="field">
+      <label for="in-ch">チャネル <span class="opt">任意</span></label>
+      <input id="in-ch" type="text" inputmode="numeric" maxlength="2" autocomplete="off" placeholder="空欄なら自動 (1〜14)">
+      <p class="err" id="err-channel" hidden></p>
+    </div>
+
+    <div class="field">
+      <label for="in-host">音声サーバのアドレス (STACKEE_HOST) <span class="req">必須</span></label>
+      <input id="in-host" type="text" autocomplete="off" spellcheck="false" placeholder="192.168.1.10">
+      <p class="err" id="err-host" hidden></p>
+    </div>
+
+    <div class="field">
+      <label for="in-port">ポート (STACKEE_PORT) <span class="req">必須</span></label>
+      <input id="in-port" type="text" inputmode="numeric" maxlength="5" autocomplete="off" placeholder="5555">
+      <p class="err" id="err-port" hidden></p>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="btn-save" type="button" class="primary">保存する</button>
+    <button id="btn-load" type="button">デバイスから読み直す</button>
+    <span id="save-state" class="muted small"></span>
+  </div>
+  <p id="wifi-note" class="notice notice-warn" hidden></p>
+  <p id="wifi-error" class="notice notice-error" hidden></p>
+  <p id="wifi-ok" class="notice notice-ok" hidden></p>
+</section>
+
+<!-- ===================== 再起動 ===================== -->
+<section id="sec-reset" class="needs-conn">
+  <h2>再起動</h2>
+  <p class="muted small">
+    設定を反映させたいときに使います。再起動のあいだ USB キーボードとしても一時的に切れます。
+    実測では、指示から約 1.7 秒でデバイスが切れ、約 5.2 秒で戻り、
+    約 8.5 秒で応答できるようになります。ページはこの流れを待ってから開き直し、
+    最大 30 秒まで自動で試みます。
+  </p>
+  <p class="muted small">
+    デバイスが行うのはチップ全体の再起動 (<code>microcontroller.reset()</code>) です。
+    速いだけの「ソフト再読込」(<code>supervisor.reload()</code>) は
+    <strong>BLE が繋がらなくなる既知の不具合</strong>があるため用意していません。
+  </p>
+  <div class="row">
+    <button id="btn-reset" type="button">再起動する</button>
+    <span id="reset-state" class="muted small"></span>
+  </div>
+  <p id="reset-error" class="notice notice-error" hidden></p>
+</section>
+
+<!-- ===================== ログ ===================== -->
+<section id="sec-log">
+  <h2>ログ</h2>
+  <p class="statusbar">
+    <span class="statusbar-label">ステータスバー</span>
+    <span id="statusbar-text">—</span>
+  </p>
+  <div class="row">
+    <button id="btn-log-pause" type="button" aria-pressed="false">一時停止</button>
+    <button id="btn-log-clear" type="button">消去</button>
+    <label class="check"><input type="checkbox" id="chk-filter-kmk"> KMK のキーイベント行を隠す</label>
+    <span id="log-count" class="muted small"></span>
+  </div>
+  <pre id="log" class="log" aria-live="off"></pre>
+</section>
+
+</main>
+
+<footer class="foot">
+  <p class="muted small">
+    対応ブラウザ: デスクトップ版の Chrome / Edge / Opera のみ。
+    デバイス側に <code>stackee_console.py</code> を含むファームウェアが必要です。
+  </p>
+</footer>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
