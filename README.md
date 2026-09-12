@@ -2,7 +2,8 @@
 
 M5Stack CoreS3 を使った自作キーボード **stackee** の公開リポジトリ。
 
-このリポジトリの中身は **「stackee 操作盤」** という 1 枚の Web ページです。
+`web/` に静的サイト **「stackee 操作盤」**、`server/` に Mac などで動かすサーバー側コードを置きます。
+音声受信サーバーの起動・API は [server/README.md](server/README.md) を参照してください。
 
 - 公開先: https://takashicompany.github.io/stackee/
 
@@ -89,22 +90,36 @@ SSID の手入力だけになります。
 **`file://` では動きません。** Web Serial は secure context (https: か
 `localhost`) でしか使えず、`file://` では `navigator.serial` がそもそも存在しません。
 
-このフォルダで簡易サーバを立てて `http://localhost:8000/` を開いてください。
+`web/` を配信する簡易サーバを立てて `http://localhost:8000/` を開いてください。
 
 ```sh
 cd <このリポジトリ>
-python3 -m http.server 8000
+python3 -m http.server 8000 --directory web
 ```
 
-ビルド手順はありません。`index.html` と `js/*.js` を直接編集すれば、
+ビルド手順はありません。`web/index.html` と `web/js/*.js` を直接編集すれば、
 リロードするだけで反映されます。
+
+---
+
+## GitHub Pages への公開
+
+公開リポジトリ `takashicompany/stackee` の **Settings → Pages → Source** を
+**GitHub Actions** に設定します。`main` への push または手動実行で、
+`.github/workflows/pages.yml` が `web/` の内容だけを公開します。
+URL は引き続き https://takashicompany.github.io/stackee/ です。
+
+`server/`、テスト、README は Pages の配信対象に含みません。
+サーバーは Mac などのホストで別途実行する想定です。
+
+参考: [GitHub 公式のカスタムワークフロー手順](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
 
 ---
 
 ## プライバシー
 
-- **裏側の仕組み (サーバ) がありません。** GitHub Pages が静的ファイルを
-  配っているだけです。
+- **操作盤はブラウザだけで動きます。** GitHub Pages が `web/` の静的ファイルを
+  配っているだけです。`server/` は Pages の配信対象に含めません。
 - **入力した内容はどこにも送信されません。** Wi-Fi のパスワードは
   「ブラウザ → USB ケーブル → デバイス」の 1 経路しか通りません。
 - **ブラウザにも保存しません。** `localStorage` / `sessionStorage` / Cookie を
@@ -149,22 +164,25 @@ python3 -m http.server 8000
 
 ```
 .
-├── index.html                 操作盤 (画面の構造)
-├── style.css                  見た目 (ダーク / ライトは OS の設定に追従)
-├── js/
-│   ├── protocol.js            プロトコル。DOM に触れない純粋な処理だけ
-│   ├── serial.js              Web Serial の開閉・受信ループ・再接続
-│   └── app.js                 画面の組み立てとイベント配線
+├── web/                      GitHub Pages の配信対象
+│   ├── index.html            操作盤
+│   ├── style.css             見た目
+│   ├── js/
+│   │   ├── protocol.js       プロトコル処理
+│   │   ├── serial.js         Web Serial の制御
+│   │   └── app.js            画面とイベント
+│   └── .nojekyll
+├── server/                   Mac 用音声受信サーバー (codex exec)
 ├── test/
-│   └── protocol.test.mjs      protocol.js の単体テスト
-├── package.json               Node に .js を ES モジュールとして読ませるためだけのもの
-│                              (依存パッケージなし。ビルドもしない)
-└── .nojekyll                  GitHub Pages の Jekyll 処理を止める
+│   └── protocol.test.mjs     web/js/protocol.js の単体テスト
+├── package.json              Node 用の ES モジュール指定 (依存なし)
+├── .github/workflows/pages.yml  web/ だけを Pages に公開
+└── README.md
 ```
 
 ### プロトコル定数の置き場所
 
-デバイスとやりとりする **合図はすべて `js/protocol.js` の先頭にまとめて** あります
+デバイスとやりとりする **合図はすべて `web/js/protocol.js` の先頭にまとめて** あります
 (`PROTOCOL` / `CMD` / `ERR` / `SETTING_KEYS`)。
 ほかのファイルはそこから読むだけで、生の値を書いていません。
 
