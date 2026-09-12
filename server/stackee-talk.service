@@ -1,0 +1,16 @@
+[Unit]
+Description=stackee Codex voice conversation server
+Wants=stackee-voicevox.service
+After=stackee-voicevox.service
+
+[Service]
+WorkingDirectory=%h/works/stackee
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=STACKEE_BIND_HOST=0.0.0.0
+EnvironmentFile=-%h/.config/stackee-talk.env
+ExecStart=/usr/bin/python3 %h/works/stackee/server/stackee_server.py --host ${STACKEE_BIND_HOST} --whisper %h/.local/share/stackee/whisper.cpp/build-vulkan/bin/whisper-cli --whisper-model %h/.local/share/stackee/models/ggml-large-v3-turbo-q5_0.bin --tts voicevox --speaker 3
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

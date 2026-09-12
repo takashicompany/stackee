@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import wave
 
 import stackee_server as s
@@ -20,6 +21,49 @@ def wav(seconds=.5, rate=16000, value=1000):
         w.setframerate(rate)
         w.writeframes(array.array('h', [value] * int(rate * seconds)).tobytes())
     return out.getvalue()
+
+
+class ReplyTests(unittest.TestCase):
+    def test_remove_links_preserving_spoken_content(self):
+        cases = [
+            ('[AP通信](https://apnews.com/article/123)によると、勝ちました。',
+             'AP通信によると、勝ちました。'),
+            ('[説明](https://example.org/a_(b) "タイトル")を見ました。', '説明を見ました。'),
+            ('結果はこちら https://example.com/a?q=1&b=2。勝ちました。', '結果はこちら。勝ちました。'),
+            ('答えです（https://example.com）。次の話です。', '答えです。次の話です。'),
+            ('答えです (https://example.com/a_(b))。', '答えです。'),
+            ('[資料][ref]による説明。\n[ref]: https://example.com/path', '資料による説明。'),
+            ('参考 <HTTPS://EXAMPLE.COM> `www.example.jp/news` example.co.jp/a //example.com/a', '参考'),
+            ('勝ちました。citeturn0search0', '勝ちました。'),
+            ('値は3.14、版は1.2.3です。', '値は3.14、版は1.2.3です。'),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(s.clean_reply(raw), expected)
+
+    def test_url_only_has_speakable_fallback(self):
+        for raw in ('https://example.com', '[https://example.com](https://example.com)', '<https://example.com>。'):
+            reply = s.clean_reply(raw)
+            self.assertTrue(reply)
+            self.assertNotIn('example', reply)
+            self.assertNotIn('http', reply)
+
+    def test_pipeline_sanitizes_before_limit_synthesis_response_and_history(self):
+        p = s.Pipeline('unused')
+        raw = 'https://example.com/' + 'x' * 200 + '\n[資料](https://example.org)によると、晴れです。'
+        def run(argv, cwd, input=None):
+            if argv[0] == 'whisper-cli':
+                return '天気は？'
+            self.assertIn('絶対に含めない', input.decode())
+            Path(argv[argv.index('-o') + 1]).write_text(raw)
+            return ''
+        p.run = run
+        with patch.object(p, 'synthesize', return_value=b'\0\1' * 8000) as synth:
+            result, audio = p(wav())
+        expected = '資料によると、晴れです。'
+        self.assertEqual(synth.call_args.args[0], expected)
+        self.assertEqual(result['reply'], expected)
+        self.assertEqual(p.history[-1]['assistant'], expected)
 
 
 class AudioTests(unittest.TestCase):
@@ -81,6 +125,68 @@ class AudioTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'timed out'):
                 p.run([sys.executable, '-c', 'import time; time.sleep(10)'], tmp)
         self.assertIsNone(p.process)
+
+
+class VoicevoxTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.audio = wav(value=20000)
+        owner = self
+        class Engine(s.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'[{"styles":[{"id":3}]}]')
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers['Content-Length']))
+                owner.calls.append((self.path, body))
+                self.send_response(200)
+                self.end_headers()
+                if self.path.startswith('/audio_query?'):
+                    self.wfile.write(b'{"outputSamplingRate":24000,"outputStereo":true}')
+                else:
+                    self.wfile.write(owner.audio)
+        self.server = s.ThreadingHTTPServer(('127.0.0.1', 0), Engine)
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.start()
+        self.pipeline = s.Pipeline('unused', tts='voicevox',
+            voicevox_url='http://127.0.0.1:' + str(self.server.server_port))
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+    def test_japanese_query_format_and_peak(self):
+        audio = self.pipeline.synthesize('こんにちは & 元気？', Path('/unused'))
+        self.assertEqual(len(audio), 16000)
+        self.assertLessEqual(s.peak(audio), 8191)
+        query = s.urllib.parse.parse_qs(s.urllib.parse.urlsplit(self.calls[0][0]).query)
+        self.assertEqual(query['text'], ['こんにちは & 元気？'])
+        self.assertEqual(query['speaker'], ['3'])
+        synthesis = json.loads(self.calls[1][1])
+        self.assertEqual(synthesis['outputSamplingRate'], 16000)
+        self.assertIs(synthesis['outputStereo'], False)
+
+    def test_invalid_and_oversized_audio_rejected(self):
+        for data in (wav(rate=24000), wav()[:-4], b'x' * (s.MAX_REPLY_BYTES + 4097)):
+            self.audio = data
+            with self.assertRaises((ValueError, RuntimeError)):
+                self.pipeline.synthesize('test', Path('/unused'))
+
+    def test_linux_check_does_not_require_say_and_validates_speaker(self):
+        with tempfile.NamedTemporaryFile() as model:
+            self.pipeline.model = model.name
+            with patch.object(s.shutil, 'which', side_effect=lambda cmd: None if cmd == 'say' else cmd):
+                self.pipeline.check()
+                self.assertEqual(self.calls[0][0], '/initialize_speaker?speaker=3&skip_reinit=true')
+                self.pipeline.speaker = 999999
+                with self.assertRaisesRegex(RuntimeError, 'speaker not found'):
+                    self.pipeline.check()
 
 
 class HttpTests(unittest.TestCase):

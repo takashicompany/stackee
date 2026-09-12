@@ -2,7 +2,7 @@
 
 M5Stack CoreS3 を使った自作キーボード **stackee** の公開リポジトリ。
 
-`web/` に静的サイト **「stackee 操作盤」**、`server/` に Mac などで動かすサーバー側コードを置きます。
+`web/` に静的サイト **「stackee 操作盤」**、`server/` に Mac / Linux で動かすサーバー側コードを置きます。
 音声受信サーバーの起動・API は [server/README.md](server/README.md) を参照してください。
 
 - 公開先: https://takashicompany.github.io/stackee/

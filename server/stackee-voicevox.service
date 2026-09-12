@@ -1,0 +1,11 @@
+[Unit]
+Description=VOICEVOX GPU engine for stackee
+
+[Service]
+WorkingDirectory=%h/.local/share/stackee/voicevox-0.25.2
+ExecStart=%h/.local/share/stackee/voicevox-0.25.2/run --use_gpu --host 127.0.0.1 --port 50021
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

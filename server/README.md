@@ -1,14 +1,15 @@
-# stackee 音声サーバー (Mac)
+# stackee 音声サーバー (Mac / Linux)
 
 同じ Wi-Fi の CoreS3 から音声を受け取り、ローカルの `whisper-cli` で文字起こし、
-`codex exec` で返答生成、macOS の `say` で音声合成します。
+`codex exec` で返答生成、macOS の `say` または VOICEVOX ENGINE で音声合成します。
 返答も HTTP で S3 に返すため、マイク・スピーカーとも USB 音声転送は不要です。
 返答のピーク音量はフルスケールの25%以下に抑えます。小さい音は増幅しません。
 
 ## 起動
 
 Python 3.10 以降、`whisper-cli`、Whisper のモデルファイル、ログイン済みの Codex CLI、
-macOS の `say` (Kyoko) が必要です。Python の外部パッケージは不要です。
+音声合成エンジンが必要です。Mac は `say` (Kyoko)、Linux は VOICEVOX が既定です。
+Python の外部パッケージは不要です。
 
 公開リポジトリのルートから:
 
@@ -27,10 +28,79 @@ python3 public/server/stackee_server.py \
 `--port`、`--host`、`--codex-model`、`--voice` で変更できます。
 `--echo` は Codex を呼ばず、文字起こし結果をそのまま読み上げる疎通試験です。
 
+### Linux / VOICEVOX
+
+[VOICEVOX ENGINE](https://github.com/VOICEVOX/voicevox_engine) の Linux NVIDIA 版を
+ダウンロード・展開し、GPU を有効にして起動します。CPU 版も同じ API で使えます。
+
+```sh
+./run --use_gpu --host 127.0.0.1 --port 50021
+```
+
+Docker と NVIDIA Container Toolkit が導入済みなら、公式イメージも使えます。
+
+```sh
+docker run --rm --gpus all -p 127.0.0.1:50021:50021 \
+  voicevox/voicevox_engine:nvidia-latest
+```
+
+エンジンの起動後、別のターミナルで:
+
+```sh
+python3 server/stackee_server.py \
+  --whisper-model /path/to/ggml-model.bin \
+  --tts voicevox --voicevox-url http://127.0.0.1:50021 --speaker 3
+```
+
+`--whisper` と `--codex` で実行ファイルの絶対パスを指定できます。
+`--speaker` は `/speakers` にあるスタイル ID で、既定の 3 は「ずんだもん（ノーマル）」です。
+音声利用時は [VOICEVOX](https://voicevox.hiroshiba.jp/term/) と選択した音声の利用条件に従ってください。
+クレジット例: `VOICEVOX:ずんだもん`。起動時に選択した音声モデルを初期化します。
+`--voice` は `say` 用の設定です。Mac でも `--tts voicevox` を指定できます。
+
+VOICEVOX へ 16kHz・モノラルを指定して合成し、返却 WAV の形式・長さを検証してから
+音量制限を適用します。S3 に返す PCM と HTTP API は両方式で共通です。
+
+#### ログイン後の自動起動
+
+`stackee-voicevox.service` と `stackee-talk.service` は systemd のユーザーサービス例です。
+リポジトリを `~/works/stackee`、VOICEVOX 0.25.2 を
+`~/.local/share/stackee/voicevox-0.25.2` に置く構成になっています。
+Whisper は `~/.local/share/stackee/whisper.cpp/build-vulkan/bin/whisper-cli`、
+モデルは `~/.local/share/stackee/models/ggml-large-v3-turbo-q5_0.bin` を参照します。
+配置が違う場合はサービスファイルを編集してください。
+別のサービスが他のインターフェースで同じポートを使っている場合などは、
+`~/.config/stackee-talk.env` に `STACKEE_BIND_HOST=192.168.1.10` のように
+サーバーの LAN アドレスを指定し、会話サーバーを再起動できます。
+
+Whisper の GPU 利用には [whisper.cpp](https://github.com/ggml-org/whisper.cpp) を
+`-DGGML_VULKAN=ON` でビルドする方法があります。Ubuntu では `cmake`、C/C++ コンパイラ、
+`libvulkan-dev`、`glslc`、`spirv-headers` が必要です。VOICEVOX の GPU 利用とは独立した設定です。
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp server/stackee-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now stackee-voicevox.service stackee-talk.service
+```
+
+起動直後は VOICEVOX の準備完了まで会話サーバーが再試行します。
+状態・ログ・停止:
+
+```sh
+systemctl --user status stackee-voicevox stackee-talk
+journalctl --user -u stackee-voicevox -u stackee-talk -n 50
+systemctl --user disable --now stackee-talk stackee-voicevox
+```
+
 Codex は一時ディレクトリで `exec --ephemeral --ignore-user-config --sandbox read-only`
 として動き、最終メッセージを `-o` で受け取ります。個人の MCP 設定やプロジェクトの
 作業指示は読み込みません。会話は直近4往復をサーバーのメモリに保持します。
 モデルは Codex CLI の既定値、または `--codex-model` で指定したものです。
+Codex には URL・ドメイン名・出典リンクを含めないよう指示します。
+生成後にも URL と引用マーカーを除去し、Markdown リンクは表示名だけを残します。
+除去は文字数制限の前に行い、音声合成・画面へ返す回答・会話履歴に共通で適用します。
+URL しかなく本文が残らない場合は、回答をまとめられなかった旨の短い文に置き換えます。
 
 ## S3 側
 
@@ -73,8 +143,31 @@ MIME不一致は `415`。結果は最大8件・5分間、メモリだけに保�
 送信先はURLで独立しているため、同じ API を持つ外部サーバーへ移せます。
 現段階は信頼できる LAN 内の開発用 HTTP で、認証と TLS は未実装です。
 外部公開する段階で HTTPS・認証と S3 の HTTPS 対応を追加します。
-Mac 固有なのは `say` の音声合成部分です。別OSへ移す場合は置き換えが必要です。
+Linux では `--tts voicevox` で音声合成を行います。
 GitHub Pages は `web/` の静的サイト専用で、このサーバーを実行する場所ではありません。
+
+## ソースコードの更新・反映
+
+ソースコードは GitHub 経由で受け渡します。親リポジトリで開発する場合は、
+変更をコミットして `scripts/public-subtree.sh push` を実行します。
+配置先ではソースを直接コピーせず、公開リポジトリを更新します。
+
+```sh
+cd ~/works/stackee
+git pull --ff-only
+python3 -m unittest discover -s server -p 'test_*.py'
+# サービス定義を更新した場合
+cp server/stackee-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+# 処理中の会話が完了してから再起動
+systemctl --user restart stackee-talk
+git log -1 --oneline
+systemctl --user is-active stackee-talk stackee-voicevox
+```
+
+`/health` の `busy` が false であることを確認してから再起動します。
+ローカル変更がある場合は保全してから pull します。
+接続アドレスなどのホスト固有設定は `~/.config/stackee-talk.env` に置きます。
 
 ## テスト
 
