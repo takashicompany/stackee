@@ -48,22 +48,16 @@ class ReplyTests(unittest.TestCase):
             self.assertNotIn('example', reply)
             self.assertNotIn('http', reply)
 
-    def test_pipeline_sanitizes_before_limit_synthesis_response_and_history(self):
+    def test_pipeline_sanitizes_before_limit_synthesis_and_response(self):
         p = s.Pipeline('unused')
         raw = 'https://example.com/' + 'x' * 200 + '\n[資料](https://example.org)によると、晴れです。'
-        def run(argv, cwd, input=None):
-            if argv[0] == 'whisper-cli':
-                return '天気は？'
-            self.assertIn('絶対に含めない', input.decode())
-            Path(argv[argv.index('-o') + 1]).write_text(raw)
-            return ''
-        p.run = run
-        with patch.object(p, 'synthesize', return_value=b'\0\1' * 8000) as synth:
+        p.run = lambda argv, cwd, input=None: '天気は？'
+        with patch.object(p.agent, 'ask', return_value=raw), \
+                patch.object(p, 'synthesize', return_value=b'\0\1' * 8000) as synth:
             result, audio = p(wav())
         expected = '資料によると、晴れです。'
         self.assertEqual(synth.call_args.args[0], expected)
         self.assertEqual(result['reply'], expected)
-        self.assertEqual(p.history[-1]['assistant'], expected)
 
 
 class AudioTests(unittest.TestCase):
@@ -88,35 +82,26 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(result['state'], 'ignored')
         self.assertEqual(audio, b'')
 
-    def test_pipeline_uses_codex_final_file_and_history(self):
+    def test_pipeline_reuses_agent_and_passes_only_current_message(self):
         p = s.Pipeline('unused')
-        calls = []
-        def run(argv, cwd, input=None):
-            calls.append((argv, input))
-            if argv[0] == 'whisper-cli':
-                return 'こんにちは'
-            if argv[0] == 'codex':
-                self.assertIn('exec', argv)
-                self.assertIn('read-only', argv)
-                self.assertIn('--ignore-user-config', argv)
-                self.assertIn('ユーザー: こんにちは', input.decode())
-                Path(argv[argv.index('-o') + 1]).write_text('こんにちは。')
-                return 'progress log, not the answer'
-            Path(argv[argv.index('-o') + 1]).write_bytes(wav())
-            return ''
-        p.run = run
-        result, audio = p(wav())
-        self.assertEqual(result['reply'], 'こんにちは。')
-        self.assertEqual(len(audio), 16000)
-        self.assertEqual(p.history, [{'user': 'こんにちは', 'assistant': 'こんにちは。'}])
-        self.assertEqual([x[0][0] for x in calls], ['whisper-cli', 'codex', 'say'])
+        p.run = lambda argv, cwd, input=None: 'こんにちは'
+        agent = p.agent
+        with patch.object(agent, 'ask', return_value='こんにちは。') as ask, \
+                patch.object(p, 'synthesize', return_value=b'\0\1' * 8000):
+            for _ in range(2):
+                result, audio = p(wav())
+                self.assertEqual(result['reply'], 'こんにちは。')
+                self.assertEqual(len(audio), 16000)
+                self.assertIs(p.agent, agent)
+        self.assertEqual(ask.call_count, 2)
+        self.assertEqual(ask.call_args.args, ('こんにちは',))
 
     def test_codex_empty_final_is_error(self):
         p = s.Pipeline('unused')
         p.run = lambda argv, cwd, input=None: 'こんにちは'
-        with self.assertRaisesRegex(RuntimeError, 'no final message'):
-            p(wav())
-        self.assertEqual(p.history, [])
+        with patch.object(p.agent, 'ask', return_value=''):
+            with self.assertRaisesRegex(RuntimeError, 'no final message'):
+                p(wav())
 
     def test_timeout_kills_subprocess(self):
         import sys
@@ -181,7 +166,8 @@ class VoicevoxTests(unittest.TestCase):
     def test_linux_check_does_not_require_say_and_validates_speaker(self):
         with tempfile.NamedTemporaryFile() as model:
             self.pipeline.model = model.name
-            with patch.object(s.shutil, 'which', side_effect=lambda cmd: None if cmd == 'say' else cmd):
+            with patch.object(self.pipeline.agent, 'start'), \
+                    patch.object(s.shutil, 'which', side_effect=lambda cmd: None if cmd == 'say' else cmd):
                 self.pipeline.check()
                 self.assertEqual(self.calls[0][0], '/initialize_speaker?speaker=3&skip_reinit=true')
                 self.pipeline.speaker = 999999

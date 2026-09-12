@@ -1,6 +1,7 @@
 # ソースコードの受け渡し
 
 - ソースコードの受け渡し・デプロイは GitHub 経由に統一する。
+- サーバーは基本的にリポジトリを `git clone` して起動する。ソースの単独コピーで構築しない。
 - 開発元で変更をコミットして GitHub に push し、配置先では `git pull --ff-only` で取得する。
 - 開発元が親リポジトリの `public/` subtree の場合、push は親の `scripts/public-subtree.sh push` を使う。
 - scp/rsync によるソースコードの直接コピーや、SSH 越しに配置先のソースを直接書き換える方法で反映しない。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LAN voice receiver: WAV → whisper-cli → codex exec → say or VOICEVOX.
+"""LAN voice receiver: WAV → whisper-cli → persistent Codex agent → say or VOICEVOX.
 
 Python standard library only. POST /talk accepts WAV; poll the returned Location
 for status, then GET its /audio endpoint for 16 kHz, signed little-endian PCM.
@@ -26,20 +26,13 @@ import urllib.parse
 import urllib.request
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from stackee_agent import CodexAgent
 
 RATE = 16000
 MAX_SECONDS = 30
 MAX_UPLOAD = RATE * 2 * MAX_SECONDS + 4096
 MAX_REPLY_BYTES = RATE * 2 * MAX_SECONDS
-PROMPT = (
-    "あなたはキーボードの音声会話アシスタントです。日本語の話し言葉で、"
-    "1〜2文、60文字以内で返答してください。見出し、箇条書き、URL、"
-    "コード、絵文字は不要です。ツールの使用、ファイルの読み書き、"
-    "コマンド実行はせず、会話にだけ答えてください。"
-    "返答はそのまま音声で読み上げます。URL、ドメイン名、リンク、"
-    "Markdownのリンク記法、出典リンク、引用マーカーを絶対に含めないでください。"
-    "参照先の案内ではなく、質問への答えを普通の文章だけで伝えてください。"
-)
+AGENT_DIR = Path(__file__).resolve().parent / "agent"
 
 
 def read_audio(data):
@@ -120,7 +113,7 @@ def clean_reply(text):
 class Pipeline:
     def __init__(self, model, whisper="whisper-cli", codex="codex", codex_model=None,
                  voice="Kyoko", timeout=120, echo=False, tts="say",
-                 voicevox_url="http://127.0.0.1:50021", speaker=3):
+                 voicevox_url="http://127.0.0.1:50021", speaker=3, agent_dir=None):
         self.model = str(Path(model).resolve())
         self.whisper = whisper
         self.codex = codex
@@ -133,7 +126,7 @@ class Pipeline:
         self.tts = tts
         self.voicevox_url = voicevox_url.rstrip("/")
         self.speaker = speaker
-        self.history = []
+        self.agent = None if echo else CodexAgent(agent_dir or AGENT_DIR, codex, codex_model, timeout)
         self.lock = threading.Lock()
         self.process = None
         self.closed = False
@@ -151,6 +144,8 @@ class Pipeline:
                 raise RuntimeError("VOICEVOX speaker not found: " + str(self.speaker))
             self.voicevox_request("/initialize_speaker?" + urllib.parse.urlencode(
                 {"speaker": self.speaker, "skip_reinit": "true"}), b"")
+        if self.agent:
+            self.agent.start()
 
     def voicevox_request(self, path, data=None):
         request = urllib.request.Request(self.voicevox_url + path, data=data,
@@ -211,6 +206,8 @@ class Pipeline:
             self.closed = True
             if self.process:
                 self.kill(self.process)
+        if self.agent:
+            self.agent.close()
 
     def __call__(self, data):
         pcm = read_audio(data)
@@ -227,17 +224,7 @@ class Pipeline:
             if self.echo:
                 reply = text
             else:
-                out = root / "reply.txt"
-                argv = [self.codex, "exec", "--ephemeral", "--ignore-user-config",
-                        "--skip-git-repo-check", "--sandbox", "read-only",
-                        "--color", "never", "-o", str(out)]
-                if self.codex_model:
-                    argv += ["--model", self.codex_model]
-                argv += ["-"]
-                prompt = PROMPT + "\n\nこれまでの会話:\n" + json.dumps(
-                    self.history[-4:], ensure_ascii=False) + "\nユーザー: " + text
-                self.run(argv, tmp, input=prompt.encode("utf-8"))
-                reply = out.read_text().strip() if out.exists() else ""
+                reply = self.agent.ask(text)
                 if not reply:
                     raise RuntimeError("codex returned no final message")
             # Keep synthesis and device memory bounded even when the model ignores brevity.
@@ -245,8 +232,6 @@ class Pipeline:
             audio = self.synthesize(reply, root)
             if len(audio) > MAX_REPLY_BYTES:
                 raise RuntimeError("Reply audio exceeds device limit")
-            self.history.append({"user": text, "assistant": reply})
-            del self.history[:-4]
             return {"state": "done", "transcript": text, "reply": reply}, audio
 
 
@@ -322,7 +307,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            return self.send(200, {"ok": True, "agent": "codex exec", "busy": self.server.jobs.busy})
+            agent = getattr(self.server.jobs.pipeline, "agent", None)
+            return self.send(200, {"ok": True, "agent": "codex app-server", "busy": self.server.jobs.busy,
+                                   "conversation": agent.status() if agent else None})
         match = re.fullmatch(r"/jobs/([0-9a-f]{32})(/audio)?", self.path)
         item = self.server.jobs.get(match[1]) if match else None
         if not item:
@@ -378,6 +365,7 @@ def main():
     parser.add_argument("--whisper", default="whisper-cli")
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--codex-model")
+    parser.add_argument("--agent-dir", type=Path, default=AGENT_DIR)
     parser.add_argument("--voice", default="Kyoko")
     parser.add_argument("--tts", choices=("say", "voicevox"),
                         default="say" if sys.platform == "darwin" else "voicevox")
@@ -389,9 +377,13 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     pipeline = Pipeline(args.whisper_model, args.whisper, args.codex,
                         args.codex_model, args.voice, args.timeout, args.echo,
-                        args.tts, args.voicevox_url, args.speaker)
-    pipeline.check()
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+                        args.tts, args.voicevox_url, args.speaker, args.agent_dir)
+    try:
+        pipeline.check()
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    except BaseException:
+        pipeline.close()
+        raise
     server.jobs = Jobs(pipeline)
     def stop(signum, frame):
         pipeline.close()

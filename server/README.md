@@ -1,7 +1,7 @@
 # stackee 音声サーバー (Mac / Linux)
 
 同じ Wi-Fi の CoreS3 から音声を受け取り、ローカルの `whisper-cli` で文字起こし、
-`codex exec` で返答生成、macOS の `say` または VOICEVOX ENGINE で音声合成します。
+常駐する Codex エージェントで返答生成、macOS の `say` または VOICEVOX ENGINE で音声合成します。
 返答も HTTP で S3 に返すため、マイク・スピーカーとも USB 音声転送は不要です。
 返答のピーク音量はフルスケールの25%以下に抑えます。小さい音は増幅しません。
 
@@ -11,7 +11,15 @@ Python 3.10 以降、`whisper-cli`、Whisper のモデルファイル、ログ�
 音声合成エンジンが必要です。Mac は `say` (Kyoko)、Linux は VOICEVOX が既定です。
 Python の外部パッケージは不要です。
 
-公開リポジトリのルートから:
+サーバーはリポジトリを clone して起動します。単独ファイルのコピーでは起動しません。
+
+```sh
+mkdir -p ~/works
+git clone git@github.com:takashicompany/stackee.git ~/works/stackee
+cd ~/works/stackee
+```
+
+既に clone 済みなら `git pull --ff-only` で更新します。リポジトリのルートから:
 
 ```sh
 python3 server/stackee_server.py --whisper-model /path/to/ggml-model.bin
@@ -93,13 +101,32 @@ journalctl --user -u stackee-voicevox -u stackee-talk -n 50
 systemctl --user disable --now stackee-talk stackee-voicevox
 ```
 
-Codex は一時ディレクトリで `exec --ephemeral --ignore-user-config --sandbox read-only`
-として動き、最終メッセージを `-o` で受け取ります。個人の MCP 設定やプロジェクトの
-作業指示は読み込みません。会話は直近4往復をサーバーのメモリに保持します。
-モデルは Codex CLI の既定値、または `--codex-model` で指定したものです。
+### 固定のエージェントと会話の継続
+
+Codex は clone したリポジトリの **`server/agent/`** を作業ディレクトリとして、
+`codex app-server --listen stdio://` で常駐します。通常の返答ごとにプロセスを作り直さず、
+同じプロセス・同じ会話スレッドに発言を追加します。音声変換用の一時フォルダとは別です。
+
+- `server/agent/AGENTS.md`: 話し方・返答ルール。サーバーが開発者指示として読み込みます。
+- `server/agent/agent.json`: モデルと推論強度。既定は `gpt-6-astra` / `low`。
+- `server/agent/.state/session.json`: 継続する会話の ID。Git 管理対象外です。
+- 会話本体は実行ユーザーの Codex の保存領域（通常 `~/.codex`）に保持します。
+
+サーバー再起動時は保存した ID の会話を再開します。直近4往復の自前履歴は廃止し、
+Codex の会話保存・コンテキスト圧縮に任せます。保存先が壊れたり会話が見つからない場合は
+エラーにし、黙って記憶のない別スレッドを作りません。旧方式の RAM 履歴は移行できません。
+
+微調整は `AGENTS.md` / `agent.json` を編集し、コミット・push・配置先で pull した後に
+会話サーバーを再起動します。会話 ID は維持したまま新しい指示を読み込みます。
+`--codex-model` はモデル設定を上書きし、`--agent-dir` はエージェントの配置を変更します。
+同じエージェントフォルダを複数サーバーが同時に使うことはロックで防ぎます。
+
+Codex は既存のログインと設定を使い、音声エージェントには読み取り専用サンドボックスと
+非対話の承認ポリシーを指定します。`/health` の `conversation` で cwd・PID・会話 ID・モデルを確認できます。
 Codex には URL・ドメイン名・出典リンクを含めないよう指示します。
 生成後にも URL と引用マーカーを除去し、Markdown リンクは表示名だけを残します。
-除去は文字数制限の前に行い、音声合成・画面へ返す回答・会話履歴に共通で適用します。
+除去は文字数制限の前に行い、音声合成・画面へ返す回答に適用します。
+Codex 自身の履歴には生成した元の返答が保存されるため、返答指示でも URL を禁止します。
 URL しかなく本文が残らない場合は、回答をまとめられなかった旨の短い文に置き換えます。
 
 ## S3 側
@@ -176,4 +203,11 @@ python3 -m unittest discover -s server -p 'test_*.py'
 ```
 
 音声形式、無音、Codexの最終出力、プロセスのタイムアウト、HTTP受付から音声取得、
-処理の競合、失敗・期限切れを検証します。実際のCodexを呼ぶテストではありません。
+処理の競合、失敗・期限切れ、会話の継続・再開・二重起動防止を検証します。
+通常のテストは実際の Codex を呼びません。実際の認証・モデルを使う検証は明示的に実行します。
+
+```sh
+python3 server/check_agent.py
+```
+
+本番とは別の試験用会話で、同じ PID での2往復、再起動後の記憶、指示変更の適用を検証します。

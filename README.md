@@ -172,7 +172,7 @@ URL は引き続き https://takashicompany.github.io/stackee/ です。
 │   │   ├── serial.js         Web Serial の制御
 │   │   └── app.js            画面とイベント
 │   └── .nojekyll
-├── server/                   Mac 用音声受信サーバー (codex exec)
+├── server/                   Mac / Linux 音声受信サーバーと常駐 Codex エージェント
 ├── test/
 │   └── protocol.test.mjs     web/js/protocol.js の単体テスト
 ├── package.json              Node 用の ES モジュール指定 (依存なし)
