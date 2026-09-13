@@ -210,6 +210,8 @@ class Pipeline:
             self.agent.close()
 
     def __call__(self, data):
+        started = time.monotonic()
+        timings = {}
         pcm = read_audio(data)
         if peak(pcm) < 150:
             return {"state": "ignored", "reason": "silence"}, b""
@@ -217,10 +219,14 @@ class Pipeline:
             root = Path(tmp)
             wav = root / "input.wav"
             wav.write_bytes(data)
+            stage = time.monotonic()
+            timings["prepare_ms"] = round((stage - started) * 1000, 2)
             text = clean_transcript(self.run(
                 [self.whisper, "-m", self.model, "-f", str(wav), "-l", "ja", "-nt", "-np"], tmp))
+            timings["stt_ms"] = round((time.monotonic() - stage) * 1000, 2)
             if not text:
                 return {"state": "ignored", "reason": "no_speech"}, b""
+            stage = time.monotonic()
             if self.echo:
                 reply = text
             else:
@@ -229,10 +235,14 @@ class Pipeline:
                     raise RuntimeError("codex returned no final message")
             # Keep synthesis and device memory bounded even when the model ignores brevity.
             reply = clean_reply(reply)[:120]
+            timings["codex_ms"] = round((time.monotonic() - stage) * 1000, 2)
+            stage = time.monotonic()
             audio = self.synthesize(reply, root)
+            timings["tts_ms"] = round((time.monotonic() - stage) * 1000, 2)
             if len(audio) > MAX_REPLY_BYTES:
                 raise RuntimeError("Reply audio exceeds device limit")
-            return {"state": "done", "transcript": text, "reply": reply}, audio
+            timings["total_ms"] = round((time.monotonic() - started) * 1000, 2)
+            return {"state": "done", "transcript": text, "reply": reply, "timings": timings}, audio
 
 
 class Jobs:
@@ -265,12 +275,16 @@ class Jobs:
             return ident
 
     def process(self, ident, data):
+        started = time.monotonic()
         try:
             result, audio = self.pipeline(data)
             result["audio"] = audio
         except Exception as exc:
             logging.exception("Voice job %s failed", ident)
             result = {"state": "error", "error": str(exc)}
+        logging.info("job-timing %s", json.dumps({"job": ident, "state": result["state"],
+                     "worker_ms": round((time.monotonic() - started) * 1000, 2),
+                     "timings": result.get("timings", {})}))
         with self.lock:
             if ident in self.entries:
                 self.entries[ident].update(result)

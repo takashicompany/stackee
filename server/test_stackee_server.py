@@ -61,6 +61,22 @@ class ReplyTests(unittest.TestCase):
 
 
 class AudioTests(unittest.TestCase):
+    def test_pipeline_reports_separate_stage_durations(self):
+        p = s.Pipeline('unused')
+        now = [0.0]
+        def stage(seconds, result):
+            def call(*args, **kwargs):
+                now[0] += seconds
+                return result
+            return call
+        with patch.object(s.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(p, 'run', side_effect=stage(2, 'test')), \
+                patch.object(p.agent, 'ask', side_effect=stage(3, 'reply')), \
+                patch.object(p, 'synthesize', side_effect=stage(1, b'\0\1' * 100)):
+            result, _ = p(wav())
+        self.assertEqual(result['timings'], {'prepare_ms': 0, 'stt_ms': 2000,
+                         'codex_ms': 3000, 'tts_ms': 1000, 'total_ms': 6000})
+
     def test_speaker_peak_limits_without_clipping_or_boosting(self):
         loud = array.array('h', [-32768, -16000, 0, 16000, 32767]).tobytes()
         result = s.limit_speaker_peak(loud)
