@@ -16,12 +16,20 @@ USB ケーブルでつないだ stackee を、ブラウザから見て・設定�
 
 | 画面 | できること |
 |---|---|
-| 接続 | ブラウザのデバイス選択ダイアログから stackee を選んでつなぐ |
+| 接続 | ブラウザのデバイス選択ダイアログから stackee を選んでつなぐ。**つなぎ方は USB シリアルと USB HID の 2 通り**あり、「自動」で選ばせることもできる |
 | 状態 | 電池残量・充電中か・キー入力の送信先 (USB / BLE)・Wi-Fi の状態・ファームウェアの版・起動からの経過時間 (10 秒ごとに自動更新) |
 | Wi-Fi ネットワーク | 接続先の Wi-Fi を**最大 8 件**まで登録・上書き・削除する。スキャンして選ぶこともできる |
 | 音声サーバ | 音声サーバのアドレス (`STACKEE_HOST`) とポート (`STACKEE_PORT`) を書き込む |
 | 再起動 | 設定を反映するための再起動。再接続まで自動で待つ |
 | ログ | デバイスがシリアルに出している内容をそのまま表示 (一時停止・消去・キーイベント行の非表示) |
+
+つなぎ方が 2 通りあるのは、デバイス側のファームウェアに 2 つのプロファイルがあるためです。
+**どちらでも、このページからできることは同じ**です (流れるデータが同じで、運び方だけが違う)。
+
+| ファームのプロファイル | つなぎ方 | 中身 |
+|---|---|---|
+| `dev` | USB シリアル (Web Serial) | USB CDC を持つ。これまでどおり |
+| `full` | USB HID (WebHID) | CDC を持たず、コンソールが Raw HID (32 バイトのレポート) に載る |
 
 > **登録しただけでは、まだ Wi-Fi につながりません。**
 > 今のファームウェアは登録内容を保存するだけです。
@@ -35,17 +43,43 @@ USB ケーブルでつないだ stackee を、ブラウザから見て・設定�
 
 **デスクトップ版の Chrome / Edge / Opera だけです。**
 
-このページは [Web Serial API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API)
-でデバイスと話します。この API に対応しているブラウザが限られています。
+このページはブラウザの USB の口を直に使います。使う API は 2 つ。
 
-| ブラウザ | 使えるか |
-|---|---|
-| Chrome / Edge / Opera (パソコン) | ○ |
-| Firefox | △ 既定では無効。アドオンによる有効化が必要 |
-| Safari (Mac / iPhone / iPad) | × WebKit が仕様に反対の立場を取っており、対応の予定なし |
-| Chrome (Android) | × Android 側に有線シリアルの仕組みが無い |
+- Web Serial API — https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API
+- WebHID API — https://developer.mozilla.org/en-US/docs/Web/API/WebHID_API
+
+どちらも対応しているブラウザが限られています。
+
+| ブラウザ | Web Serial | WebHID |
+|---|---|---|
+| Chrome / Edge / Opera (パソコン) | ○ | ○ |
+| Firefox | △ 既定では無効。アドオンによる有効化が必要 | × 仕様に反対の立場で、対応の予定なし |
+| Safari (Mac / iPhone / iPad) | × WebKit が仕様に反対の立場を取っており、対応の予定なし | × 同上 |
+| Chrome (Android) | × Android 側に有線シリアルの仕組みが無い | × 同じく使えない |
 
 対応していないブラウザで開いた場合は、その旨がページ上部に出ます。
+文面は**選んでいる接続方法に合わせて**変わります。
+
+### 接続方法の選び方
+
+「接続」欄の **接続方法** で選びます。
+
+| 選択 | 動き |
+|---|---|
+| 自動 (既定) | すでに許可済みのデバイスがあるほうを使う (同点なら USB シリアル)。どちらも未許可なら、使えるほうのうち USB シリアルを先に試す |
+| USB シリアル (dev プロファイル) | Web Serial だけを使う |
+| USB HID (full プロファイル) | WebHID だけを使う |
+
+一度許可したデバイスは、次からダイアログなしで開き直します。
+許可がまだ無いときだけ、ブラウザのデバイス選択ダイアログが出ます
+(ダイアログはボタンを押したその場でしか出せないため、
+許可済みかどうかはページ読み込み時と切断時に調べてあります)。
+
+ページ自身が外へ通信しないことは CSP (`connect-src 'none'`) で縛っています。
+Web Serial も WebHID も `connect-src` の対象外なので、この縛りは USB のやりとりを妨げません。
+どちらを許すかは HTTP ヘッダの Permissions-Policy (`serial` / `hid`) が決めますが、
+**既定の allowlist が self** なので、自分のオリジンで開くかぎり何も書かずに使えます
+(GitHub Pages ではヘッダを書けないので、そもそも書けません)。
 
 ---
 
@@ -169,12 +203,14 @@ URL は引き続き https://takashicompany.github.io/stackee/ です。
 │   ├── style.css             見た目
 │   ├── js/
 │   │   ├── protocol.js       プロトコル処理
-│   │   ├── serial.js         Web Serial の制御
+│   │   ├── serial.js         Web Serial の制御 (dev プロファイル)
+│   │   ├── hid.js            WebHID (Raw HID) の制御 (full プロファイル)
 │   │   └── app.js            画面とイベント
 │   └── .nojekyll
 ├── server/                   Mac / Linux 音声受信サーバーと常駐 Codex エージェント
 ├── test/
-│   └── protocol.test.mjs     web/js/protocol.js の単体テスト
+│   ├── protocol.test.mjs     web/js/protocol.js の単体テスト
+│   └── hid.test.mjs          web/js/hid.js の単体テスト
 ├── package.json              Node 用の ES モジュール指定 (依存なし)
 ├── .github/workflows/pages.yml  web/ だけを Pages に公開
 └── README.md
@@ -196,6 +232,11 @@ URL は引き続き https://takashicompany.github.io/stackee/ です。
 ページ  → デバイス   \x1e{"id":7,"cmd":"status"}\n
 デバイス → ページ    \x1e{"id":7,"bat":83,"wifi":"up","ip":"192.168.1.42", ...}\n
 ```
+
+USB HID でつないだ場合も、**この行そのものは 1 バイトも変わりません。**
+32 バイトのレポートに 29 バイトずつ詰めて運ぶだけです
+(先頭 3 バイトが運搬用の枠、残り 29 バイトが上の行の中身)。
+だから `protocol.js` から上は接続方法を知りません。
 
 ### コマンド一覧 (proto 2)
 
@@ -348,6 +389,10 @@ node --test                      # 引数なしでも自動で見つかる (ど�
 - `wifi.list` の読み取りで**パスワードが絶対に外に出ないこと**
 - `features` に `wifi.list` が無いデバイス (proto 1) で機能を隠すこと
 - `settings.set` に Wi-Fi のキーを混ぜないこと (`denied` を踏まないため)
+- Raw HID の 32 バイトのレポートに本文を 29 バイトずつ詰める割り方と、その読み取り
+  (壊れた `len` を弾くこと、割って繋ぎ直すと元のバイト列に戻ること、
+  多バイト文字がレポートの切れ目で割れても化けないこと)
+- どちらの接続方法を使うかの決め方 (`chooseTransport`)
 
 ---
 

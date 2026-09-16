@@ -23,7 +23,22 @@ import {
   validateSettings,
   validateWifiEntry,
 } from './protocol.js';
-import { StackeeSerial, unsupportedReason, USB_FILTER } from './serial.js';
+import {
+  StackeeSerial,
+  isSupported as serialSupported,
+  unsupportedReason as serialUnsupportedReason,
+  USB_FILTER,
+} from './serial.js';
+import {
+  StackeeHid,
+  chooseTransport,
+  isSupported as hidSupported,
+  unsupportedReason as hidUnsupportedReason,
+} from './hid.js';
+
+// 接続方法の選び方は DOM に触らない純関数として hid.js に置いてある
+// (Node から単体テストするため)。ここからも使えるように出し直す。
+export { chooseTransport };
 
 const $ = (id) => document.getElementById(id);
 
@@ -100,7 +115,11 @@ function renderLog() {
 // 接続
 // ---------------------------------------------------------------------------
 
-const link = new StackeeSerial({
+/**
+ * トランスポートの配線。
+ * ★ 差し替えても中身は同じ。だから 1 か所にまとめて両方に渡す。
+ */
+const linkHandlers = {
   onLog: logAppend,
   onTitle: (t) => { $('statusbar-text').textContent = t || '—'; },
   onState: onConnState,
@@ -111,7 +130,121 @@ const link = new StackeeSerial({
   onStray: (f) => {
     logAppend('[操作盤] 対応する要求の無い応答: ' + JSON.stringify(f) + '\n');
   },
-});
+};
+
+/**
+ * 繋ぎ方は 2 通り。デバイス側のファームウェアのプロファイルで決まる。
+ *   serial … dev プロファイル (USB CDC がある)
+ *   hid    … full プロファイル (CDC が無く、コンソールが Raw HID に載る)
+ * どちらも流れるバイト列は同じなので、上の層 (protocol.js) は共通。
+ * 実体は初めて使うときに作る。
+ */
+const TRANSPORTS = {
+  serial: {
+    label: 'USB シリアル',
+    make: () => new StackeeSerial(linkHandlers),
+    supported: serialSupported,
+    reason: serialUnsupportedReason,
+    /** 許可済みのデバイスが今あるか。 */
+    hasPermitted: (l) => l.hasPort(),
+    inst: null,
+  },
+  hid: {
+    label: 'USB HID',
+    make: () => new StackeeHid(linkHandlers),
+    supported: hidSupported,
+    reason: hidUnsupportedReason,
+    hasPermitted: (l) => l.hasDevice(),
+    inst: null,
+  },
+};
+
+function getLink(kind) {
+  const t = TRANSPORTS[kind] || TRANSPORTS.serial;
+  if (!t.inst) t.inst = t.make();
+  return t.inst;
+}
+
+/** いま使っている経路。接続ボタンを押したときに確定する。 */
+let transport = 'serial';
+
+/** 今の経路。以降のコードはこれだけを触る。 */
+let link = getLink(transport);
+
+/**
+ * 許可済みのデバイスがあるか (経路ごと)。
+ *
+ * ★ クリックの中で「ダイアログを出す / 出さずに開く」を **同期的に** 決める
+ *   ために先に調べておく。クリックしてから await で調べると transient
+ *   activation が切れて requestPort() / requestDevice() が呼べなくなる。
+ */
+const permitted = { serial: false, hid: false };
+
+async function refreshPermitted() {
+  for (const kind of Object.keys(TRANSPORTS)) {
+    const t = TRANSPORTS[kind];
+    if (!t.supported()) { permitted[kind] = false; continue; }
+    try {
+      permitted[kind] = await t.hasPermitted(getLink(kind));
+    } catch (e) {
+      permitted[kind] = false;
+    }
+  }
+}
+
+/** 画面で選ばれている接続方法 ('auto' / 'serial' / 'hid')。 */
+function selectedMode() {
+  const el = $('conn-transport');
+  return (el && el.value) || 'auto';
+}
+
+/** 今の選択と許可状況から、繋ぐ経路を決める。 */
+function pickTransport() {
+  return chooseTransport({
+    mode: selectedMode(),
+    serialSupported: serialSupported(),
+    hidSupported: hidSupported(),
+    hasSerialPort: permitted.serial,
+    hasHidDevice: permitted.hid,
+  });
+}
+
+function setTransport(kind) {
+  if (kind === transport) return;
+  // 前の経路が開いたままなら閉じる。
+  // ★ await しない。ここはクリック直後で、await を挟むと transient
+  //   activation が切れて選択ダイアログを出せなくなる。
+  const prev = link;
+  if (prev && prev.state !== 'disconnected') void prev.disconnect();
+  transport = kind;
+  link = getLink(kind);
+}
+
+/** 対象デバイスの案内文 (接続していないときに出す)。 */
+function connDetailBase() {
+  const hex = (n) => n.toString(16).toUpperCase().padStart(4, '0');
+  return '対象: VID ' + hex(USB_FILTER.usbVendorId)
+    + ' / PID ' + hex(USB_FILTER.usbProductId) + ' (M5Stack CoreS3)';
+}
+
+/**
+ * 選ばれている接続方法が使えるかを見て、案内を出し分ける。
+ * 文言は経路ごとに違う (Web Serial と WebHID で対応状況が別)。
+ */
+function updateBrowserWarning() {
+  const mode = selectedMode();
+  const pick = pickTransport();
+  if (pick.transport) {
+    hide($('browser-warning'));
+    $('btn-connect').disabled = link.state === 'connecting';
+    return;
+  }
+  // 指名された経路の文言を出す。「自動」で両方だめなときは Web Serial 側の
+  // 説明を出す (どちらも「対応するブラウザで開いてください」に行き着く)。
+  const detail = TRANSPORTS[mode] ? TRANSPORTS[mode].reason() : serialUnsupportedReason();
+  show($('browser-warning'), [pick.reason, detail].filter(Boolean).join(' '));
+  $('btn-connect').disabled = true;
+}
 
 /**
  * このファームで使えないと分かったコマンド。
@@ -129,6 +262,8 @@ function onConnState(state, info) {
   $('btn-connect').hidden = state === 'connected';
   $('btn-disconnect').hidden = state !== 'connected';
   $('btn-connect').disabled = state === 'connecting';
+  // 繋いでいる間に経路を変えさせない (切断すると選択はそのまま残る)。
+  $('conn-transport').disabled = state !== 'disconnected';
   for (const sec of document.querySelectorAll('.needs-conn')) {
     sec.classList.toggle('locked', state !== 'connected');
   }
@@ -136,6 +271,9 @@ function onConnState(state, info) {
     logAppend('[操作盤] 接続しました\n');
     void afterConnect();
   } else if (state === 'disconnected') {
+    // 次のクリックで「ダイアログを出すかどうか」を同期的に決めたいので、
+    // 切れた時点で許可済みの有無を調べ直しておく。
+    void refreshPermitted().then(updateBrowserWarning);
     stopAutoStatus();
     unsupportedCommands.clear();
     $('btn-scan').hidden = false;
@@ -196,10 +334,33 @@ async function afterConnect() {
   await refreshNetworks();
 }
 
+$('conn-transport').addEventListener('change', updateBrowserWarning);
+
 $('btn-connect').addEventListener('click', async () => {
-  // ★ requestPort() は transient activation が要るので、await を挟む前に呼ぶ。
+  // ★ requestPort() / requestDevice() は transient activation が要るので、
+  //   await を挟む前に呼ぶ。だから「ダイアログを出すか、黙って開き直すか」は
+  //   クリック前に調べてある permitted だけを見て **同期的に** 決める。
+  const pick = pickTransport();
+  if (!pick.transport) {
+    updateBrowserWarning();
+    return;
+  }
+  setTransport(pick.transport);
+  const known = permitted[pick.transport];
+  $('conn-detail').textContent =
+    connDetailBase() + ' / ' + TRANSPORTS[pick.transport].label + ' でつなぎます';
   try {
+    if (known) {
+      // 許可済み。ダイアログを出さずに開き直す。
+      if (!(await link.reconnect())) {
+        permitted[pick.transport] = false;
+        $('conn-detail').textContent =
+          '許可済みのデバイスを開けませんでした。もう一度「接続する」を押すと選択ダイアログが出ます。';
+      }
+      return;
+    }
     await link.connect();
+    permitted[pick.transport] = true;
   } catch (e) {
     if (e && e.name === 'NotFoundError') {
       $('conn-detail').textContent = 'デバイスが選ばれませんでした。';
@@ -687,17 +848,13 @@ function show(el, text) {
 function hide(el) { el.hidden = true; }
 
 function boot() {
-  const reason = unsupportedReason();
-  if (reason) {
-    show($('browser-warning'), reason);
-    $('btn-connect').disabled = true;
-  }
   for (const sec of document.querySelectorAll('.needs-conn')) sec.classList.add('locked');
   // ★ 生の値は protocol.js の 1 か所だけに置く (README「プロトコル定数の置き場所」)。
   $('wifi-path').textContent = WIFI_NETWORKS_PATH;
-  const hex = (n) => n.toString(16).toUpperCase().padStart(4, '0');
-  $('conn-detail').textContent = '対象: VID ' + hex(USB_FILTER.usbVendorId)
-    + ' / PID ' + hex(USB_FILTER.usbProductId) + ' (M5Stack CoreS3)';
+  $('conn-detail').textContent = connDetailBase();
+  updateBrowserWarning();
+  // 許可済みのデバイスを先に調べておく (クリック時に同期で見るため)。
+  void refreshPermitted().then(updateBrowserWarning);
   renderLog();
 }
 

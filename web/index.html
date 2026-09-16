@@ -9,11 +9,22 @@
   WebSocket / EventSource / navigator.sendBeacon() / <a ping> の 7 つ。
   (https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/connect-src)
 
-  Web Serial はこの一覧に入っていない = connect-src の対象ではない。
+  Web Serial も WebHID もこの一覧に入っていない = connect-src の対象ではない。
+  したがって CSP はそのままでよい (デバイスとの USB のやりとりは妨げない)。
+
   シリアルを制御するのは Permissions-Policy の serial ディレクティブで、
   既定の allowlist が self なので、自分のオリジンでは何も書かなくても使える。
   (https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy/serial)
-  つまりこの CSP は Web Serial を妨げないまま「外に一切出ない」ことを保証する。
+
+  HID も同じ形で、Permissions-Policy の hid ディレクティブが担当する。
+  こちらも既定の allowlist が self なので、自分のオリジンでは何も書かずに使える。
+  (https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy/hid)
+  ★ Permissions-Policy は <meta> では指定できず HTTP ヘッダだけ。GitHub Pages は
+    ヘッダを書けないので、どちらにせよここには書けない (既定のままで動く)。
+  ※ iframe に埋め込まれた場合だけは、埋め込む側が allow="serial; hid" を
+    書かないと使えない。このページは単独で開く前提。
+
+  つまりこの CSP は Web Serial / WebHID を妨げないまま「外に一切出ない」ことを保証する。
 
   meta 版の CSP では frame-ancestors / report-uri / sandbox は無視される。
   埋め込み防止は GitHub Pages ではヘッダを書けないので実現できない。
@@ -44,6 +55,14 @@
   <h2>接続</h2>
   <div id="browser-warning" class="notice notice-error" hidden></div>
   <div class="row">
+    <label class="check" for="conn-transport">接続方法</label>
+    <select id="conn-transport">
+      <option value="auto" selected>自動</option>
+      <option value="serial">USB シリアル (dev プロファイル)</option>
+      <option value="hid">USB HID (full プロファイル)</option>
+    </select>
+  </div>
+  <div class="row">
     <button id="btn-connect" type="button" class="primary">接続する</button>
     <button id="btn-disconnect" type="button" hidden>切断する</button>
     <span id="conn-state" class="badge badge-off">未接続</span>
@@ -53,6 +72,13 @@
   <p class="muted small">
     「接続する」を押すとブラウザのデバイス選択ダイアログが出ます。
     一覧に出るのは M5Stack CoreS3 (VID 303A / PID 811A) だけです。
+    一度許可したデバイスは、次からダイアログなしで開き直します。
+  </p>
+  <p class="muted small">
+    <strong>接続方法</strong>はデバイス側のファームウェアで決まります。
+    <code>dev</code> プロファイルは USB シリアル、
+    <code>full</code> プロファイルはシリアルを持たないので USB HID です。
+    「自動」にしておけば、許可済みのほうから順に試します。
   </p>
 </section>
 
