@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import array
+from collections import deque
 import io
 import json
 import logging
@@ -41,15 +42,15 @@ AGENT_DIR = Path(__file__).resolve().parent / "agent"
 ADMIN_HTML = Path(__file__).resolve().parent / "admin.html"
 
 
-def read_audio(data, max_seconds=MAX_SECONDS):
+def read_audio(data, max_seconds=MAX_SECONDS, min_seconds=.3):
     try:
         with wave.open(io.BytesIO(data), "rb") as wav:
             if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(),
                     wav.getcomptype()) != (1, 2, RATE, "NONE"):
                 raise ValueError("Expected uncompressed 16000 Hz / 16-bit / mono WAV")
             frames = wav.getnframes()
-            if not int(RATE * .3) <= frames <= RATE * max_seconds:
-                raise ValueError("Audio must be between 0.3 and "
+            if not int(RATE * min_seconds) <= frames <= RATE * max_seconds:
+                raise ValueError("Audio must be between " + str(min_seconds) + " and "
                                  + str(max_seconds) + " seconds")
             pcm = wav.readframes(frames)
             if len(pcm) != frames * 2:
@@ -119,6 +120,7 @@ def clean_reply(text):
 
 SENTENCE_MARKS = "。．！？!?\n"
 CLAUSE_MARKS = "、，,"
+SILENCE = b"\0\0" * (RATE * 150 // 1000)   # a breath between sentences
 
 
 def split_parts(text, marks):
@@ -195,47 +197,50 @@ class Pipeline:
             self.run(["say", "-v", self.voice, "-o", str(path), "--file-format=WAVE",
                       "--data-format=LEI16@16000", "--channels=1", "--", reply], str(root))
             speech = path.read_bytes()
-        return limit_speaker_peak(read_audio(speech, MAX_REPLY_SECONDS))
+        return read_audio(speech, MAX_REPLY_SECONDS, .02)
 
     def fit(self, reply, root, limit=MAX_REPLY_BYTES):
-        """Drop whole sentences until the speech both synthesises and fits the device buffer.
+        """Speak one sentence at a time and stop just before the device buffer would overflow.
 
-        VOICEVOX answers 500 for very long texts, so a failed synthesis is treated the same
-        as audio that is too long; a synthesis that never succeeds re-raises its own error.
+        Synthesising the whole reply at once fails on long texts (VOICEVOX answers 500) and
+        inflates the engine's GPU arena, so each sentence is its own request and the pieces
+        are joined with a short silence. A sentence the engine refuses, or the opening
+        sentence when it alone is too long, is retried clause by clause.
         """
-        original, remainder = reply, reply
         self.failure = None
-        audio = self.speak(reply, root)
-        if audio is not None and len(audio) <= limit:
-            return reply, audio
-        budget = len(reply) * limit // len(audio) if audio else len(reply) * 4 // 5
-        for marks in (SENTENCE_MARKS, CLAUSE_MARKS):
-            pieces = split_parts(remainder, marks)
-            while len(pieces) > 1:
-                pieces.pop()
-                candidate = "".join(pieces).strip().rstrip(CLAUSE_MARKS)
-                if not candidate:
+        chunks, kept, used = [], "", 0
+        units = deque(split_parts(reply, SENTENCE_MARKS))
+        while units:
+            unit = units.popleft()
+            audio = self.speak(unit, root)
+            clauses = split_parts(unit, CLAUSE_MARKS)
+            if audio is None:
+                if len(clauses) < 2:
                     break
-                # The estimate only skips hopeless synthesis; acceptance is always measured.
-                if len(pieces) > 1 and len(candidate) > budget:
+                units.extendleft(reversed(clauses))
+                continue
+            gap = SILENCE if chunks else b""
+            if used + len(gap) + len(audio) > limit:
+                if not chunks and len(clauses) > 1:
+                    units.extendleft(reversed(clauses))
                     continue
-                audio = self.speak(candidate, root)
-                if audio is None:
-                    budget = min(budget, max(1, len(candidate) * 4 // 5))
-                    continue
-                if len(audio) <= limit:
-                    logging.info("reply-shortened original=%d kept=%d bytes=%d limit=%d",
-                                 len(original), len(candidate), len(audio), limit)
-                    return candidate, audio
-                budget = min(budget, len(candidate) * limit // len(audio))
-            remainder = pieces[0].strip() if pieces else ""
-            if not remainder:
                 break
-        if self.failure is not None:
-            raise self.failure
-        raise RuntimeError("Reply audio exceeds device limit")
+            chunks.append(gap)
+            chunks.append(audio)
+            used += len(gap) + len(audio)
+            kept += unit
+        kept = kept.strip().rstrip(CLAUSE_MARKS)
+        if not kept or not used:
+            if self.failure is not None:
+                raise self.failure
+            raise RuntimeError("Reply audio exceeds device limit")
+        if len(kept) < len(reply.strip()):
+            logging.info("reply-shortened original=%d kept=%d bytes=%d limit=%d",
+                         len(reply.strip()), len(kept), used, limit)
+        return kept, limit_speaker_peak(b"".join(chunks))
 
     def speak(self, text, root):
+        """PCM for one piece of text, or None when the engine refuses it."""
         try:
             return self.synthesize(text, root)
         except (OSError, RuntimeError, ValueError) as exc:

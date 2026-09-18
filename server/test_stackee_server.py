@@ -165,7 +165,8 @@ class VoicevoxTests(unittest.TestCase):
         self.thread.join()
 
     def test_japanese_query_format_and_peak(self):
-        audio = self.pipeline.synthesize('こんにちは & 元気？', Path('/unused'))
+        reply, audio = self.pipeline.fit('こんにちは & 元気？', Path('/unused'))
+        self.assertEqual(reply, 'こんにちは & 元気？')
         self.assertEqual(len(audio), 16000)
         self.assertLessEqual(s.peak(audio), 8191)
         query = s.urllib.parse.parse_qs(s.urllib.parse.urlsplit(self.calls[0][0]).query)
@@ -449,39 +450,51 @@ class AdminTests(unittest.TestCase):
 
 
 class LengthTests(unittest.TestCase):
-    """The reply is trimmed to whole sentences, never cut mid-word."""
+    """One synthesis per sentence, joined with a breath, stopped before the buffer overflows."""
 
-    def pipeline(self, bytes_per_char=20000):
+    def pipeline(self, bytes_per_char=20000, refuse_over=None):
         p = s.Pipeline('unused')
         calls = []
         def synthesize(text, root):
             calls.append(text)
+            if refuse_over is not None and len(text) > refuse_over:
+                raise RuntimeError('VOICEVOX response exceeds device limit')
             return b'\0\1' * (len(text) * bytes_per_char // 2)
         p.synthesize = synthesize
         return p, calls
 
-    def test_a_reply_that_fits_is_left_alone(self):
+    def test_a_short_reply_is_a_single_synthesis(self):
         p, calls = self.pipeline()
-        for text in ('みじかい返答です。', 'あ' * 100):
-            with self.subTest(text=text[:12]):
-                reply, audio = p.fit(text, Path('/unused'))
-                self.assertEqual(reply, text)
-                self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
-        self.assertEqual(calls, ['みじかい返答です。', 'あ' * 100])
-        # 100 characters is well past the old 30 second ceiling and is still kept.
-        self.assertGreater(len(p.synthesize('あ' * 100, None)), s.RATE * 2 * 30)
+        reply, audio = p.fit('みじかい返答です。', Path('/unused'))
+        self.assertEqual(reply, 'みじかい返答です。')
+        self.assertEqual(calls, ['みじかい返答です。'])
+        self.assertEqual(len(audio), 9 * 20000)
+        self.assertNotIn(s.SILENCE, audio)
 
-    def test_a_long_reply_loses_whole_sentences_from_the_end(self):
+    def test_each_sentence_is_synthesised_on_its_own_and_joined_with_silence(self):
+        p, calls = self.pipeline()
+        text = 'ひとつ目です。ふたつ目です！みっつ目ですか？'
+        reply, audio = p.fit(text, Path('/unused'))
+        self.assertEqual(reply, text)
+        self.assertEqual(calls, ['ひとつ目です。', 'ふたつ目です！', 'みっつ目ですか？'])
+        self.assertEqual(len(audio), len(text) * 20000 + 2 * len(s.SILENCE))
+        self.assertEqual(len(s.SILENCE), 16000 * 2 * 150 // 1000)
+
+    def test_the_total_stops_before_the_limit_without_cutting_a_sentence(self):
         p, calls = self.pipeline()
         text = ''.join('これは' + str(i) + '番目の文です。' for i in range(40))
         reply, audio = p.fit(text, Path('/unused'))
         self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
-        self.assertLess(len(reply), len(text))
         self.assertTrue(text.startswith(reply), reply)
         self.assertTrue(reply.endswith('。'), reply)
-        self.assertLessEqual(len(calls), 5, calls)
+        self.assertLess(len(reply), len(text))
+        # Every sentence it accepted was synthesised once, and it stopped at the first miss.
+        self.assertEqual(calls[:len(s.split_parts(reply, s.SENTENCE_MARKS))],
+                         s.split_parts(reply, s.SENTENCE_MARKS))
+        nxt = text[len(reply):]
+        self.assertEqual(calls[-1], s.split_parts(nxt, s.SENTENCE_MARKS)[0])
 
-    def test_one_oversized_sentence_falls_back_to_clauses(self):
+    def test_a_first_sentence_that_is_too_long_falls_back_to_clauses(self):
         p, calls = self.pipeline()
         text = '、'.join('とても長い句' + str(i) for i in range(50)) + '。'
         reply, audio = p.fit(text, Path('/unused'))
@@ -489,11 +502,29 @@ class LengthTests(unittest.TestCase):
         self.assertTrue(text.startswith(reply), reply)
         self.assertFalse(reply.endswith('、'), reply)
         self.assertGreater(len(reply), 0)
+        self.assertEqual(calls[0], text)
+        self.assertIn('、', calls[1])
+
+    def test_a_sentence_the_engine_refuses_is_retried_clause_by_clause(self):
+        p, calls = self.pipeline(bytes_per_char=100, refuse_over=30)
+        text = 'みじかい文です。' + 'あ、' * 30 + 'おわり。'
+        reply, audio = p.fit(text, Path('/unused'))
+        self.assertTrue(calls[0] == 'みじかい文です。')
+        self.assertIn('あ、' * 30, calls[1])
+        self.assertTrue(all(len(c) <= 30 for c in calls[2:]), calls[2:])
+        self.assertIn('みじかい文です。', reply)
+        self.assertIn('おわり。', reply)
+        self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
 
     def test_a_single_unbreakable_sentence_is_an_error(self):
         p, calls = self.pipeline()
         with self.assertRaisesRegex(RuntimeError, 'exceeds device limit'):
             p.fit('あ' * 300, Path('/unused'))
+
+    def test_a_synthesis_that_always_fails_reports_its_own_error(self):
+        p, calls = self.pipeline(refuse_over=0)
+        with self.assertRaisesRegex(RuntimeError, 'VOICEVOX response exceeds device limit'):
+            p.fit('ひとつ目です。ふたつ目です。', Path('/unused'))
 
     def test_the_limit_is_what_decides(self):
         p, calls = self.pipeline()
@@ -512,30 +543,6 @@ class LengthTests(unittest.TestCase):
                 patch.object(p, 'synthesize', return_value=b'\0\1' * 8000):
             result, audio = p(wav())
         self.assertEqual(result['reply'], long_reply)
-
-    def test_a_synthesis_that_chokes_on_long_text_is_treated_as_too_long(self):
-        p = s.Pipeline('unused')
-        calls = []
-        def synthesize(text, root):
-            calls.append(text)
-            if len(text) > 60:
-                raise RuntimeError('VOICEVOX response exceeds device limit')
-            return b'\0\1' * 100
-        p.synthesize = synthesize
-        text = ''.join('これは' + str(i) + '番目の文です。' for i in range(20))
-        reply, audio = p.fit(text, Path('/unused'))
-        self.assertLessEqual(len(reply), 60)
-        self.assertTrue(text.startswith(reply), reply)
-        self.assertTrue(reply.endswith('。'), reply)
-        self.assertEqual(len(audio), 200)
-
-    def test_a_synthesis_that_always_fails_reports_its_own_error(self):
-        p = s.Pipeline('unused')
-        def synthesize(text, root):
-            raise RuntimeError('VOICEVOX is down')
-        p.synthesize = synthesize
-        with self.assertRaisesRegex(RuntimeError, 'VOICEVOX is down'):
-            p.fit('ひとつ目です。ふたつ目です。', Path('/unused'))
 
     def test_split_parts_rejoins_into_the_original(self):
         text = 'ひとつ目です。ふたつ目です！みっつ目ですか？しめの文'
