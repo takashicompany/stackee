@@ -150,6 +150,7 @@ class Pipeline:
         self.tts = tts
         self.voicevox_url = voicevox_url.rstrip("/")
         self.speaker = speaker
+        self.failure = None
         self.claude = claude
         self.agent = None if echo else Agent(agent_dir or AGENT_DIR, codex, claude,
                                              codex_model, timeout)
@@ -197,12 +198,17 @@ class Pipeline:
         return limit_speaker_peak(read_audio(speech, MAX_REPLY_SECONDS))
 
     def fit(self, reply, root, limit=MAX_REPLY_BYTES):
-        """The device plays a bounded amount of audio, so drop whole sentences until it fits."""
-        audio = self.synthesize(reply, root)
-        if len(audio) <= limit:
-            return reply, audio
+        """Drop whole sentences until the speech both synthesises and fits the device buffer.
+
+        VOICEVOX answers 500 for very long texts, so a failed synthesis is treated the same
+        as audio that is too long; a synthesis that never succeeds re-raises its own error.
+        """
         original, remainder = reply, reply
-        budget = len(remainder) * limit // len(audio)
+        self.failure = None
+        audio = self.speak(reply, root)
+        if audio is not None and len(audio) <= limit:
+            return reply, audio
+        budget = len(reply) * limit // len(audio) if audio else len(reply) * 4 // 5
         for marks in (SENTENCE_MARKS, CLAUSE_MARKS):
             pieces = split_parts(remainder, marks)
             while len(pieces) > 1:
@@ -213,7 +219,10 @@ class Pipeline:
                 # The estimate only skips hopeless synthesis; acceptance is always measured.
                 if len(pieces) > 1 and len(candidate) > budget:
                     continue
-                audio = self.synthesize(candidate, root)
+                audio = self.speak(candidate, root)
+                if audio is None:
+                    budget = min(budget, max(1, len(candidate) * 4 // 5))
+                    continue
                 if len(audio) <= limit:
                     logging.info("reply-shortened original=%d kept=%d bytes=%d limit=%d",
                                  len(original), len(candidate), len(audio), limit)
@@ -222,7 +231,17 @@ class Pipeline:
             remainder = pieces[0].strip() if pieces else ""
             if not remainder:
                 break
+        if self.failure is not None:
+            raise self.failure
         raise RuntimeError("Reply audio exceeds device limit")
+
+    def speak(self, text, root):
+        try:
+            return self.synthesize(text, root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.failure = exc
+            logging.warning("Synthesis failed for %d characters: %s", len(text), exc)
+            return None
 
     def run(self, argv, cwd, input=None):
         with self.lock:

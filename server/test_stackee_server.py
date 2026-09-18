@@ -513,6 +513,30 @@ class LengthTests(unittest.TestCase):
             result, audio = p(wav())
         self.assertEqual(result['reply'], long_reply)
 
+    def test_a_synthesis_that_chokes_on_long_text_is_treated_as_too_long(self):
+        p = s.Pipeline('unused')
+        calls = []
+        def synthesize(text, root):
+            calls.append(text)
+            if len(text) > 60:
+                raise RuntimeError('VOICEVOX response exceeds device limit')
+            return b'\0\1' * 100
+        p.synthesize = synthesize
+        text = ''.join('これは' + str(i) + '番目の文です。' for i in range(20))
+        reply, audio = p.fit(text, Path('/unused'))
+        self.assertLessEqual(len(reply), 60)
+        self.assertTrue(text.startswith(reply), reply)
+        self.assertTrue(reply.endswith('。'), reply)
+        self.assertEqual(len(audio), 200)
+
+    def test_a_synthesis_that_always_fails_reports_its_own_error(self):
+        p = s.Pipeline('unused')
+        def synthesize(text, root):
+            raise RuntimeError('VOICEVOX is down')
+        p.synthesize = synthesize
+        with self.assertRaisesRegex(RuntimeError, 'VOICEVOX is down'):
+            p.fit('ひとつ目です。ふたつ目です。', Path('/unused'))
+
     def test_split_parts_rejoins_into_the_original(self):
         text = 'ひとつ目です。ふたつ目です！みっつ目ですか？しめの文'
         pieces = s.split_parts(text, s.SENTENCE_MARKS)
