@@ -95,13 +95,7 @@ def read_conversation(path, kind):
     return ident
 
 
-def save_conversation(path, kind, ident):
-    """Keep the other backend's conversation; never rewrite the file from memory alone."""
-    path = Path(path)
-    state = load_session(path)
-    section = dict(state.get(kind) or {})
-    section[CONVERSATION_KEYS[kind]] = ident
-    state[kind] = section
+def _write_session(path, state):
     temporary = path.parent / (path.name + ".tmp")
     with open(temporary, "w", encoding="utf-8") as f:
         os.chmod(temporary, 0o600)
@@ -109,6 +103,27 @@ def save_conversation(path, kind, ident):
         f.flush()
         os.fsync(f.fileno())
     temporary.replace(path)
+
+
+def save_conversation(path, kind, ident):
+    """Keep the other backend's conversation; never rewrite the file from memory alone."""
+    path = Path(path)
+    state = load_session(path)
+    section = dict(state.get(kind) or {})
+    section[CONVERSATION_KEYS[kind]] = ident
+    state[kind] = section
+    _write_session(path, state)
+
+
+def clear_conversation(path, kind):
+    """Forget one backend's conversation on request, leaving the other backend's alone."""
+    path = Path(path)
+    state = load_session(path)
+    if kind not in state:
+        return
+    del state[kind]
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write_session(path, state)
 
 
 def ensure_runtime_files(directory):
@@ -523,6 +538,18 @@ class Agent:
             self.config = None
             ensure_runtime_files(self.directory)
             self._ensure().start()
+        return self.status()
+
+    def reset(self, kind):
+        """Drop one backend's conversation; the next utterance starts a fresh one."""
+        if kind not in CONVERSATION_KEYS:
+            raise ValueError("Unknown agent kind: " + str(kind))
+        with self._serial:
+            backend = self.backend
+            if backend is not None and backend.kind == kind:
+                self.backend = None
+                backend.close()
+            clear_conversation(self._state, kind)
         return self.status()
 
     def close(self):

@@ -33,21 +33,24 @@ from stackee_agent import Agent
 RATE = 16000
 MAX_SECONDS = 30
 MAX_UPLOAD = RATE * 2 * MAX_SECONDS + 4096
-MAX_REPLY_BYTES = RATE * 2 * MAX_SECONDS
+# Recording is capped at MAX_SECONDS; the spoken reply may run much longer.
+MAX_REPLY_SECONDS = 120
+MAX_REPLY_BYTES = RATE * 2 * MAX_REPLY_SECONDS
 MAX_ADMIN_BYTES = 64 * 1024
 AGENT_DIR = Path(__file__).resolve().parent / "agent"
 ADMIN_HTML = Path(__file__).resolve().parent / "admin.html"
 
 
-def read_audio(data):
+def read_audio(data, max_seconds=MAX_SECONDS):
     try:
         with wave.open(io.BytesIO(data), "rb") as wav:
             if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(),
                     wav.getcomptype()) != (1, 2, RATE, "NONE"):
                 raise ValueError("Expected uncompressed 16000 Hz / 16-bit / mono WAV")
             frames = wav.getnframes()
-            if not int(RATE * .3) <= frames <= RATE * MAX_SECONDS:
-                raise ValueError("Recording must be between 0.3 and 30 seconds")
+            if not int(RATE * .3) <= frames <= RATE * max_seconds:
+                raise ValueError("Audio must be between 0.3 and "
+                                 + str(max_seconds) + " seconds")
             pcm = wav.readframes(frames)
             if len(pcm) != frames * 2:
                 raise ValueError("Truncated WAV")
@@ -114,6 +117,22 @@ def clean_reply(text):
     return text
 
 
+SENTENCE_MARKS = "。．！？!?\n"
+CLAUSE_MARKS = "、，,"
+
+
+def split_parts(text, marks):
+    """Split after each mark, keeping it, so the pieces rejoin into the original text."""
+    parts, current = [], ""
+    for character in text:
+        current += character
+        if character in marks:
+            parts.append(current)
+            current = ""
+    parts.append(current)
+    return [part for part in parts if part.strip()]
+
+
 class Pipeline:
     def __init__(self, model, whisper="whisper-cli", codex="codex", codex_model=None,
                  voice="Kyoko", timeout=120, echo=False, tts="say",
@@ -175,7 +194,35 @@ class Pipeline:
             self.run(["say", "-v", self.voice, "-o", str(path), "--file-format=WAVE",
                       "--data-format=LEI16@16000", "--channels=1", "--", reply], str(root))
             speech = path.read_bytes()
-        return limit_speaker_peak(read_audio(speech))
+        return limit_speaker_peak(read_audio(speech, MAX_REPLY_SECONDS))
+
+    def fit(self, reply, root, limit=MAX_REPLY_BYTES):
+        """The device plays a bounded amount of audio, so drop whole sentences until it fits."""
+        audio = self.synthesize(reply, root)
+        if len(audio) <= limit:
+            return reply, audio
+        original, remainder = reply, reply
+        budget = len(remainder) * limit // len(audio)
+        for marks in (SENTENCE_MARKS, CLAUSE_MARKS):
+            pieces = split_parts(remainder, marks)
+            while len(pieces) > 1:
+                pieces.pop()
+                candidate = "".join(pieces).strip().rstrip(CLAUSE_MARKS)
+                if not candidate:
+                    break
+                # The estimate only skips hopeless synthesis; acceptance is always measured.
+                if len(pieces) > 1 and len(candidate) > budget:
+                    continue
+                audio = self.synthesize(candidate, root)
+                if len(audio) <= limit:
+                    logging.info("reply-shortened original=%d kept=%d bytes=%d limit=%d",
+                                 len(original), len(candidate), len(audio), limit)
+                    return candidate, audio
+                budget = min(budget, len(candidate) * limit // len(audio))
+            remainder = pieces[0].strip() if pieces else ""
+            if not remainder:
+                break
+        raise RuntimeError("Reply audio exceeds device limit")
 
     def run(self, argv, cwd, input=None):
         with self.lock:
@@ -240,14 +287,12 @@ class Pipeline:
                 reply = self.agent.ask(text)
                 if not reply:
                     raise RuntimeError("codex returned no final message")
-            # Keep synthesis and device memory bounded even when the model ignores brevity.
-            reply = clean_reply(reply)[:120]
+            reply = clean_reply(reply)
             timings["codex_ms"] = round((time.monotonic() - stage) * 1000, 2)
             stage = time.monotonic()
-            audio = self.synthesize(reply, root)
+            # Keep synthesis and device memory bounded even when the model ignores brevity.
+            reply, audio = self.fit(reply, root)
             timings["tts_ms"] = round((time.monotonic() - stage) * 1000, 2)
-            if len(audio) > MAX_REPLY_BYTES:
-                raise RuntimeError("Reply audio exceeds device limit")
             timings["total_ms"] = round((time.monotonic() - started) * 1000, 2)
             return {"state": "done", "transcript": text, "reply": reply, "timings": timings}, audio
 
@@ -433,21 +478,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {"error": "not_found"})
         return self.admin_write(self.path)
 
+    def admin_action(self, call, extra):
+        agent = self.agent
+        if agent is None:
+            return self.send(503, {"error": "agent_disabled"})
+        if not self.admin_allowed():
+            return None
+        if self.admin_body() is None:
+            return None
+        try:
+            status = call(agent)
+        except Exception as exc:
+            logging.exception("Admin action failed")
+            return self.send(500, {"error": str(exc) or exc.__class__.__name__})
+        return self.send(200, dict(extra, status=status))
+
     def do_POST(self):
         if self.path == "/admin/api/apply":
-            agent = self.agent
-            if agent is None:
-                return self.send(503, {"error": "agent_disabled"})
-            if not self.admin_allowed():
-                return None
-            if self.admin_body() is None:
-                return None
-            try:
-                status = agent.reload()
-            except Exception as exc:
-                logging.exception("Applying agent settings failed")
-                return self.send(500, {"error": str(exc) or exc.__class__.__name__})
-            return self.send(200, {"applied": True, "status": status})
+            return self.admin_action(lambda agent: agent.reload(), {"applied": True})
+        reset = re.fullmatch(r"/admin/api/conversation/(codex|claude)/reset", self.path)
+        if reset:
+            return self.admin_action(lambda agent: agent.reset(reset[1]),
+                                     {"reset": reset[1]})
+        if self.path.startswith("/admin/"):
+            return self.send(404, {"error": "not_found"})
         if self.path != "/talk":
             return self.send(404, {"error": "not_found"})
         # Device API only. No CORS; reject browser-originated posts explicitly.

@@ -415,6 +415,26 @@ class AdminTests(unittest.TestCase):
                                     {'Origin': 'http://' + host})[0], 200)
         self.assertEqual(self.request('OPTIONS', '/admin/api/config')[0], 501)
 
+    def test_reset_forgets_one_conversation_and_keeps_the_other(self):
+        state_file = self.root / '.state/session.json'
+        stackee_agent.save_conversation(state_file, 'codex', 'thread-keep')
+        stackee_agent.save_conversation(state_file, 'claude', 'session-drop')
+        status, _, body = self.admin('POST', '/admin/api/conversation/claude/reset', '{}',
+                                     {'Content-Type': 'application/json'})
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data['reset'], 'claude')
+        self.assertIsNone(data['status']['conversations']['claude'])
+        self.assertEqual(data['status']['conversations']['codex'], 'thread-keep')
+        self.assertEqual(json.loads(state_file.read_text(encoding='utf-8')),
+                         {'codex': {'thread_id': 'thread-keep'}})
+        self.assertEqual(self.admin('POST', '/admin/api/conversation/gemini/reset', '{}')[0], 404)
+        self.assertEqual(self.request('POST', '/admin/api/conversation/codex/reset', '{}')[0], 403)
+        self.assertEqual(self.admin('POST', '/admin/api/conversation/codex/reset', '{}',
+                                    {'Origin': 'http://evil.example'})[0], 403)
+        self.assertEqual(json.loads(state_file.read_text(encoding='utf-8')),
+                         {'codex': {'thread_id': 'thread-keep'}})
+
     def test_talk_and_health_are_unchanged(self):
         self.assertEqual(self.request('POST', '/talk', wav(), {
             'Content-Type': 'audio/wav', 'Origin': 'http://evil.example'})[0], 403)
@@ -426,6 +446,78 @@ class AdminTests(unittest.TestCase):
         health = json.loads(self.request('GET', '/health')[2])
         self.assertEqual((health['ok'], health['agent']), (True, 'claude'))
         self.assertEqual(health['conversation']['cwd'], str(self.root))
+
+
+class LengthTests(unittest.TestCase):
+    """The reply is trimmed to whole sentences, never cut mid-word."""
+
+    def pipeline(self, bytes_per_char=20000):
+        p = s.Pipeline('unused')
+        calls = []
+        def synthesize(text, root):
+            calls.append(text)
+            return b'\0\1' * (len(text) * bytes_per_char // 2)
+        p.synthesize = synthesize
+        return p, calls
+
+    def test_a_reply_that_fits_is_left_alone(self):
+        p, calls = self.pipeline()
+        for text in ('みじかい返答です。', 'あ' * 100):
+            with self.subTest(text=text[:12]):
+                reply, audio = p.fit(text, Path('/unused'))
+                self.assertEqual(reply, text)
+                self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
+        self.assertEqual(calls, ['みじかい返答です。', 'あ' * 100])
+        # 100 characters is well past the old 30 second ceiling and is still kept.
+        self.assertGreater(len(p.synthesize('あ' * 100, None)), s.RATE * 2 * 30)
+
+    def test_a_long_reply_loses_whole_sentences_from_the_end(self):
+        p, calls = self.pipeline()
+        text = ''.join('これは' + str(i) + '番目の文です。' for i in range(40))
+        reply, audio = p.fit(text, Path('/unused'))
+        self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
+        self.assertLess(len(reply), len(text))
+        self.assertTrue(text.startswith(reply), reply)
+        self.assertTrue(reply.endswith('。'), reply)
+        self.assertLessEqual(len(calls), 5, calls)
+
+    def test_one_oversized_sentence_falls_back_to_clauses(self):
+        p, calls = self.pipeline()
+        text = '、'.join('とても長い句' + str(i) for i in range(50)) + '。'
+        reply, audio = p.fit(text, Path('/unused'))
+        self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
+        self.assertTrue(text.startswith(reply), reply)
+        self.assertFalse(reply.endswith('、'), reply)
+        self.assertGreater(len(reply), 0)
+
+    def test_a_single_unbreakable_sentence_is_an_error(self):
+        p, calls = self.pipeline()
+        with self.assertRaisesRegex(RuntimeError, 'exceeds device limit'):
+            p.fit('あ' * 300, Path('/unused'))
+
+    def test_the_limit_is_what_decides(self):
+        p, calls = self.pipeline()
+        text = ''.join('これは' + str(i) + '番目の文です。' for i in range(10))
+        self.assertEqual(p.fit(text, Path('/unused'))[0], text)
+        tight, audio = p.fit(text, Path('/unused'), s.RATE * 2 * 30)
+        self.assertLess(len(tight), len(text))
+        self.assertLessEqual(len(audio), s.RATE * 2 * 30)
+        self.assertTrue(tight.endswith('。'), tight)
+
+    def test_the_pipeline_no_longer_cuts_the_reply_at_a_fixed_length(self):
+        p = s.Pipeline('unused')
+        p.run = lambda argv, cwd, input=None: 'test'
+        long_reply = 'あ' * 300 + '。'
+        with patch.object(p.agent, 'ask', return_value=long_reply), \
+                patch.object(p, 'synthesize', return_value=b'\0\1' * 8000):
+            result, audio = p(wav())
+        self.assertEqual(result['reply'], long_reply)
+
+    def test_split_parts_rejoins_into_the_original(self):
+        text = 'ひとつ目です。ふたつ目です！みっつ目ですか？しめの文'
+        pieces = s.split_parts(text, s.SENTENCE_MARKS)
+        self.assertEqual(len(pieces), 4)
+        self.assertEqual(''.join(pieces), text)
 
 
 if __name__ == '__main__':

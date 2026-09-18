@@ -35,6 +35,9 @@
     background: #8881; color: inherit; cursor: pointer;
   }
   button[aria-pressed=true] { background: #7a7aff44; border-color: #7a7aff; font-weight: 600; }
+  .reset { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle; }
+  .reset button { padding: 2px 8px; font-size: 12px; }
+  .reset button.danger { border-color: #d55; background: #d5522; font-weight: 600; }
   button:disabled { opacity: .5; cursor: default; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .note { opacity: .7; font-size: 13px; margin: 6px 0 0; }
@@ -53,8 +56,8 @@
     <dt>稼働</dt><dd id="s-running">-</dd>
     <dt>モデル</dt><dd id="s-model">-</dd>
     <dt>思考量</dt><dd id="s-effort">-</dd>
-    <dt>Codex 会話</dt><dd id="s-codex">-</dd>
-    <dt>Claude 会話</dt><dd id="s-claude">-</dd>
+    <dt>Codex 会話</dt><dd><span id="s-codex">-</span><span class="reset" id="reset-codex"></span></dd>
+    <dt>Claude 会話</dt><dd><span id="s-claude">-</span><span class="reset" id="reset-claude"></span></dd>
     <dt>作業場所</dt><dd id="s-cwd">-</dd>
   </dl>
 </section>
@@ -95,6 +98,7 @@
   <p class="note">
     保存だけでは会話に反映されません。「保存して反映」で会話プロセスを再起動し、新しい設定と指示文を読み込みます。
     会話履歴は Codex と Claude で別々です。切り替えて戻ると、それぞれ前の続きから再開します。
+    上の「会話をリセット」はその種別の会話だけを捨て、次の発話から新しい会話を始めます。
   </p>
   <div id="message" role="status" aria-live="polite"></div>
 </section>
@@ -104,6 +108,8 @@
   "use strict";
   var state = null;
   var tab = "codex";
+  var confirming = null;
+  var names = {codex: "Codex", claude: "Claude"};
   var edited = {codex: null, claude: null};
   var busyRequest = false;
 
@@ -133,8 +139,45 @@
     }
   }
 
+  function showReset(kind) {
+    var box = $("reset-" + kind);
+    box.textContent = "";
+    function button(label, className, onClick) {
+      var element = document.createElement("button");
+      element.type = "button";
+      element.textContent = label;
+      if (className) { element.className = className; }
+      element.disabled = busyRequest;
+      element.addEventListener("click", onClick);
+      box.appendChild(element);
+      return element;
+    }
+    if (confirming === kind) {
+      button("本当に消す", "danger", function () { resetConversation(kind); });
+      button("やめる", "", function () { confirming = null; showResets(); });
+    } else {
+      button("会話をリセット", "", function () {
+        confirming = kind;
+        showResets();
+        say(names[kind] + "の会話を消すと、これまでのやり取りを覚えていない新しい会話が始まります。", null);
+      });
+    }
+  }
+
+  function showResets() {
+    showReset("codex");
+    showReset("claude");
+  }
+
+  function resetConversation(kind) {
+    confirming = null;
+    showResets();
+    run(function () {
+      return request("POST", "/admin/api/conversation/" + kind + "/reset", "{}", "application/json");
+    }, names[kind] + "の会話をリセットしました。次の発話から新しい会話が始まります。");
+  }
+
   function showStatus(status, busy) {
-    var names = {codex: "Codex", claude: "Claude"};
     $("s-agent").textContent = names[status.agent] || status.agent || "-";
     $("s-running").textContent = (status.running ? "稼働中" : "停止中")
       + (status.pid ? " (pid " + status.pid + ")" : "") + (busy ? " / 会話処理中" : "");
@@ -144,6 +187,7 @@
     $("s-codex").textContent = talks.codex || "(なし)";
     $("s-claude").textContent = talks.claude || "(なし)";
     $("s-cwd").textContent = status.cwd || "-";
+    showResets();
   }
 
   function showTabs() {
@@ -260,6 +304,7 @@
     }, "保存して反映しました。");
   });
 
+  showResets();
   refresh();
   setInterval(refresh, 10000);
 }());

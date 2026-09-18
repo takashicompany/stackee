@@ -375,6 +375,46 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(finished, ['reply slow'])
         self.assertGreater(waited, .4)
 
+    def test_reset_starts_a_new_conversation_and_keeps_the_other(self):
+        agent = self.agent()
+        agent.ask('remember codex-apple')
+        thread = agent.backend.thread_id
+        self.configure('claude')
+        agent.reload()
+        agent.ask('remember claude-grape')
+        session = agent.backend.session_id
+        status = agent.reset('codex')
+        self.assertIsNone(status['conversations']['codex'])
+        self.assertEqual(status['conversations']['claude'], session)
+        self.assertEqual(self.session(), {'claude': {'session_id': session}})
+        self.configure('codex')
+        agent.reload()
+        agent.ask('remember codex-melon')
+        self.assertNotEqual(agent.backend.thread_id, thread)
+        self.assertEqual(agent.ask('recall'), 'remember codex-melon')
+        self.assertEqual(self.session()['claude'], {'session_id': session})
+        with self.assertRaises(ValueError):
+            agent.reset('gemini')
+
+    def test_reset_stops_the_running_backend_and_waits_for_an_in_flight_ask(self):
+        self.configure('claude')
+        agent = self.agent(timeout=10)
+        finished = []
+        worker = threading.Thread(target=lambda: finished.append(agent.ask('slow')))
+        worker.start()
+        time.sleep(.2)
+        started = time.monotonic()
+        agent.reset('claude')
+        waited = time.monotonic() - started
+        worker.join(5)
+        self.assertEqual(finished, ['reply slow'])
+        self.assertGreater(waited, .4)
+        self.assertIsNone(agent.backend)
+        self.assertIsNone(agent.status()['conversations']['claude'])
+        agent.ask('remember grape')
+        self.assertTrue(agent.backend.session_id)
+        self.assertEqual(agent.ask('recall'), 'remember grape')
+
     def test_reload_reports_a_bad_model_instead_of_leaving_it_running(self):
         agent = self.agent()
         agent.start()
