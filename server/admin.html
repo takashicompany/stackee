@@ -84,7 +84,7 @@
     <button type="button" id="tab-claude" aria-pressed="false">Claude (CLAUDE.md)</button>
   </div>
   <textarea id="instructions" spellcheck="false"></textarea>
-  <p class="note">表示中のタブの指示文だけを保存します。</p>
+  <p class="note">両方のタブの指示文を保存します。変更のないタブは送りません。</p>
 </section>
 
 <section>
@@ -204,11 +204,23 @@
   }
 
   function save() {
+    // Both tabs are saved: an edit made before switching tabs must not be dropped.
     edited[tab] = $("instructions").value;
-    var text = edited[tab];
+    var known = (state && state.instructions) || {};
+    var pending = ["codex", "claude"].filter(function (kind) {
+      return edited[kind] !== null && edited[kind] !== known[kind];
+    });
     return request("PUT", "/admin/api/config", JSON.stringify(collect()), "application/json")
       .then(function () {
-        return request("PUT", "/admin/api/instructions/" + tab, text, "text/plain; charset=utf-8");
+        return pending.reduce(function (chain, kind) {
+          return chain.then(function () {
+            return request("PUT", "/admin/api/instructions/" + kind, edited[kind],
+                           "text/plain; charset=utf-8")
+              .then(function () {
+                if (state) { state.instructions[kind] = edited[kind]; }
+              });
+          });
+        }, Promise.resolve());
       });
   }
 

@@ -363,18 +363,31 @@ class AdminTests(unittest.TestCase):
                 self.assertIn('error', json.loads(body))
         self.assertEqual((self.root / 'agent.json').read_bytes(), original)
 
-    def test_instructions_are_saved_per_backend_and_must_not_be_blank(self):
-        text = 'あたらしい指示\nです\n'.encode('utf-8')
-        for kind, name in (('codex', 'AGENTS.md'), ('claude', 'CLAUDE.md')):
-            status, _, _ = self.admin('PUT', '/admin/api/instructions/' + kind, text,
+    def test_each_backend_keeps_its_own_instructions(self):
+        """The page saves both tabs; one backend's text must never overwrite the other's."""
+        texts = {'codex': 'Codex の新しい指示\nです\n'.encode('utf-8'),
+                 'claude': 'Claude の新しい指示\nです\n'.encode('utf-8')}
+        files = {'codex': 'AGENTS.md', 'claude': 'CLAUDE.md'}
+        for kind in ('codex', 'claude'):
+            status, _, _ = self.admin('PUT', '/admin/api/instructions/' + kind, texts[kind],
                                       {'Content-Type': 'text/plain; charset=utf-8'})
             self.assertEqual(status, 200)
-            self.assertEqual((self.root / name).read_bytes(), text)
+            self.assertEqual((self.root / files[kind]).read_bytes(), texts[kind])
+        other = {'codex': 'claude', 'claude': 'codex'}
+        for kind in ('codex', 'claude'):
+            self.assertNotEqual((self.root / files[kind]).read_bytes(), texts[other[kind]])
+        served = json.loads(self.request('GET', '/admin/api/state')[2])['instructions']
+        self.assertEqual({k: v.encode('utf-8') for k, v in served.items()}, texts)
+
+    def test_instructions_must_not_be_blank_or_oversized(self):
+        original = (self.root / 'CLAUDE.md').read_bytes()
+        text = 'あたらしい指示\n'.encode('utf-8')
         self.assertEqual(self.admin('PUT', '/admin/api/instructions/claude', b'  \n',
                                     {'Content-Type': 'text/plain; charset=utf-8'})[0], 400)
         self.assertEqual(self.admin('PUT', '/admin/api/instructions/other', text)[0], 404)
         self.assertEqual(self.admin('PUT', '/admin/api/instructions/claude',
                                     b'x' * (s.MAX_ADMIN_BYTES + 1))[0], 413)
+        self.assertEqual((self.root / 'CLAUDE.md').read_bytes(), original)
 
     def test_apply_restarts_the_backend_and_reports_failures(self):
         self.admin('PUT', '/admin/api/instructions/claude', 'べつの指示'.encode('utf-8'),
