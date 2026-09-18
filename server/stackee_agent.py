@@ -19,6 +19,7 @@ import time
 
 CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CLAUDE_TOOLS = "WebSearch,WebFetch"
 EFFORTS = {"codex": CODEX_EFFORTS, "claude": CLAUDE_EFFORTS}
 DEFAULT_MODELS = {"codex": "gpt-6-astra", "claude": "sonnet"}
 CONVERSATION_KEYS = {"codex": "thread_id", "claude": "session_id"}
@@ -385,8 +386,10 @@ class ClaudeAgent:
                      self.directory, self.session_id, self.model, self.effort)
 
     def _argv(self):
+        # Searching and fetching only: no files, no commands, no MCP, no approval prompts.
         argv = [self.claude, "-p", "--output-format", "json", "--model", self.model,
-                "--effort", self.effort, "--tools", "", "--strict-mcp-config",
+                "--effort", self.effort, "--tools", CLAUDE_TOOLS,
+                "--allowedTools", CLAUDE_TOOLS, "--strict-mcp-config",
                 "--setting-sources", "project", "--permission-mode", "plan"]
         if self.session_id:
             argv += ["--resume", self.session_id]

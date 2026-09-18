@@ -77,7 +77,8 @@ assert '-p' in args
 assert value('--output-format') == 'json'
 assert value('--model')
 assert value('--effort')
-assert value('--tools') == ''
+assert value('--tools') == 'WebSearch,WebFetch'
+assert value('--allowedTools') == 'WebSearch,WebFetch'
 assert '--strict-mcp-config' in args
 assert value('--setting-sources') == 'project'
 assert value('--permission-mode') == 'plan'

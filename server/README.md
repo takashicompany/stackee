@@ -111,7 +111,9 @@ systemctl --user disable --now stackee-talk stackee-voicevox
   発言を追加します。指示文は `server/agent/AGENTS.md` を開発者指示として渡します。
 - `claude`: 1発話ごとに `claude -p` を起動し、保存した会話 ID を `--resume` で継続します。
   指示文は `server/agent/CLAUDE.md` で、Claude Code が作業ディレクトリから読み込みます。
-  道具と MCP は無効、設定ソースは project のみ (実行ユーザーの `~/.claude/CLAUDE.md` は読みません)。
+  使える道具は Web 検索 (`WebSearch`) と Web 取得 (`WebFetch`) の2つだけで、
+  ファイル操作・コマンド実行・MCP は使えません。権限モードは plan、
+  設定ソースは project のみ (実行ユーザーの `~/.claude/CLAUDE.md` は読みません)。
 
 **会話は種別ごとに別々です。** 切り替えて戻すと、それぞれ前の続きから再開します。
 
@@ -181,7 +183,8 @@ Claude Code は `~/.claude/projects/<作業ディレクトリ名>/`) に保持�
 `/health` の `agent` で種別、`conversation` で cwd・PID・会話 ID・モデルを確認できます。
 
 Codex は既存のログインと設定を使い、音声エージェントには読み取り専用サンドボックスと
-非対話の承認ポリシーを指定します。Claude Code は道具を全部無効化し、権限モードは plan です。
+非対話の承認ポリシーを指定します。Claude Code は Web 検索と Web 取得だけを許可し、
+権限モードは plan なので承認待ちで止まりません。
 エージェントには URL・ドメイン名・出典リンクを含めないよう指示します。
 生成後にも URL と引用マーカーを除去し、Markdown リンクは表示名だけを残します。
 除去は文字数制限の前に行い、音声合成・画面へ返す回答に適用します。
