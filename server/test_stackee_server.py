@@ -10,7 +10,9 @@ import unittest
 from unittest.mock import patch
 import wave
 
+import stackee_agent
 import stackee_server as s
+from test_stackee_agent import FAKE_CLAUDE
 
 
 def wav(seconds=.5, rate=16000, value=1000):
@@ -262,6 +264,155 @@ class HttpTests(unittest.TestCase):
         self.assertFalse(self.server.jobs.busy)
         self.server.jobs.entries[ident]['created'] = time.monotonic() - 301
         self.assertIsNone(self.server.jobs.get(ident))
+
+
+class AdminTests(unittest.TestCase):
+    """The admin page and its API; /talk must keep behaving exactly as before."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / 'defaults').mkdir()
+        (self.root / 'defaults/AGENTS.md').write_text('Codex defaults', encoding='utf-8')
+        (self.root / 'defaults/CLAUDE.md').write_text('Claude defaults', encoding='utf-8')
+        (self.root / 'defaults/agent.json').write_text(json.dumps(
+            {'agent': 'claude', 'codex': {'model': 'test-model', 'effort': 'none'},
+             'claude': {'model': 'test-claude', 'effort': 'low'}}), encoding='utf-8')
+        import sys
+        claude = self.root / 'fake-claude'
+        claude.write_text('#!' + sys.executable + '\n' + FAKE_CLAUDE)
+        claude.chmod(0o700)
+        self.agent = stackee_agent.Agent(self.root, '/nonexistent/codex', str(claude))
+        self.agent.start()
+
+        class FakePipeline:
+            agent = self.agent
+
+            def __call__(inner, data):
+                return {'state': 'done', 'transcript': 'test', 'reply': 'reply'}, b''
+
+        self.server = s.ThreadingHTTPServer(('127.0.0.1', 0), s.Handler)
+        self.server.jobs = s.Jobs(FakePipeline())
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.agent.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+        self.tmp.cleanup()
+
+    def request(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+        conn.request(method, path, body, headers or {})
+        resp = conn.getresponse()
+        result = resp.status, dict(resp.getheaders()), resp.read()
+        conn.close()
+        return result
+
+    def admin(self, method, path, body=None, extra=None):
+        headers = {'X-Stackee-Admin': '1'}
+        headers.update(extra or {})
+        return self.request(method, path, body, headers)
+
+    def test_startup_restores_runtime_files_from_defaults(self):
+        for name in ('AGENTS.md', 'CLAUDE.md', 'agent.json'):
+            self.assertTrue((self.root / name).is_file(), name)
+        self.assertEqual((self.root / 'CLAUDE.md').read_text(encoding='utf-8'), 'Claude defaults')
+
+    def test_state_reports_config_instructions_status_and_choices(self):
+        status, headers, body = self.request('GET', '/admin/api/state')
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data['config']['agent'], 'claude')
+        self.assertEqual(data['instructions'], {'codex': 'Codex defaults', 'claude': 'Claude defaults'})
+        self.assertEqual(data['status']['agent'], 'claude')
+        self.assertTrue(data['status']['running'])
+        self.assertIs(data['busy'], False)
+        self.assertEqual(data['choices']['claude_effort'], list(stackee_agent.CLAUDE_EFFORTS))
+        self.assertIn('none', data['choices']['codex_effort'])
+
+    def test_admin_page_is_served_without_external_resources(self):
+        status, headers, body = self.request('GET', '/admin')
+        self.assertEqual(status, 200)
+        self.assertTrue(headers['Content-Type'].startswith('text/html'))
+        page = body.decode('utf-8')
+        self.assertIn('/admin/api/state', page)
+        self.assertNotIn('http://', page.replace('http://127.0.0.1', ''))
+        self.assertNotIn('https://', page)
+
+    def test_config_is_saved_but_not_applied_until_apply(self):
+        config = {'agent': 'codex', 'codex': {'model': 'test-model', 'effort': 'high'},
+                  'claude': {'model': 'test-claude', 'effort': 'max'}}
+        status, _, body = self.admin('PUT', '/admin/api/config', json.dumps(config),
+                                     {'Content-Type': 'application/json'})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads((self.root / 'agent.json').read_text(encoding='utf-8')), config)
+        self.assertEqual(self.agent.status()['agent'], 'claude')
+
+    def test_config_validation_errors_do_not_touch_the_file(self):
+        original = (self.root / 'agent.json').read_bytes()
+        for bad in ('{', json.dumps({'agent': 'gemini'}),
+                    json.dumps({'agent': 'claude', 'claude': {'model': 'x', 'effort': 'ultra'}}),
+                    json.dumps({'agent': 'codex', 'codex': {'model': '  '}})):
+            with self.subTest(bad=bad):
+                status, _, body = self.admin('PUT', '/admin/api/config', bad,
+                                             {'Content-Type': 'application/json'})
+                self.assertEqual(status, 400)
+                self.assertIn('error', json.loads(body))
+        self.assertEqual((self.root / 'agent.json').read_bytes(), original)
+
+    def test_instructions_are_saved_per_backend_and_must_not_be_blank(self):
+        text = 'あたらしい指示\nです\n'.encode('utf-8')
+        for kind, name in (('codex', 'AGENTS.md'), ('claude', 'CLAUDE.md')):
+            status, _, _ = self.admin('PUT', '/admin/api/instructions/' + kind, text,
+                                      {'Content-Type': 'text/plain; charset=utf-8'})
+            self.assertEqual(status, 200)
+            self.assertEqual((self.root / name).read_bytes(), text)
+        self.assertEqual(self.admin('PUT', '/admin/api/instructions/claude', b'  \n',
+                                    {'Content-Type': 'text/plain; charset=utf-8'})[0], 400)
+        self.assertEqual(self.admin('PUT', '/admin/api/instructions/other', text)[0], 404)
+        self.assertEqual(self.admin('PUT', '/admin/api/instructions/claude',
+                                    b'x' * (s.MAX_ADMIN_BYTES + 1))[0], 413)
+
+    def test_apply_restarts_the_backend_and_reports_failures(self):
+        self.admin('PUT', '/admin/api/instructions/claude', 'べつの指示'.encode('utf-8'),
+                   {'Content-Type': 'text/plain; charset=utf-8'})
+        status, _, body = self.admin('POST', '/admin/api/apply', '{}',
+                                     {'Content-Type': 'application/json'})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['status']['agent'], 'claude')
+        self.assertTrue(json.loads(body)['status']['running'])
+        (self.root / 'agent.json').write_text(json.dumps({'agent': 'claude', 'claude': {'model': ''}}))
+        status, _, body = self.admin('POST', '/admin/api/apply', '{}',
+                                     {'Content-Type': 'application/json'})
+        self.assertEqual(status, 500)
+        self.assertIn('error', json.loads(body))
+        self.assertFalse(self.agent.status()['running'])
+
+    def test_writes_require_the_admin_header_and_a_matching_origin(self):
+        body = json.dumps({'agent': 'claude'})
+        self.assertEqual(self.request('PUT', '/admin/api/config', body)[0], 403)
+        self.assertEqual(self.request('POST', '/admin/api/apply', '{}')[0], 403)
+        host = '%s:%s' % self.server.server_address
+        self.assertEqual(self.admin('PUT', '/admin/api/config', body,
+                                    {'Origin': 'http://evil.example'})[0], 403)
+        self.assertEqual(self.admin('PUT', '/admin/api/config', body,
+                                    {'Origin': 'http://' + host})[0], 200)
+        self.assertEqual(self.request('OPTIONS', '/admin/api/config')[0], 501)
+
+    def test_talk_and_health_are_unchanged(self):
+        self.assertEqual(self.request('POST', '/talk', wav(), {
+            'Content-Type': 'audio/wav', 'Origin': 'http://evil.example'})[0], 403)
+        self.assertEqual(self.request('PUT', '/talk', wav(), {'Content-Type': 'audio/wav'})[0], 404)
+        status, headers, body = self.request('POST', '/talk', wav(), {'Content-Type': 'audio/wav'})
+        self.assertEqual(status, 202)
+        self.server.jobs.worker.join(5)
+        self.assertEqual(json.loads(self.request('GET', json.loads(body)['status_url'])[2])['state'], 'done')
+        health = json.loads(self.request('GET', '/health')[2])
+        self.assertEqual((health['ok'], health['agent']), (True, 'claude'))
+        self.assertEqual(health['conversation']['cwd'], str(self.root))
 
 
 if __name__ == '__main__':

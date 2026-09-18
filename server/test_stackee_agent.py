@@ -4,9 +4,11 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
-from stackee_agent import CodexAgent
+from stackee_agent import Agent, CodexAgent, normalize_config
 
 
 FAKE_CODEX = r'''
@@ -62,6 +64,62 @@ for line in sys.stdin:
         send({'method': 'turn/completed', 'params': {'threadId': state['id'],
              'turn': {'id': turn, 'status': 'failed' if text == 'fail' else 'completed', 'error': {'message': 'test failure'}}}})
         send({'id': msg['id'], 'result': {'turn': {'id': turn}}})
+'''
+
+
+FAKE_CLAUDE = r'''
+import json, sys, time, uuid
+from pathlib import Path
+args = sys.argv[1:]
+def value(name):
+    return args[args.index(name) + 1] if name in args else None
+assert '-p' in args
+assert value('--output-format') == 'json'
+assert value('--model')
+assert value('--effort')
+assert value('--tools') == ''
+assert '--strict-mcp-config' in args
+assert value('--setting-sources') == 'project'
+assert value('--permission-mode') == 'plan'
+resume = value('--resume')
+text = sys.stdin.read()
+store = Path('.state/fake-claude.json')
+store.parent.mkdir(parents=True, exist_ok=True)
+book = json.loads(store.read_text()) if store.exists() else {}
+
+def emit(payload):
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+if resume is not None:
+    if resume not in book:
+        emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+              'session_id': resume, 'result': 'No conversation found with session ID: ' + resume})
+        sys.exit(1)
+    ident = resume
+else:
+    ident = str(uuid.uuid4())
+    book[ident] = []
+book[ident].append(text)
+store.write_text(json.dumps(book, ensure_ascii=False))
+if text == 'timeout':
+    time.sleep(20)
+    sys.exit(0)
+if text == 'slow':
+    time.sleep(1)
+if text == 'recall':
+    reply = next(x for x in book[ident] if x.startswith('remember '))
+elif text == 'instructions':
+    reply = Path('CLAUDE.md').read_text(encoding='utf-8')
+elif text == 'fail':
+    emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+          'session_id': ident, 'result': 'test failure'})
+    sys.exit(0)
+elif text == 'missing-final':
+    reply = ''
+else:
+    reply = 'reply ' + text
+emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': ident,
+      'model': value('--model'), 'result': reply})
 '''
 
 
@@ -154,6 +212,178 @@ class AgentTests(unittest.TestCase):
         for prompt, error in [('missing-final', 'no final message'), ('fail', 'test failure')]:
             with self.subTest(prompt=prompt), self.assertRaisesRegex(RuntimeError, error):
                 agent.ask(prompt)
+
+
+class RouterTests(unittest.TestCase):
+    """The shared Agent entry point: two backends, two conversations, one directory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / 'AGENTS.md').write_text('Codex instructions', encoding='utf-8')
+        (self.root / 'CLAUDE.md').write_text('Claude instructions', encoding='utf-8')
+        self.codex = self.script('fake-codex', FAKE_CODEX)
+        self.claude = self.script('fake-claude', FAKE_CLAUDE)
+        self.configure('codex')
+        self.agents = []
+
+    def script(self, name, body):
+        path = self.root / name
+        path.write_text('#!' + sys.executable + '\n' + body)
+        path.chmod(0o700)
+        return str(path)
+
+    def configure(self, kind, codex_effort='none', claude_effort='low'):
+        (self.root / 'agent.json').write_text(json.dumps({
+            'agent': kind,
+            'codex': {'model': 'test-model', 'effort': codex_effort},
+            'claude': {'model': 'test-claude', 'effort': claude_effort}}), encoding='utf-8')
+
+    def agent(self, **kwargs):
+        agent = Agent(self.root, self.codex, self.claude, **kwargs)
+        self.agents.append(agent)
+        return agent
+
+    def session(self):
+        return json.loads((self.root / '.state/session.json').read_text(encoding='utf-8'))
+
+    def tearDown(self):
+        for agent in self.agents:
+            agent.close()
+        self.tmp.cleanup()
+
+    def test_configuration_migrates_old_shape_and_rejects_bad_values(self):
+        self.assertEqual(normalize_config({'model': 'gpt-6-astra', 'effort': 'low'}), {
+            'agent': 'codex', 'codex': {'model': 'gpt-6-astra', 'effort': 'low'},
+            'claude': {'model': 'sonnet', 'effort': 'low'}})
+        for bad in ({'agent': 'gemini'}, {'agent': 'codex', 'codex': {'model': ' '}},
+                    {'agent': 'claude', 'claude': {'model': 'sonnet', 'effort': 'ultra'}},
+                    {'agent': 'codex', 'codex': {'model': 'x', 'effort': 'nope'}}, []):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                normalize_config(bad)
+
+    def test_claude_conversation_continues_and_resumes_after_restart(self):
+        self.configure('claude')
+        agent = self.agent()
+        agent.ask('remember grape')
+        ident = agent.backend.session_id
+        self.assertTrue(ident)
+        for i in range(3):
+            agent.ask('filler ' + str(i))
+        self.assertEqual(agent.ask('recall'), 'remember grape')
+        self.assertEqual(agent.status()['conversations']['claude'], ident)
+        self.assertIsNone(agent.status()['pid'])
+        self.assertTrue(agent.status()['running'])
+        self.assertEqual((self.root / '.state/session.json').stat().st_mode & 0o777, 0o600)
+        agent.close()
+        resumed = self.agent()
+        self.assertEqual(resumed.ask('recall'), 'remember grape')
+        self.assertEqual(resumed.backend.session_id, ident)
+
+    def test_claude_instruction_change_applies_to_the_next_utterance(self):
+        self.configure('claude')
+        agent = self.agent()
+        self.assertEqual(agent.ask('instructions'), 'Claude instructions')
+        ident = agent.backend.session_id
+        (self.root / 'CLAUDE.md').write_text('Updated instructions', encoding='utf-8')
+        self.assertEqual(agent.ask('instructions'), 'Updated instructions')
+        self.assertEqual(agent.backend.session_id, ident)
+
+    def test_switching_backends_keeps_two_conversations_and_resumes_each(self):
+        agent = self.agent()
+        agent.ask('remember codex-apple')
+        thread = agent.backend.thread_id
+        self.configure('claude')
+        agent.reload()
+        agent.ask('remember claude-grape')
+        session = agent.backend.session_id
+        self.assertNotEqual(thread, session)
+        self.configure('codex')
+        agent.reload()
+        self.assertEqual(agent.ask('recall'), 'remember codex-apple')
+        self.assertEqual(agent.backend.thread_id, thread)
+        self.configure('claude')
+        agent.reload()
+        self.assertEqual(agent.ask('recall'), 'remember claude-grape')
+        self.assertEqual(agent.backend.session_id, session)
+        self.assertEqual(self.session(), {'codex': {'thread_id': thread},
+                                          'claude': {'session_id': session}})
+
+    def test_legacy_session_and_config_are_migrated_without_losing_the_thread(self):
+        agent = self.agent()
+        agent.ask('remember codex-apple')
+        thread = agent.backend.thread_id
+        agent.close()
+        (self.root / '.state/session.json').write_text(json.dumps({'thread_id': thread}))
+        (self.root / 'agent.json').write_text(json.dumps({'model': 'test-model', 'effort': 'none'}))
+        migrated = self.agent()
+        self.assertEqual(migrated.ask('recall'), 'remember codex-apple')
+        self.assertEqual(migrated.backend.thread_id, thread)
+        self.assertEqual(self.session(), {'codex': {'thread_id': thread}})
+        self.assertEqual(migrated.status()['agent'], 'codex')
+
+    def test_claude_unknown_session_raises_and_keeps_the_saved_ids(self):
+        agent = self.agent()
+        agent.ask('remember codex-apple')
+        thread = agent.backend.thread_id
+        agent.close()
+        (self.root / '.state/session.json').write_text(json.dumps(
+            {'codex': {'thread_id': thread}, 'claude': {'session_id': 'missing-id'}}))
+        original = (self.root / '.state/session.json').read_bytes()
+        self.configure('claude')
+        broken = self.agent()
+        with self.assertRaisesRegex(RuntimeError, 'No conversation found'):
+            broken.ask('hello')
+        self.assertEqual((self.root / '.state/session.json').read_bytes(), original)
+        self.assertEqual(broken.backend.session_id, 'missing-id')
+
+    def test_claude_errors_are_raised_and_never_spoken(self):
+        self.configure('claude')
+        agent = self.agent()
+        for prompt, error in [('missing-final', 'no final message'), ('fail', 'test failure')]:
+            with self.subTest(prompt=prompt), self.assertRaisesRegex(RuntimeError, error):
+                agent.ask(prompt)
+
+    def test_claude_timeout_reaps_the_process(self):
+        self.configure('claude')
+        agent = self.agent(timeout=1)
+        agent.ask('remember grape')
+        ident = agent.backend.session_id
+        with self.assertRaises(TimeoutError):
+            agent.ask('timeout')
+        self.assertIsNone(agent.backend.process)
+        self.assertEqual(agent.ask('recall'), 'remember grape')
+        self.assertEqual(agent.backend.session_id, ident)
+
+    def test_leading_dash_is_spoken_not_parsed_as_an_option(self):
+        self.configure('claude')
+        agent = self.agent()
+        self.assertEqual(agent.ask('--model evil'), 'reply --model evil')
+
+    def test_reload_waits_for_an_in_flight_ask(self):
+        self.configure('claude')
+        agent = self.agent(timeout=10)
+        finished = []
+        worker = threading.Thread(target=lambda: finished.append(agent.ask('slow')))
+        worker.start()
+        time.sleep(.2)
+        started = time.monotonic()
+        agent.reload()
+        waited = time.monotonic() - started
+        worker.join(5)
+        self.assertEqual(finished, ['reply slow'])
+        self.assertGreater(waited, .4)
+
+    def test_reload_reports_a_bad_model_instead_of_leaving_it_running(self):
+        agent = self.agent()
+        agent.start()
+        (self.root / 'agent.json').write_text(json.dumps({'agent': 'codex', 'codex': {'model': ''}}))
+        with self.assertRaises(ValueError):
+            agent.reload()
+        self.assertFalse(agent.status()['running'])
+        self.configure('codex')
+        agent.reload()
+        self.assertTrue(agent.status()['running'])
 
 
 if __name__ == '__main__':

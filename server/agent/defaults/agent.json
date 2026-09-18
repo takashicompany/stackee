@@ -1,0 +1,5 @@
+{
+  "agent": "codex",
+  "codex": {"model": "gpt-6-astra", "effort": "low"},
+  "claude": {"model": "sonnet", "effort": "low"}
+}

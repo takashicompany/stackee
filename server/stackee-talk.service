@@ -1,5 +1,5 @@
 [Unit]
-Description=stackee Codex voice conversation server
+Description=stackee voice conversation server
 Wants=stackee-voicevox.service
 After=stackee-voicevox.service
 

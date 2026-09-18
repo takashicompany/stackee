@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""LAN voice receiver: WAV → whisper-cli → persistent Codex agent → say or VOICEVOX.
+"""LAN voice receiver: WAV → whisper-cli → the configured agent → say or VOICEVOX.
 
 Python standard library only. POST /talk accepts WAV; poll the returned Location
 for status, then GET its /audio endpoint for 16 kHz, signed little-endian PCM.
+GET /admin serves the browser page that switches agent, model, effort and instructions.
 """
 from __future__ import annotations
 
@@ -26,13 +27,16 @@ import urllib.parse
 import urllib.request
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from stackee_agent import CodexAgent
+import stackee_agent
+from stackee_agent import Agent
 
 RATE = 16000
 MAX_SECONDS = 30
 MAX_UPLOAD = RATE * 2 * MAX_SECONDS + 4096
 MAX_REPLY_BYTES = RATE * 2 * MAX_SECONDS
+MAX_ADMIN_BYTES = 64 * 1024
 AGENT_DIR = Path(__file__).resolve().parent / "agent"
+ADMIN_HTML = Path(__file__).resolve().parent / "admin.html"
 
 
 def read_audio(data):
@@ -113,7 +117,8 @@ def clean_reply(text):
 class Pipeline:
     def __init__(self, model, whisper="whisper-cli", codex="codex", codex_model=None,
                  voice="Kyoko", timeout=120, echo=False, tts="say",
-                 voicevox_url="http://127.0.0.1:50021", speaker=3, agent_dir=None):
+                 voicevox_url="http://127.0.0.1:50021", speaker=3, agent_dir=None,
+                 claude="claude"):
         self.model = str(Path(model).resolve())
         self.whisper = whisper
         self.codex = codex
@@ -126,13 +131,15 @@ class Pipeline:
         self.tts = tts
         self.voicevox_url = voicevox_url.rstrip("/")
         self.speaker = speaker
-        self.agent = None if echo else CodexAgent(agent_dir or AGENT_DIR, codex, codex_model, timeout)
+        self.claude = claude
+        self.agent = None if echo else Agent(agent_dir or AGENT_DIR, codex, claude,
+                                             codex_model, timeout)
         self.lock = threading.Lock()
         self.process = None
         self.closed = False
 
     def check(self):
-        for cmd in (self.whisper,) + (("say",) if self.tts == "say" else ()) + (() if self.echo else (self.codex,)):
+        for cmd in (self.whisper,) + (("say",) if self.tts == "say" else ()):
             if not shutil.which(cmd):
                 raise RuntimeError("Executable not found: " + cmd)
         if not Path(self.model).is_file():
@@ -319,11 +326,92 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    @property
+    def agent(self):
+        return getattr(self.server.jobs.pipeline, "agent", None)
+
+    def admin_allowed(self):
+        """Browsers may read /admin, but only the page itself may write, and only same-origin."""
+        if self.headers.get("X-Stackee-Admin") != "1":
+            self.send(403, {"error": "admin_header_required"})
+            return False
+        origin = self.headers.get("Origin")
+        if origin and urllib.parse.urlsplit(origin).netloc != (self.headers.get("Host") or ""):
+            self.send(403, {"error": "cross_origin"})
+            return False
+        return True
+
+    def admin_body(self):
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not lengths[0].isdigit():
+            self.send(411, {"error": "content_length_required"})
+            return None
+        length = int(lengths[0])
+        if length > MAX_ADMIN_BYTES:
+            self.send(413, {"error": "too_large"})
+            return None
+        data = self.rfile.read(length)
+        if len(data) != length:
+            self.send(400, {"error": "incomplete_body"})
+            return None
+        return data
+
+    def admin_write(self, path):
+        agent = self.agent
+        if agent is None:
+            return self.send(503, {"error": "agent_disabled"})
+        if not self.admin_allowed():
+            return None
+        data = self.admin_body()
+        if data is None:
+            return None
+        try:
+            if path == "/admin/api/config":
+                config = stackee_agent.normalize_config(json.loads(data.decode("utf-8")))
+                stackee_agent.write_atomic(agent.directory / "agent.json",
+                                           json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+                return self.send(200, {"saved": True, "config": config})
+            kind = path.rsplit("/", 1)[1]
+            text = data.decode("utf-8")
+            if not text.strip():
+                return self.send(400, {"error": "instructions_empty"})
+            stackee_agent.write_atomic(agent.directory / stackee_agent.INSTRUCTION_FILES[kind],
+                                       text.replace("\r\n", "\n"))
+            return self.send(200, {"saved": True})
+        except (ValueError, UnicodeDecodeError) as exc:
+            return self.send(400, {"error": str(exc)})
+        except OSError as exc:
+            return self.send(500, {"error": str(exc)})
+
+    def admin_state(self):
+        agent = self.agent
+        if agent is None:
+            return self.send(503, {"error": "agent_disabled"})
+        instructions = {}
+        for kind, name in stackee_agent.INSTRUCTION_FILES.items():
+            path = agent.directory / name
+            instructions[kind] = path.read_text(encoding="utf-8") if path.exists() else ""
+        try:
+            config = stackee_agent.read_config(agent.directory / "agent.json")
+        except (OSError, ValueError) as exc:
+            return self.send(500, {"error": str(exc)})
+        return self.send(200, {"config": config, "instructions": instructions,
+                               "status": agent.status(), "busy": self.server.jobs.busy,
+                               "choices": {"codex_effort": list(stackee_agent.CODEX_EFFORTS),
+                                           "claude_effort": list(stackee_agent.CLAUDE_EFFORTS)}})
+
     def do_GET(self):
         if self.path == "/health":
-            agent = getattr(self.server.jobs.pipeline, "agent", None)
-            return self.send(200, {"ok": True, "agent": "codex app-server", "busy": self.server.jobs.busy,
-                                   "conversation": agent.status() if agent else None})
+            agent = self.agent
+            status = agent.status() if agent else None
+            return self.send(200, {"ok": True, "agent": (status or {}).get("agent") or "echo",
+                                   "busy": self.server.jobs.busy, "conversation": status})
+        if self.path == "/admin":
+            if not ADMIN_HTML.is_file():
+                return self.send(404, {"error": "not_found"})
+            return self.send(200, ADMIN_HTML.read_bytes(), "text/html; charset=utf-8")
+        if self.path == "/admin/api/state":
+            return self.admin_state()
         match = re.fullmatch(r"/jobs/([0-9a-f]{32})(/audio)?", self.path)
         item = self.server.jobs.get(match[1]) if match else None
         if not item:
@@ -339,7 +427,27 @@ class Handler(BaseHTTPRequestHandler):
                         channels=1, sample_width=2, audio_bytes=len(audio))
         return self.send(200, item)
 
+    def do_PUT(self):
+        if self.path not in ("/admin/api/config", "/admin/api/instructions/codex",
+                             "/admin/api/instructions/claude"):
+            return self.send(404, {"error": "not_found"})
+        return self.admin_write(self.path)
+
     def do_POST(self):
+        if self.path == "/admin/api/apply":
+            agent = self.agent
+            if agent is None:
+                return self.send(503, {"error": "agent_disabled"})
+            if not self.admin_allowed():
+                return None
+            if self.admin_body() is None:
+                return None
+            try:
+                status = agent.reload()
+            except Exception as exc:
+                logging.exception("Applying agent settings failed")
+                return self.send(500, {"error": str(exc) or exc.__class__.__name__})
+            return self.send(200, {"applied": True, "status": status})
         if self.path != "/talk":
             return self.send(404, {"error": "not_found"})
         # Device API only. No CORS; reject browser-originated posts explicitly.
@@ -379,6 +487,7 @@ def main():
     parser.add_argument("--whisper", default="whisper-cli")
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--codex-model")
+    parser.add_argument("--claude", default="claude")
     parser.add_argument("--agent-dir", type=Path, default=AGENT_DIR)
     parser.add_argument("--voice", default="Kyoko")
     parser.add_argument("--tts", choices=("say", "voicevox"),
@@ -386,12 +495,13 @@ def main():
     parser.add_argument("--voicevox-url", default="http://127.0.0.1:50021")
     parser.add_argument("--speaker", type=int, default=3, help="VOICEVOX style ID")
     parser.add_argument("--timeout", type=float, default=120)
-    parser.add_argument("--echo", action="store_true", help="STT/TTS test, without Codex")
+    parser.add_argument("--echo", action="store_true", help="STT/TTS test, without the agent")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    pipeline = Pipeline(args.whisper_model, args.whisper, args.codex,
-                        args.codex_model, args.voice, args.timeout, args.echo,
-                        args.tts, args.voicevox_url, args.speaker, args.agent_dir)
+    pipeline = Pipeline(args.whisper_model, whisper=args.whisper, codex=args.codex,
+                        codex_model=args.codex_model, voice=args.voice, timeout=args.timeout,
+                        echo=args.echo, tts=args.tts, voicevox_url=args.voicevox_url,
+                        speaker=args.speaker, agent_dir=args.agent_dir, claude=args.claude)
     try:
         pipeline.check()
         server = ThreadingHTTPServer((args.host, args.port), Handler)
@@ -404,7 +514,8 @@ def main():
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    logging.info("Listening on http://%s:%s/talk", *server.server_address)
+    logging.info("Listening on http://%s:%s/talk (admin: http://%s:%s/admin)",
+                 *(server.server_address * 2))
     try:
         server.serve_forever()
     finally:

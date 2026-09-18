@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>stackee 会話エージェント設定</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; font-size: 15px; line-height: 1.6;
+    font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 10px; }
+  h2 { font-size: 15px; margin: 18px 0 6px; }
+  section { border: 1px solid #8884; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0; }
+  dt { opacity: .7; white-space: nowrap; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  label { display: block; }
+  .kind { border-top: 1px solid #8883; padding-top: 8px; margin-top: 8px; }
+  .kind:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .row > label { flex: 1 1 140px; min-width: 0; }
+  input[type=text], select, textarea {
+    width: 100%; padding: 6px; font: inherit; border: 1px solid #8886;
+    border-radius: 6px; background: transparent; color: inherit;
+  }
+  textarea { min-height: 260px; resize: vertical; font-family: ui-monospace, monospace; font-size: 13px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 6px; }
+  .tabs button { flex: 1 1 0; }
+  button {
+    padding: 8px 12px; font: inherit; border: 1px solid #8886; border-radius: 6px;
+    background: #8881; color: inherit; cursor: pointer;
+  }
+  button[aria-pressed=true] { background: #7a7aff44; border-color: #7a7aff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .note { opacity: .7; font-size: 13px; margin: 6px 0 0; }
+  #message { margin-top: 10px; padding: 8px 10px; border-radius: 6px; border: 1px solid #8886; min-height: 1.6em; }
+  #message[data-tone=ok] { border-color: #2a8; background: #2a81; }
+  #message[data-tone=ng] { border-color: #d55; background: #d551; }
+</style>
+</head>
+<body>
+<h1>stackee 会話エージェント設定</h1>
+
+<section>
+  <h2>現在の状態</h2>
+  <dl>
+    <dt>種別</dt><dd id="s-agent">-</dd>
+    <dt>稼働</dt><dd id="s-running">-</dd>
+    <dt>モデル</dt><dd id="s-model">-</dd>
+    <dt>思考量</dt><dd id="s-effort">-</dd>
+    <dt>Codex 会話</dt><dd id="s-codex">-</dd>
+    <dt>Claude 会話</dt><dd id="s-claude">-</dd>
+    <dt>作業場所</dt><dd id="s-cwd">-</dd>
+  </dl>
+</section>
+
+<section>
+  <h2>エージェント</h2>
+  <div class="kind">
+    <label><input type="radio" name="agent" value="codex"> Codex</label>
+    <div class="row">
+      <label>モデル<input type="text" id="codex-model" autocapitalize="off" autocomplete="off" spellcheck="false"></label>
+      <label>思考量<select id="codex-effort"></select></label>
+    </div>
+  </div>
+  <div class="kind">
+    <label><input type="radio" name="agent" value="claude"> Claude</label>
+    <div class="row">
+      <label>モデル<input type="text" id="claude-model" autocapitalize="off" autocomplete="off" spellcheck="false"></label>
+      <label>思考量<select id="claude-effort"></select></label>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>指示文</h2>
+  <div class="tabs">
+    <button type="button" id="tab-codex" aria-pressed="true">Codex (AGENTS.md)</button>
+    <button type="button" id="tab-claude" aria-pressed="false">Claude (CLAUDE.md)</button>
+  </div>
+  <textarea id="instructions" spellcheck="false"></textarea>
+  <p class="note">表示中のタブの指示文だけを保存します。</p>
+</section>
+
+<section>
+  <div class="actions">
+    <button type="button" id="save">保存</button>
+    <button type="button" id="apply">保存して反映</button>
+  </div>
+  <p class="note">
+    保存だけでは会話に反映されません。「保存して反映」で会話プロセスを再起動し、新しい設定と指示文を読み込みます。
+    会話履歴は Codex と Claude で別々です。切り替えて戻ると、それぞれ前の続きから再開します。
+  </p>
+  <div id="message" role="status" aria-live="polite"></div>
+</section>
+
+<script>
+(function () {
+  "use strict";
+  var state = null;
+  var tab = "codex";
+  var edited = {codex: null, claude: null};
+  var busyRequest = false;
+
+  function $(id) { return document.getElementById(id); }
+
+  function say(text, tone) {
+    var box = $("message");
+    box.textContent = text;
+    if (tone) { box.setAttribute("data-tone", tone); } else { box.removeAttribute("data-tone"); }
+  }
+
+  function fill(select, values, current) {
+    select.textContent = "";
+    values.forEach(function (value) {
+      var option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    });
+    select.value = current;
+    if (select.value !== current) {
+      var extra = document.createElement("option");
+      extra.value = current;
+      extra.textContent = current;
+      select.appendChild(extra);
+      select.value = current;
+    }
+  }
+
+  function showStatus(status, busy) {
+    var names = {codex: "Codex", claude: "Claude"};
+    $("s-agent").textContent = names[status.agent] || status.agent || "-";
+    $("s-running").textContent = (status.running ? "稼働中" : "停止中")
+      + (status.pid ? " (pid " + status.pid + ")" : "") + (busy ? " / 会話処理中" : "");
+    $("s-model").textContent = status.model || "-";
+    $("s-effort").textContent = status.effort || "-";
+    var talks = status.conversations || {};
+    $("s-codex").textContent = talks.codex || "(なし)";
+    $("s-claude").textContent = talks.claude || "(なし)";
+    $("s-cwd").textContent = status.cwd || "-";
+  }
+
+  function showTabs() {
+    $("tab-codex").setAttribute("aria-pressed", String(tab === "codex"));
+    $("tab-claude").setAttribute("aria-pressed", String(tab === "claude"));
+    var current = edited[tab];
+    $("instructions").value = current === null ? (state ? state.instructions[tab] : "") : current;
+  }
+
+  function render(next, keepEdits) {
+    state = next;
+    showStatus(next.status, next.busy);
+    document.querySelectorAll('input[name=agent]').forEach(function (radio) {
+      radio.checked = radio.value === next.config.agent;
+    });
+    ["codex", "claude"].forEach(function (kind) {
+      $(kind + "-model").value = next.config[kind].model;
+      fill($(kind + "-effort"), next.choices[kind + "_effort"], next.config[kind].effort);
+    });
+    if (!keepEdits) { edited = {codex: null, claude: null}; }
+    showTabs();
+  }
+
+  function request(method, path, body, type) {
+    var headers = {"X-Stackee-Admin": "1"};
+    if (type) { headers["Content-Type"] = type; }
+    return fetch(path, {method: method, headers: headers, body: body, cache: "no-store"})
+      .then(function (response) {
+        return response.text().then(function (text) {
+          var data = {};
+          try { data = JSON.parse(text); } catch (e) { data = {error: text.slice(0, 200)}; }
+          if (!response.ok) { throw new Error(data.error || ("HTTP " + response.status)); }
+          return data;
+        });
+      });
+  }
+
+  function refresh() {
+    if (busyRequest) { return Promise.resolve(); }
+    return fetch("/admin/api/state", {cache: "no-store"})
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var dirty = edited.codex !== null || edited.claude !== null;
+        if (document.activeElement && document.activeElement.tagName === "TEXTAREA") { dirty = true; }
+        if (dirty && state) { showStatus(data.status, data.busy); state.status = data.status; return; }
+        render(data, false);
+      })
+      .catch(function (error) { say("状態を取得できません: " + error.message, "ng"); });
+  }
+
+  function collect() {
+    var chosen = document.querySelector('input[name=agent]:checked');
+    return {
+      agent: chosen ? chosen.value : "codex",
+      codex: {model: $("codex-model").value.trim(), effort: $("codex-effort").value},
+      claude: {model: $("claude-model").value.trim(), effort: $("claude-effort").value}
+    };
+  }
+
+  function save() {
+    edited[tab] = $("instructions").value;
+    var text = edited[tab];
+    return request("PUT", "/admin/api/config", JSON.stringify(collect()), "application/json")
+      .then(function () {
+        return request("PUT", "/admin/api/instructions/" + tab, text, "text/plain; charset=utf-8");
+      });
+  }
+
+  function run(action, done) {
+    if (busyRequest) { return; }
+    busyRequest = true;
+    $("save").disabled = true;
+    $("apply").disabled = true;
+    say("送信中…", null);
+    action()
+      .then(function () { say(done, "ok"); edited = {codex: null, claude: null}; })
+      .catch(function (error) { say("失敗: " + error.message, "ng"); })
+      .then(function () {
+        busyRequest = false;
+        $("save").disabled = false;
+        $("apply").disabled = false;
+        return refresh();
+      });
+  }
+
+  $("tab-codex").addEventListener("click", function () {
+    edited[tab] = $("instructions").value;
+    tab = "codex";
+    showTabs();
+  });
+  $("tab-claude").addEventListener("click", function () {
+    edited[tab] = $("instructions").value;
+    tab = "claude";
+    showTabs();
+  });
+  $("save").addEventListener("click", function () {
+    run(save, "保存しました。反映するには「保存して反映」を押してください。");
+  });
+  $("apply").addEventListener("click", function () {
+    run(function () {
+      return save().then(function () { return request("POST", "/admin/api/apply", "{}", "application/json"); });
+    }, "保存して反映しました。");
+  });
+
+  refresh();
+  setInterval(refresh, 10000);
+}());
+</script>
+</body>
+</html>

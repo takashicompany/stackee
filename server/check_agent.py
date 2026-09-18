@@ -13,7 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--codex', default='codex')
     args = parser.parse_args()
-    template = Path(__file__).resolve().parent / 'agent'
+    template = Path(__file__).resolve().parent / 'agent' / 'defaults'
     token = 'みかん' + uuid.uuid4().hex[:8]
     with tempfile.TemporaryDirectory(prefix='stackee-agent-check-') as tmp:
         root = Path(tmp)
