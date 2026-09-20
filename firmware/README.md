@@ -2632,11 +2632,11 @@ firmware/tools/release_image.sh --profile dev
 | **像の名札** | 像の**末尾 32 バイト** (`hash_appended`) | `esptool image_info`、`esp_partition_get_sha256()`、`app.info` の running/boot/next、`ota.end` の `partition_sha256`、`manifest.json` の `image_sha256` | **どの区画に何が入っているか** |
 
 名札は「末尾 32 バイトを除いた部分の SHA-256」なので、ファイル全体の値とは
-必ず違う。実測 (`build-full/stackee.bin`, 1,391,824 B、版 `979c000-dirty`):
+必ず違う。実測 (`build-full/stackee.bin`, 1,391,824 B、版 `5639a53`):
 
 ```
-ファイル全体 b8318a083e7c1644771f332dcae32ca1c0f2ac4ec21eea933dbfa782a7dd5e41
-像の名札     62a80a12acccd94a3c8d7510d2d0217e6c6c73827f374df78d8d403f073519aa
+ファイル全体 3c4707fb1dd8ad63175d59f0ee6b479aa9741d93c493d2c482e897c3a2ceaf46
+像の名札     f6ba59615656085122c443f44c782c73fdd70dfa9e95d5c5097391eaf51e02e0
 ```
 
 `esp_partition_get_sha256()` は返す前に中身を検証する
@@ -2694,8 +2694,17 @@ credit で送れなくなったホストは、本文 0 バイトの 0xC3 (「状
 
 ```
 python3 firmware/tools/test_ota_host.py    # 段階 5: アプリ内 OTA (32 件)
-node --test 'test/**/*.mjs'                # 操作盤 (139 件。うち ota は 30 件)
+node --test 'test/**/*.mjs'                # 操作盤 (144 件。うち ota は 35 件)
 ```
+
+Node 側は 2 本に分かれている。`test/ota.test.mjs` が**中核**
+(`docs/js/ota.js`) を偽の転送層で回し、`test/ota_node.test.mjs` が
+**`tools/ota.mjs` の転送層そのもの**を偽のデバイス (node-hid の口を真似た
+もの) で回す。後者は AI が実機へ書き込むときに通る道と同じ経路で、
+Report ID を足した 33 バイトの書き方・0xC0 の 29 バイト詰め・転送中に 0xC1 を
+止めること・0xC3 の応答が credit に回ること・像が 1 バイトも欠けずに届くこと
+まで見る。**node-hid も実機も要らない** (`ota.mjs` は `openDevice()` の中で
+初めて node-hid を読むため)。
 
 `test_ota_host.py` は `hostbuild/ota_main.c` で本体の中核 (`stackee_otacore.c`)
 を **偽のフラッシュ** と自前の SHA-256 (`hostbuild/stub/sha256_stub.c`) を

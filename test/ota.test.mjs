@@ -524,9 +524,11 @@ test('runOta: 転送で失敗したら ota.abort を撃ってから投げる', a
     if (link.reports > 50) { link.device.deaf = true; }
     return orig.call(link, rep);
   };
+  // ★ maxResyncs が transferImage まで届いていること。渡し忘れると既定の
+  //   32 回まで粘り、「転送が終わりません」(時間切れ) のほうで落ちる。
   await assert.rejects(
     runOta(link, img, { now: clock.now, sleep: clock.sleep, maxResyncs: 2 }),
-    /送り直しが多すぎ|転送が終わりません/);
+    /送り直しが多すぎ/);
   assert.ok(link.calls.some((c) => c[0] === 'ota.abort'), 'ota.abort を撃っていない');
 });
 

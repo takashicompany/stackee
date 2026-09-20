@@ -383,6 +383,14 @@ export async function runOta(link, image, opts = {}) {
       now: opts.now,
       sleep: opts.sleep,
       signal: opts.signal,
+      // ★ 見切りの設定も渡すこと。渡し忘れると、呼び手が
+      //   「送り直しは 2 回まで」と言っても既定の 32 回まで粘り、
+      //   代わりに「転送が終わりません」(時間切れ) で落ちる。
+      maxResyncs: opts.maxResyncs,
+      stallMs: opts.stallMs,
+      quietMs: opts.quietMs,
+      pollMs: opts.pollMs,
+      deadMs: opts.deadMs,
     });
   } catch (err) {
     if (link.setPollPaused) link.setPollPaused(false);
