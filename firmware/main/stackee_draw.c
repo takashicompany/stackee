@@ -45,7 +45,8 @@ void stackee_draw_fill(const stackee_canvas_t *c, int x, int y, int w, int h,
 // パレットは現行 CircuitPython 版と同じ「i*17 の等間隔グレー」
 // (stackee_face.py: palette[i] = (i * 17) * 0x010101)。
 void stackee_draw_face(const stackee_canvas_t *c, const uint8_t *sheet, int size,
-                       int frame, int dx, int dy, int sx, int sy, int w, int h) {
+                       int rows, int frame, int dx, int dy, int sx, int sy,
+                       int w, int h) {
     if (sheet == NULL || w <= 0 || h <= 0) {
         return;
     }
@@ -55,10 +56,10 @@ void stackee_draw_face(const stackee_canvas_t *c, const uint8_t *sheet, int size
         grey[i] = stackee_draw_rgb565((v << 16) | (v << 8) | v);
     }
     size_t row_bytes = (size_t)size / 2;             // 4bpp
-    const uint8_t *base = sheet + (size_t)frame * (size_t)size * row_bytes;
+    const uint8_t *base = sheet + (size_t)frame * (size_t)rows * row_bytes;
     for (int row = 0; row < h; row++) {
         int y = sy + row;
-        if (y < 0 || y >= size) {
+        if (y < 0 || y >= rows) {
             continue;
         }
         const uint8_t *src = base + (size_t)y * row_bytes;
@@ -180,25 +181,25 @@ void stackee_draw_text(const stackee_canvas_t *c, const stackee_bdf_font_t *font
 
 // ---- 字幕の帯 -------------------------------------------------------------
 //
-// ★ 1 回の描き直しは 240x30 = 7,200 画素 (14.4 KB) の塗りつぶしと、多くても
-//   15 字ぶんの 16x16 の点打ち。割り当ても検索表の構築もしない
+// ★ 1 回の描き直しは 240x96 = 23,040 画素 (46 KB) の塗りつぶしと、多くても
+//   4 行 x 15 字ぶんの 16x16 の点打ち。割り当ても検索表の構築もしない
 //   (字形は font16.bin の中を指すポインタのまま使う)。
-void stackee_draw_subtitle(const stackee_canvas_t *c,
-                           const stackee_font16_t *font, const char *utf8) {
-    bool empty = (utf8 == NULL || utf8[0] == '\0');
-    // 空なら「帯を消す」= 画面の地の色に戻す (黒い帯を残さない)。
-    stackee_draw_fill(c, 0, STACKEE_SUB_Y, c->width, STACKEE_SUB_HEIGHT,
-                      stackee_draw_rgb565(empty ? STACKEE_SCREEN_BG
-                                                : STACKEE_SUB_BG));
-    if (empty || !stackee_font16_ready(font)) {
-        return;
-    }
+//
+// 行の区切りは改行 (\n)。5 行目以降は捨てる (頁めくりは呼び手の仕事)。
+static void draw_subtitle_line(const stackee_canvas_t *c,
+                               const stackee_font16_t *font,
+                               const char *utf8, size_t len, int top) {
     uint16_t fg = stackee_draw_rgb565(STACKEE_SUB_FG);
-    int top = STACKEE_SUB_Y + (STACKEE_SUB_HEIGHT - STACKEE_FONT16_HEIGHT) / 2;
     int x = 0;
     int limit = (c->width < STACKEE_SUB_WIDTH) ? c->width : STACKEE_SUB_WIDTH;
     uint32_t cp = 0;
-    for (const char *p = utf8; (p = stackee_font16_utf8(p, &cp)) != NULL; ) {
+    const char *end = utf8 + len;
+    for (const char *p = utf8; p < end; ) {
+        const char *next = stackee_font16_utf8(p, &cp);
+        if (next == NULL || next > end) {
+            break;
+        }
+        p = next;
         stackee_font16_glyph_t g;
         if (!stackee_font16_glyph_or_tofu(font, cp, &g)) {
             continue;                   // 〓 すら無い (font16.bin が壊れている)
@@ -221,6 +222,60 @@ void stackee_draw_subtitle(const stackee_canvas_t *c,
             }
         }
         x += g.width;
+    }
+}
+
+int stackee_draw_subtitle_px(const stackee_font16_t *font, const char *utf8) {
+    if (utf8 == NULL) {
+        return 0;
+    }
+    int widest = 0;
+    const char *at = utf8;
+    for (int line = 0; line < STACKEE_SUB_LINES && *at != '\0'; line++) {
+        const char *nl = strchr(at, '\n');
+        int px = 0;
+        uint32_t cp = 0;
+        const char *end = (nl != NULL) ? nl : at + strlen(at);
+        for (const char *p = at; p < end; ) {
+            const char *next = stackee_font16_utf8(p, &cp);
+            if (next == NULL || next > end) {
+                break;
+            }
+            p = next;
+            px += stackee_font16_advance(font, cp);
+        }
+        if (px > widest) {
+            widest = px;
+        }
+        if (nl == NULL) {
+            break;
+        }
+        at = nl + 1;
+    }
+    return widest;
+}
+
+void stackee_draw_subtitle(const stackee_canvas_t *c,
+                           const stackee_font16_t *font, const char *utf8) {
+    bool empty = (utf8 == NULL || utf8[0] == '\0');
+    // 空なら「帯を消す」= 画面の地の色に戻す (黒い帯を残さない)。
+    stackee_draw_fill(c, 0, STACKEE_SUB_Y, c->width, STACKEE_SUB_HEIGHT,
+                      stackee_draw_rgb565(empty ? STACKEE_SCREEN_BG
+                                                : STACKEE_SUB_BG));
+    if (empty || !stackee_font16_ready(font)) {
+        return;
+    }
+    const char *at = utf8;
+    for (int line = 0; line < STACKEE_SUB_LINES && *at != '\0'; line++) {
+        const char *nl = strchr(at, '\n');
+        size_t len = (nl != NULL) ? (size_t)(nl - at) : strlen(at);
+        draw_subtitle_line(c, font, at, len,
+                           STACKEE_SUB_Y + line * STACKEE_SUB_LINE_H +
+                               STACKEE_SUB_PAD);
+        if (nl == NULL) {
+            break;
+        }
+        at = nl + 1;
     }
 }
 

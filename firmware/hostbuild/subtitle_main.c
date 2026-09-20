@@ -10,6 +10,10 @@
 //     px <文字列>          その文字列を描くのに要る画素数
 //     fit <画素数> <文字列> そこに収まる**バイト数**
 //     band <文字列>        帯を描いて CRC32 (文字列なしなら帯を消す)
+//     bandpx <文字列>      帯に要る幅 = いちばん長い行の画素数
+//
+// ★ band / bandpx の引数の `\n` (逆斜線 + n) は本物の改行に直す。
+//   標準入力は 1 行 1 命令なので、4 行の帯もこれで渡せる。
 //
 // 出したものを tools/test_subtitle_host.py が tools/subtitle_expected.py の
 // 期待値と突き合わせる。ここが一致していれば「C の描画」と「Python の期待値」
@@ -51,6 +55,20 @@ static void *read_file(const char *path, size_t *len) {
     return buf;
 }
 
+// `\n` を本物の改行に直す (その場で詰める)。
+static void unescape_newlines(char *text) {
+    char *w = text;
+    for (const char *r = text; *r != '\0'; r++) {
+        if (r[0] == '\\' && r[1] == 'n') {
+            *w++ = '\n';
+            r++;
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = '\0';
+}
+
 static void cmd_band(const char *text) {
     stackee_canvas_t canvas = {
         .fb = g_fb, .stride = STRIDE, .width = WIDTH, .height = HEIGHT};
@@ -58,7 +76,7 @@ static void cmd_band(const char *text) {
     uint32_t crc = stackee_crc32(0, g_fb + (size_t)STACKEE_SUB_Y * STRIDE,
                                  (size_t)STACKEE_SUB_HEIGHT * STRIDE);
     printf("band %u %d %u\n", crc,
-           stackee_font16_text_px(g_ready ? &g_font : NULL, text),
+           stackee_draw_subtitle_px(g_ready ? &g_font : NULL, text),
            (unsigned)strlen(text));
 }
 
@@ -99,8 +117,12 @@ int main(int argc, char **argv) {
             printf("info %s %d %d %d %u\n", g_ready ? "ok" : "bad",
                    STACKEE_FONT16_HEIGHT, g_font.narrow_count, g_font.wide_count,
                    (unsigned)len);
-            printf("band_geom %d %d %d %d\n", STACKEE_SUB_Y, STACKEE_SUB_HEIGHT,
-                   STACKEE_SUB_COLS, STACKEE_SUB_WIDTH);
+            printf("band_geom %d %d %d %d %d %d %d\n",
+                   STACKEE_SUB_Y, STACKEE_SUB_HEIGHT, STACKEE_SUB_COLS,
+                   STACKEE_SUB_WIDTH, STACKEE_SUB_LINES, STACKEE_SUB_LINE_H,
+                   STACKEE_SUB_PAD);
+            printf("face_geom %d %d %d\n", STACKEE_FACE_SIZE,
+                   STACKEE_FACE_TRIM_ROWS, STACKEE_FACE_ROWS);
         } else if (strcmp(line, "glyph") == 0) {
             cmd_glyph(arg ? (uint32_t)strtoul(arg, NULL, 16) : 0);
         } else if (strcmp(line, "px") == 0) {
@@ -113,7 +135,13 @@ int main(int argc, char **argv) {
                    stackee_font16_fit(g_ready ? &g_font : NULL, text ? text : "",
                                       arg ? atoi(arg) : 0));
         } else if (strcmp(line, "band") == 0) {
+            if (arg) { unescape_newlines(arg); }
             cmd_band(arg ? arg : "");
+        } else if (strcmp(line, "bandpx") == 0) {
+            if (arg) { unescape_newlines(arg); }
+            printf("bandpx %d\n",
+                   stackee_draw_subtitle_px(g_ready ? &g_font : NULL,
+                                            arg ? arg : ""));
         } else {
             fprintf(stderr, "unknown command: %s\n", line);
             return 2;

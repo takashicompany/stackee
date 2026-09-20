@@ -234,8 +234,17 @@ static void ops_log(const char *line) {
 }
 
 // 字幕の帯。ページが変わった時にだけ来るはず (毎周来たらそれが欠陥)。
+// ★ 帯は最大 4 行。1 行 1 出力の形を崩さないよう、改行は `\n` に逃がす。
 static void ops_subtitle(const char *text) {
-    printf("SUB %s\n", (text == NULL || text[0] == '\0') ? "-" : text);
+    if (text == NULL || text[0] == '\0') {
+        printf("SUB -\n");
+        return;
+    }
+    printf("SUB ");
+    for (const char *p = text; *p != '\0'; p++) {
+        if (*p == '\n') { printf("\\n"); } else { putchar(*p); }
+    }
+    printf("\n");
 }
 
 static void ops_face(bool recording, bool busy, bool speaking) {
@@ -384,6 +393,19 @@ int main(void) {
             int i = stackee_talk_page_at(&g_talk, (uint32_t)ms);
             printf("PAGEAT %ld %d %s\n", ms, i,
                    (i >= 0) ? g_talk.pages[i].text : "-");
+        } else if (strcmp(line, "band") == 0) {
+            // ページ番号 -> 帯へ渡す行の集合 (頁めくりの検査)。
+            int page = arg ? atoi(arg) : 0;
+            char band[STACKEE_TALK_SUB_BAND_MAX];
+            int lines = stackee_talk_band(&g_talk, page, band, sizeof(band));
+            printf("BAND %d %d ", page, lines);
+            if (band[0] == '\0') {
+                printf("-");
+            }
+            for (const char *p = band; *p != '\0'; p++) {
+                if (*p == '\n') { printf("\\n"); } else { putchar(*p); }
+            }
+            printf("\n");
         } else if (strcmp(line, "print") == 0) {
             printf("NOW %u STATE %s POLLS %d ALLOC %d RELEASE %d "
                    "PAGES %d PAGE %d DROPPED %d SUBBYTES %u SRC %s "

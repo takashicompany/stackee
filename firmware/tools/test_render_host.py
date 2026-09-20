@@ -82,6 +82,8 @@ def parse_render(text):
             for item in parts[1:]:
                 key, value = item.split('=')
                 extra[key] = int(value)
+        elif parts[0] == 'face_geom':
+            extra['face_geom'] = tuple(int(v) for v in parts[1:])
         elif parts[0] in ('all', 'count'):
             extra[parts[0]] = int(parts[1])
     return faces, bars, extra
@@ -136,9 +138,22 @@ class RenderTest(unittest.TestCase):
             self.assertEqual(self.extra[key], self.expected['assets'][key], key)
 
     def test_crc32_is_zlib_compatible(self):
+        # ★ 本体が持つのは切り詰めたシート (240x174)。素材そのもの
+        #   (240x240) は 1 バイトも変わっていないことも一緒に見る。
         import zlib
         raw = zlib.decompress((ASSETS / 'faces.bin').read_bytes())
-        self.assertEqual(self.extra['faces_crc'], zlib.crc32(raw))
+        self.assertEqual(len(raw), 240 * 240 // 2 * 32)
+        self.assertEqual(zlib.crc32(raw), self.expected['assets']['sheet_crc'])
+        trimmed, _lost = expected_mod.trim_faces(raw, 32)
+        self.assertEqual(len(trimmed), 240 * 174 // 2 * 32)
+        self.assertEqual(self.extra['faces_crc'], zlib.crc32(trimmed))
+
+    def test_the_c_and_python_sides_trim_the_same_rows(self):
+        # ホストビルドが出す face_geom と期待値側の定数が同じか。
+        want = (expected_mod.FACE_Y, expected_mod.FACE_SIZE,
+                expected_mod.FACE_TRIM, expected_mod.FACE_ROWS)
+        self.assertEqual(self.extra['face_geom'], want)
+        self.assertEqual(self.extra['faces_len'], 240 * 174 // 2 * 32)
 
 
 class TablesTest(unittest.TestCase):
@@ -228,6 +243,7 @@ class ExpectedUnitTest(unittest.TestCase):
 
     def test_asset_sizes(self):
         self.assertEqual(len(self.renderer.faces_raw), 240 * 240 // 2 * 32)
+        self.assertEqual(len(self.renderer.faces), 240 * 174 // 2 * 32)
         self.assertEqual(len(self.renderer.changes), 32 * 32 * 4)
         self.assertEqual(len(self.renderer.icons_raw), 6 * 24 * 18)
         self.assertEqual(self.renderer.count, 32)
@@ -249,16 +265,34 @@ class ExpectedUnitTest(unittest.TestCase):
     def test_background_is_white_outside_bar_and_face(self):
         fb = self.renderer.framebuffer(face=0, bar=0)
         white = expected_mod.rgb565_bytes(0xFFFFFF)
-        for y in (28, 49, 290, 319):
+        # 顔は y=50..223。帯を出していなければ下も白。
+        for y in (28, 49, 224, 319):
             row = bytes(fb.buf[y * 480:(y + 1) * 480])
             self.assertEqual(row, white * 240, '行 %d は白のはず' % y)
 
-    def test_face_sits_at_y50(self):
-        # 顔 0 の 1 行目が y=50 に入っている (x=0、幅 240)。
+    def test_face_sits_at_y50_and_ends_at_y223(self):
+        # 顔 0 の 1 行目 (= 元絵の 33 行目) が y=50 に入っている (x=0、幅 240)。
         fb = self.renderer.framebuffer(face=0, bar=0)
         table = expected_mod.face_row_table()
-        first = b''.join(table[b] for b in self.renderer.faces_raw[:120])
+        row_bytes = 120
+        at = expected_mod.FACE_TRIM * row_bytes
+        first = b''.join(table[b] for b in self.renderer.faces_raw[at:at + row_bytes])
         self.assertEqual(bytes(fb.buf[50 * 480:50 * 480 + 480]), first)
+        # 最後の行 (= 元絵の 206 行目) が y=223。
+        at = (expected_mod.FACE_SIZE - expected_mod.FACE_TRIM - 1) * row_bytes
+        last = b''.join(table[b] for b in self.renderer.faces_raw[at:at + row_bytes])
+        self.assertEqual(bytes(fb.buf[223 * 480:223 * 480 + 480]), last)
+
+    def test_the_trim_keeps_the_sheet_untouched(self):
+        # 切り詰めは**描くときだけ**。faces.bin そのものは 240x240 のまま。
+        trimmed, lost = expected_mod.trim_faces(self.renderer.faces_raw, 32)
+        self.assertEqual(trimmed, self.renderer.faces)
+        self.assertEqual(len(lost), 32)
+        # 落ちる非背景画素は分かっているコマだけ (RESULTS.md に実測がある)。
+        hit = {row['frame']: (row['top'], row['bottom'])
+               for row in lost if row['top'] or row['bottom']}
+        self.assertEqual(hit, {0: (70, 0), 1: (70, 0),
+                               13: (0, 51), 14: (0, 51), 31: (0, 614)})
 
     def test_grey_palette_is_i_times_17(self):
         table = expected_mod.face_row_table()

@@ -82,6 +82,13 @@
 // 持たないので、内蔵 RAM の静的な使用量は 1 バイトも増えない。
 //   "<10 桁>" + TAB + 本文 (最大 63 B) + 余裕
 #define STACKEE_TALK_SUB_LINE_MAX    128
+// 帯は 4 行。ページは頭から 1 行ずつ**積む**。4 行が埋まった状態で次の
+// ページが来たら帯を空にしてそれを 1 行目に置く (頁めくり)。つまり
+// ページ i は必ず帯の i%4 行目に出る (行の集合は i だけで決まる)。
+#define STACKEE_TALK_SUB_LINES       4
+// 帯へ渡す文字列の上限 (63 B x 4 行 + 改行 3 + NUL = 256)。
+#define STACKEE_TALK_SUB_BAND_MAX \
+    (STACKEE_TALK_SUB_LINES * STACKEE_TALK_SUB_TEXT_MAX)
 
 // ---- 返答待ちの GET の受け皿 ----------------------------------------------
 // ★ done の JSON に字幕の本文 (4 KB) が混ざるので、従来の 8 KB では足りない。
@@ -216,6 +223,11 @@ typedef struct {
 // 再生位置 [ms] に出すページの番号。無ければ -1。
 // ★ 「start_ms ≤ ms」の**最後の**ページ。推定も補間もしない。
 int stackee_talk_page_at(const stackee_talk_t *t, uint32_t ms);
+
+// page 番のページを出すときに帯へ渡す文字列 (改行区切り、最大 4 行)。
+// ★ 行の集合は page だけで決まる: 同じ頁の先頭 (page - page%4) から page まで。
+//   page < 0 なら空文字列。戻り値は並べた行数。
+int stackee_talk_band(const stackee_talk_t *t, int page, char *out, size_t cap);
 
 // "<start_ms>\t<text>\n" の並びを読む。戻り値は採ったページ数。
 // 不正な行 (タブ無し・数字でない・本文が空) は黙って捨てる。

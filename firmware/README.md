@@ -472,19 +472,19 @@ python3 firmware/tools/test_hid_dest_host.py   # 送信先の選び方 (7 件)
 python3 firmware/tools/test_hid_report_map.py  # 記述子を esp_hid のパーサに通す (5 件)
 python3 firmware/tools/hid_desc_check.py       # 記述子の構成を目で見る
 python3 firmware/tools/test_faceanim_host.py   # 顔の状態機械 (16 件)
-python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (22 件)
+python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (24 件)
 python3 firmware/tools/test_cfg_host.py        # 段階 3: 設定・登録簿・音量・素材 + 4 KB の JSON (48 件)
-python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 (55 件)
+python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 (57 件)
 python3 firmware/tools/test_wifi_host.py       # 段階 3: Wi-Fi の状態機械 (21 件)
 python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
-python3 firmware/tools/test_subtitle_host.py   # 字幕: フォントと帯の描画 (22 件)
+python3 firmware/tools/test_subtitle_host.py   # 字幕: フォントと帯の描画 (26 件)
 python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 (32 件、§25)
 python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **412 件**。どれも実機に触らない。
+全部で **420 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -920,10 +920,10 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 |---|---|
 | 画面 | 240x320 (MADCTL `0xA8`)。背景は白 |
 | 上段 | 高さ **28px** の黒帯。`[音量][NN%]` … `[Wi-Fi][BLE/USB][電池][NN%]` |
-| 顔 | 240x240 を **x=0 / y=50** に (`stackee_face.py` の `(320-240)/2+10`) |
-| 顔の素材 | `faces.bin` (zlib / 4bpp / 32 枚の縦長シート)。起動時に PSRAM へ 900 KB 展開 |
+| 顔 | 240x240 を **上下 33 px ずつ切り詰めた 240x174** を **x=0 / y=50** に (y=50..223)。空いた 66 px は字幕 4 行へ (§23-8) |
+| 顔の素材 | `faces.bin` (zlib / 4bpp / 32 枚の縦長シート)。**素材は 240x240 のまま。** 起動時に PSRAM へ 900 KB 展開し、その場で 240x174 (652 KB) へ詰め直す |
 | 4bpp の並び | **画素 0 が上位ニブル**。パレットは `i*17` の等間隔グレー 16 段 |
-| 差分 | `changes.bin` の bbox (32x32 組 x 4 バイト) を **1 周 16 行ずつ** |
+| 差分 | `changes.bin` の bbox (32x32 組 x 4 バイト) を **1 周 16 行ずつ**。bbox は元の 240x240 の座標なので、描くときに 33 行ぶん上へ寄せて捨てた行を落とす |
 | アイコン | `status_icons.bin` (zlib / 2bpp / 24x24 x 18 枚)。**画素 0 が最上位 2 ビット**、濃さ 0 は透明 |
 | 数字 | `status_h24.bdf` (12x24) から `0123456789%-? ` の 14 文字だけ起動時に展開 |
 | 展開器 | **ESP32-S3 の ROM にある tinfl** (`esp32s3.rom.ld` の `tinfl_decompress`)。像は 1 バイトも増えない |
@@ -938,7 +938,7 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 ### 10-2. 実機に触らない確認
 
 ```
-python3 firmware/tools/test_render_host.py     # 描画と期待値 (22 件)
+python3 firmware/tools/test_render_host.py     # 描画と期待値 (24 件)
 python3 firmware/tools/test_faceanim_host.py   # 状態機械の時刻 (16 件)
 python3 firmware/tools/render_expected.py      # 期待値の CRC を見る
 ```
@@ -954,6 +954,9 @@ python3 firmware/tools/render_expected.py      # 期待値の CRC を見る
 * タイル番号・色・文字・配置が `firmware/kmk/stackee_icons.py` と同じこと
   (電池 20/40/60/80、音量 0/33/66 の境目を総当たり)
 * CRC-32 が `zlib.crc32` と同じ値になること
+* 顔の切り詰め (上下 33 行) を C と Python が同じようにすること。
+  `faces.bin` そのものは 240x240 のまま 1 バイトも変わらないこと。
+  切り詰めで落ちる非背景画素の数がコマごとに合っていること (§23-8)
 
 **ここで通っても実機で動く保証にはならない。** FAT も PSRAM も ROM の
 展開器も入っていない。実機でずれたら疑うのはその 3 つ。
@@ -968,7 +971,7 @@ python3 firmware/tools/check_phase2.py --no-selftest   # 遅延と perf だけ
 | 項目 | 合否 |
 |---|---|
 | 素材の展開 | `ui.assets` の CRC32 が Mac の `zlib.decompress` と一致 |
-| 32 表情 | `ui.selftest` の 32 個の CRC32 が `render_expected.py` と一致 |
+| 32 表情 | `ui.selftest` の 32 個の CRC32 (y=50 h=174) が `render_expected.py` と一致 |
 | ステータスバー | 同 6 個 |
 | 打鍵の遅延 (平常) | `key.inject` の中央値 ≤ 6 ms |
 | 打鍵の遅延 (描画中) | **`ui.selftest` を回しながら** `key.inject`。中央値 ≤ 6 ms / 最大 ≤ 10 ms |
@@ -988,7 +991,7 @@ python3 firmware/tools/check_phase2.py --no-selftest   # 遅延と perf だけ
 
 | コマンド | 返すもの |
 |---|---|
-| `lcd.crc` | フレームバッファ全体 / 顔 (240x240 @ y=50) / 上段 (240x28) の CRC32 |
+| `lcd.crc` | フレームバッファ全体 / 顔 (240x174 @ y=50) / 上段 (240x28) の CRC32 |
 | `lcd.crc` `{"y":N,"h":M}` | 行の範囲を指定した CRC32 (二分探索に使う) |
 | `lcd.dump` `{"y":N,"x":X,"n":16}` | その位置の生バイト (16 進、最大 128 バイト) |
 | `face.set` `{"state":"thinking","group":0,"frame":1}` | 顔を固定して描き、CRC32 を返す。`{"i":7}` で顔番号を直に指定 |
@@ -998,7 +1001,7 @@ python3 firmware/tools/check_phase2.py --no-selftest   # 遅延と perf だけ
 | `ui.selftest` | 自己テストを始める / 進み具合を返す / 終わっていれば CRC32 の配列 |
 | `ui.status` | いまの顔・見送った回数・描いた枚数・フォント |
 | `ui.assets` | 展開した素材のバイト数と CRC32 (字幕フォントの長さ・CRC32・字数も) |
-| `ui.subtitle` `{"text":"こんにちは"}` | 字幕の帯を描き、帯 (240x30 @ y=290) の CRC32 と画素数と描画時間を返す。`text` 無し / 空で帯を消す (§23) |
+| `ui.subtitle` `{"text":"1 行目\n2 行目"}` | 字幕の帯を描き、帯 (240x96 @ y=224) の CRC32 と画素数 (いちばん長い行) と描画時間を返す。`text` は改行区切りで**最大 4 行**。`text` 無し / 空で帯を消す (§23) |
 
 ```
 python3 firmware/kmk/tools/stackee_console_client.py status
@@ -1264,11 +1267,11 @@ I2C も NVS も触らない (値を書き換えるだけ)。レジスタと NVS 
 `connect_ms` / `wifi_up_ms` / `volume_save_pending` / `volume_src` /
 `talk` / `audio_null` / `audio_busy` / `talk_url` / `talk_token` / `screen`。
 
-### 11-8. 実機に触らない確認 (91 件)
+### 11-8. 実機に触らない確認 (126 件)
 
 ```
-python3 firmware/tools/test_cfg_host.py    # 設定・登録簿・音量・JSON・URL・素材 (41 件)
-python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 (55 件)
+python3 firmware/tools/test_cfg_host.py    # 設定・登録簿・音量・JSON・URL・素材 (48 件)
+python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 (57 件)
 python3 firmware/tools/test_wifi_host.py   # Wi-Fi の状態機械 (21 件)
 ```
 
@@ -2189,11 +2192,15 @@ RESULTS.md の「段階 6 相当: 返答音声を 120 秒にする」。
   MCLK を OFF にしている間 ES7210 が設定を保持するかは未検証 (録音のたびに設定し直している)。
 
 
-## 23. 返答音声の字幕 (2026-09-20)
+## 23. 返答音声の字幕 (2026-09-20 / 4 行化 2026-09-21)
 
-喋っている間、画面のいちばん下 (y=290..319 の 30 px) に 1 行だけ字幕を出す。
-顔は y=50..289 なので**領域が重ならない**。顔のアニメーションと字幕は
+喋っている間、画面のいちばん下 (y=224..319 の 96 px) に **4 行**まで字幕を出す。
+顔は y=50..223 なので**領域が重ならない**。顔のアニメーションと字幕は
 互いを描き直さない。
+
+★ **2026-09-21 に 1 行 → 4 行にした。** 空きを作るために顔を上下 33 px ずつ
+切り詰めて 240x174 で出している。**元絵と `faces.bin` は変えていない**
+(切り詰めるのは起動時に PSRAM へ展開したあとだけ)。詳しくは §23-8。
 
 ### 23-1. 同期はサーバが決める
 
@@ -2209,6 +2216,8 @@ RESULTS.md の「段階 6 相当: 返答音声を 120 秒にする」。
 
 * `start_ms` は 10 進整数、単調非減少、先頭行は 0。
 * `text` はタブ・改行を含まない UTF-8。1 ページの幅 ≤ **15 桁** (全角 1、半角 0.5)。
+  **1 ページ = 帯の 1 行**。行の積み方 (4 行で頁めくり) は本体側の話で、
+  サーバの契約は 1 バイトも変わっていない (§23-8)。
 * 行数 ≤ 48 (`STACKEE_TALK_SUB_PAGES`)、本文 ≤ 4096 B (`STACKEE_TALK_SUB_BYTES`)。
   どちらの経路でも**同じ本文** — サーバは done の JSON 全体を 8,192 B 以下に
   収めるため末尾ページを落とすことがあるが、`/subtitles` はそのとき
@@ -2269,6 +2278,9 @@ firmware/tools/install_assets.sh --only font16.bin
 
 ### 23-3. 性能の約束と実測 (実機、full `b59358de…`、2026-09-20)
 
+★ この節の数字は **1 行 (240x30) のときの実測**。4 行 (240x96) にしたあとの
+実測は §23-8。約束も 2 ms → **4 ms** に置き直してある (根拠は §23-8)。
+
 | 約束 | 実測 |
 |---|---|
 | 帯 1 回の**描画そのもの**は **≤ 2 ms** | 空 **164 us** / 半角混在 442 us / 全角 15 桁 **631 us** / はみ出し 16 桁 714 us。240x30 = 7,200 画素 (14.4 KB) の塗りと、多くても 15 字の点打ちだけ |
@@ -2319,12 +2331,14 @@ firmware/tools/install_assets.sh --only font16.bin
 
 ### 23-4. 実機に触らない確認
 
-`tools/test_subtitle_host.py` (22 件) が、**本体の実体そのもの**
+`tools/test_subtitle_host.py` (26 件) が、**本体の実体そのもの**
 (`main/stackee_font16.c` / `stackee_draw.c` / `stackee_crc32.c`) を Mac 用に
 ASan + UBSan つきでビルドし、本物の `assets/font16.bin` を通して描いた帯の
 CRC32 を `tools/subtitle_expected.py` の期待値と突き合わせる
-(日本語 15 桁・半角混在・字形なし〓・空・半角カタカナ)。
-`tools/test_talk_host.py` の `SubtitleTest` (13 件) が行解析・ページ選択・
+(1 行・2 行・4 行・頁めくり直後・5 行目は捨てる・半角混在・字形なし〓・空・
+半角カタカナの 12 通り)。行の積み方 (1 行目の位置が行数で動かない・
+i 行目の上端 = `224 + i*24 + 4`) もここで見る。
+`tools/test_talk_host.py` の `SubtitleTest` (15 件) が行解析・ページ選択・
 上限・失敗時の挙動・旧サーバ互換を、`InlineSubtitleTest` (13 件) が
 done の JSON に混ざってきた本文 (別 GET を飛ばす / 壊れていたら url へ落ちる /
 どちらも無ければ字幕なしで鳴る / 受け皿が 16 KB になっていること) を見る。
@@ -2337,7 +2351,8 @@ done の JSON に混ざってきた本文 (別 GET を飛ばす / 壊れてい�
 
 * **字幕フォント** — `ui.assets` の `font16_len` / `font16_crc` が Mac の
   `assets/font16.bin` と同じか
-* **字幕の帯** — `ui.subtitle` が返す帯の CRC32 が `subtitle_expected.py` と同じか
+* **字幕の帯** — `ui.subtitle` が返す帯 (4 行) の CRC32 が
+  `subtitle_expected.py` と同じか
 * **打鍵の遅延 (字幕中)** — `ui.subtitle` を挟みながら `key.inject` を撃ち、
   中央値 6 ms / 最大 10 ms を維持しているか
 
@@ -2455,6 +2470,90 @@ TLS の張り直しも関係なくなる。`subtitles_url` の道は旧サーバ
 文の間に 150 ms の無音) と実測の音声長から逆算すると、1 往復目の
 「1 → 2」の予測は **2,672 〜 2,744 ms** で、観測した窓 (2,692 〜 2,827) と
 重なる。**ただしこれは逆算であって照合ではない。**
+
+### 23-8. 字幕を 4 行にした — 顔を上下 33 px 切り詰める (2026-09-21)
+
+ユーザーの決定: **「上下 33 px ずつトリミングして字幕を 4 行にして」。**
+
+#### 画面の割り付け
+
+| | 前 | 後 |
+|---|---|---|
+| ステータスバー | y=0..49 | 変わらず |
+| 顔 | y=50..289 (240x240) | **y=50..223 (240x174)** |
+| 字幕の帯 | y=290..319 (30 px / 1 行) | **y=224..319 (96 px / 4 行)** |
+
+1 行は **24 px** (上の余白 4 + 字形 16 + 下の余白 4)。i 行目の字形の上端は
+`224 + i*24 + 4`。左端は 0、1 行 15 桁、黒地に白文字、消すときは白
+(どれも 1 行のときと同じ)。
+
+#### 元絵と `faces.bin` は変えていない
+
+切り詰めるのは**起動時に PSRAM へ展開したあと**だけ。
+
+* `faces.bin` は 240x240x32 のまま。`stackee_assets_read_inflate` で
+  921,600 B に展開して**丈を確かめてから**、その場で各コマの上 33 行・
+  下 33 行を落として 240x174 に詰め直す (668,160 B)。余った 253,440 B は
+  `heap_caps_realloc` で PSRAM へ返す。行は前へしか動かないので、
+  入れ物は 1 つで足りる (`main/stackee_ui.c` の `trim_faces`)。
+* `changes.bin` も変えていない。差分の bbox は元の 240x240 の座標なので、
+  描くときに 33 行ぶん上へ寄せ、捨てた行にかかる部分を落とす
+  (`paint_face_rect`)。
+* `tools/render_expected.py` が**同じ切り詰め**をしてから期待値を組み立てる。
+  `ui.assets` の `faces_len` / `faces_crc` も切り詰めたあとの値
+  (素材そのものの値は `render_expected.py --json` の `assets.sheet_len` /
+  `sheet_crc`)。
+
+#### 切り詰めで落ちた画素 (実測、`assets/faces.bin` 全 32 コマ)
+
+上下 33 行に**地の色 (濃さ 15 = 白) でない画素**が残っていたコマ:
+
+| コマ | 表情 | 上で落ちた | 下で落ちた | 何が欠けるか |
+|---|---|---|---|---|
+| 0 | `awake/a_00` | **70 px** | 0 | y=29..32、x=212..232。右上の小さな印の**てっぺん 4 行** |
+| 1 | `awake/a_01` | **70 px** | 0 | 同上 |
+| 13 | `thinking/a_00` | 0 | **51 px** | y=207..209、x=199..222。右下の印の**いちばん下 3 行** |
+| 14 | `thinking/a_01` | 0 | **51 px** | y=207..209、x=17..40 (左右反転の同じ印) |
+| 31 | `camera/a_00` | 0 | **614 px** | y=207..228、x=16..202。カメラの絵の**下 22 行** |
+
+残る 27 コマは 1 画素も落ちない。合計 **856 px / 1,843,200 px = 0.046%**。
+
+★ **設計の前提とずれていたので明記する。** 設計時の見積もり (元 PNG 800 px 基準で
+上の最小 168 px = 240 換算 50、下の最小 109 px = 33) は `thinking` の絵だけを見た
+もので、`awake` の上 29 px と `camera` の下 11 px を数えていなかった。
+**`camera/a_00` の下 22 行 (614 px) は「1 画素かすめる」では済まない欠け方**で、
+撮影中の絵の下端が切れる。ユーザーの指示 (上下 33 px 対称・絵は変えない) に
+従って実装してあるが、見え方を変えたくなったら選べる道は
+「トリミングを非対称にする (上 39 / 下 27 など)」か「顔の置き場 y を下げる」で、
+どちらも**絵を触らずに**できる (`STACKEE_FACE_TRIM_ROWS` と `FACE_Y` だけ)。
+
+数はホストテスト (`tools/test_render_host.py` の
+`test_the_trim_keeps_the_sheet_untouched`) で固定してある。素材を差し替えたら
+ここが落ちるので、そのとき数え直すこと。
+
+#### 行の積み方 (頁めくり)
+
+サーバの行 (ページ) は 1 行ずつそのまま使う。**サーバ側は変えていない。**
+
+* 再生位置がページ `i` の `start_ms` を越えたら、帯の `i % 4` 行目にその行を置く。
+* `i % 4 == 0` のとき帯を空にしてから置く = **4 行が埋まった次のページで頁がめくれる**。
+* 再生終了・失敗・中断で帯を消す (従来どおり)。
+
+★ **本体は「いま何行出しているか」を覚えていない。** 表示すべき行の集合は
+ページ番号だけで決まる (`stackee_talk_band`: `i - i%4` から `i` まで)。
+だから `ui.subtitle` に同じ文字列を投げれば会話中とまったく同じ絵になり、
+CRC32 の照合がそのまま使える。
+
+API は `stackee_ui_set_subtitle(const char *utf8)` のまま。中身が
+**改行区切りで最大 4 行**になっただけ (5 行目以降は捨てる)。
+`ui.subtitle` の `text` にも `\n` (JSON の逃がし) で渡せる。
+
+#### 内蔵 RAM
+
+`ui.sub_want` / `ui.sub_shown` が 64 B → 256 B (4 行 x 63 B + 改行 3 + NUL)。
+`.dram0.bss` は **74,920 → 75,304 B (+384 B)**、`.dram0.data` は変わらず。
+帯のバッファは持たない (フレームバッファに直接描く)。像は 1,391,824 →
+1,392,288 B (+464 B、full)。
 
 ## 24. 会話が「通信に失敗しました」で 7 秒で終わる — 内蔵 RAM の枯渇 (2026-09-20)
 

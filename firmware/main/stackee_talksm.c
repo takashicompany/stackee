@@ -80,6 +80,35 @@ int stackee_talk_page_at(const stackee_talk_t *t, uint32_t ms) {
     return found;
 }
 
+int stackee_talk_band(const stackee_talk_t *t, int page, char *out, size_t cap) {
+    if (out == NULL || cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (page < 0 || page >= t->page_count) {
+        return 0;
+    }
+    int first = page - (page % STACKEE_TALK_SUB_LINES);
+    size_t at = 0;
+    int lines = 0;
+    for (int i = first; i <= page; i++) {
+        const char *text = t->pages[i].text;
+        size_t len = strlen(text);
+        size_t need = len + ((lines > 0) ? 1u : 0u);
+        if (at + need + 1 > cap) {
+            break;              // 入らない行は置かない (途中で切らない)
+        }
+        if (lines > 0) {
+            out[at++] = '\n';
+        }
+        memcpy(out + at, text, len);
+        at += len;
+        out[at] = '\0';
+        lines++;
+    }
+    return lines;
+}
+
 // 1 行 "<start_ms> TAB <本文>" をページにする。採れたら true。
 // ★ 行の出どころ (生の本文 / JSON の文字列) によらずここだけが形を知る。
 static bool add_page(stackee_talk_t *t, const char *line, size_t len) {
@@ -671,7 +700,16 @@ void stackee_talk_step(stackee_talk_t *t) {
                     int want = stackee_talk_page_at(t, since_ms(t, t->since));
                     if (want != t->page_shown) {
                         t->page_shown = want;
-                        subtitle(t, (want >= 0) ? t->pages[want].text : NULL);
+                        if (want < 0) {
+                            subtitle(t, NULL);
+                        } else {
+                            // ★ 帯には「その頁のここまで」を積んで渡す。
+                            //   4 行が埋まった次のページで頁がめくれる
+                            //   (band が 1 行だけを返すのがその印)。
+                            char band[STACKEE_TALK_SUB_BAND_MAX];
+                            stackee_talk_band(t, want, band, sizeof(band));
+                            subtitle(t, band);
+                        }
                     }
                 }
                 return;

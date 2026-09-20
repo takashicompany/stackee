@@ -27,16 +27,24 @@
 #include "stackee_lcd.h"
 #include "stackee_perf.h"
 #include "stackee_selftest.h"
+#include "stackee_talksm.h"
 #include "stackee_volume.h"
 
 static const char *TAG = "ui";
 
-#define FACE_SIZE        240
+#define FACE_SIZE        STACKEE_FACE_SIZE
 #define FACE_X           0
 // stackee_face.py の TileGrid: y=(height-size)//2 + 10 = (320-240)/2+10 = 50
 #define FACE_Y           50
+// ★ 元絵と faces.bin は 240x240 のまま。画面に出すのは上下 33 行を捨てた
+//   240x174 で、空いた 66 px は字幕の帯 (4 行) に回る。顔は y=50..223。
+#define FACE_TRIM        STACKEE_FACE_TRIM_ROWS
+#define FACE_ROWS        STACKEE_FACE_ROWS
 #define FACE_COUNT       STACKEE_FACE_MAX_COUNT
+// 展開した直後の丈 (シートの検証はここ。素材の形は変わっていない)。
 #define FACE_SHEET_BYTES ((size_t)FACE_SIZE * FACE_SIZE / 2 * FACE_COUNT)
+// 切り詰めたあと PSRAM に残す丈。
+#define FACE_KEPT_BYTES  ((size_t)FACE_SIZE * FACE_ROWS / 2 * FACE_COUNT)
 #define CHANGES_BYTES    ((size_t)FACE_COUNT * FACE_COUNT * 4)
 
 #define UI_TICK_MS       5
@@ -48,9 +56,10 @@ static const char *TAG = "ui";
 
 #define STATUS_GLYPHS    "0123456789%-? "
 
-// 字幕の 1 ページ。15 全角 = 45 バイト。伸ばさずに切る
-// (stackee_talksm の STACKEE_TALK_SUB_TEXT_MAX と揃えてある)。
-#define SUB_TEXT_MAX     64
+// 帯に出す文字列。**改行区切りで最大 4 行**。1 行 15 全角 = 45 バイト、
+// 上限は 1 ページ 63 バイト x 4 + 改行 3 + NUL
+// (stackee_talksm の STACKEE_TALK_SUB_BAND_MAX と揃えてある)。
+#define SUB_TEXT_MAX     STACKEE_TALK_SUB_BAND_MAX
 
 #define SELFTEST_STEPS   (FACE_COUNT + STACKEE_SELFTEST_BARS)
 
@@ -125,22 +134,31 @@ static struct {
 // ---------------------------------------------------------------------------
 // 描画 (すべて ui.lock の中で呼ぶ)
 // ---------------------------------------------------------------------------
+// ★ changes.bin の bbox は元の 240x240 の座標。切り詰めたぶんだけ上へ寄せ、
+//   捨てた行にかかる部分は落とす。素材 (changes.bin) は変えていない。
 static void paint_face_rect(const stackee_face_rect_t *rect) {
     if (ui.faces == NULL || rect->w <= 0 || rect->h <= 0) {
         return;
     }
-    stackee_draw_face(&ui.canvas, ui.faces, FACE_SIZE, rect->frame,
-                      FACE_X, FACE_Y, rect->x, rect->y, rect->w, rect->h);
-    stackee_lcd_mark_rows(FACE_Y + rect->y, rect->h);
+    int sy = rect->y - FACE_TRIM;
+    int h = rect->h;
+    if (sy < 0) { h += sy; sy = 0; }
+    if (sy + h > FACE_ROWS) { h = FACE_ROWS - sy; }
+    if (h <= 0) {
+        return;                 // 捨てた行だけの矩形。描くものが無い
+    }
+    stackee_draw_face(&ui.canvas, ui.faces, FACE_SIZE, FACE_ROWS, rect->frame,
+                      FACE_X, FACE_Y, rect->x, sy, rect->w, h);
+    stackee_lcd_mark_rows(FACE_Y + sy, h);
 }
 
 static void paint_face_full(int frame) {
     if (ui.faces == NULL) {
         return;
     }
-    stackee_draw_face(&ui.canvas, ui.faces, FACE_SIZE, frame,
-                      FACE_X, FACE_Y, 0, 0, FACE_SIZE, FACE_SIZE);
-    stackee_lcd_mark_rows(FACE_Y, FACE_SIZE);
+    stackee_draw_face(&ui.canvas, ui.faces, FACE_SIZE, FACE_ROWS, frame,
+                      FACE_X, FACE_Y, 0, 0, FACE_SIZE, FACE_ROWS);
+    stackee_lcd_mark_rows(FACE_Y, FACE_ROWS);
 }
 
 static void paint_bar(const stackee_bar_state_t *state) {
@@ -151,8 +169,8 @@ static void paint_bar(const stackee_bar_state_t *state) {
     stackee_perf_sample(STACKEE_PERF_UI_BAR, (uint32_t)(esp_timer_get_time() - t0));
 }
 
-// 字幕の帯 (y=290..319)。★ 顔 (y=50..289) と領域が重ならないので、
-//   顔の差分描画と互いに描き直さない。塗るのは 240x30 = 14.4 KB だけ。
+// 字幕の帯 (y=224..319)。★ 顔 (y=50..223) と領域が重ならないので、
+//   顔の差分描画と互いに描き直さない。塗るのは 240x96 = 46 KB だけ。
 static void paint_subtitle(const char *text) {
     int64_t t0 = esp_timer_get_time();
     stackee_draw_subtitle(&ui.canvas, ui.have_font16 ? &ui.font16 : NULL, text);
@@ -170,7 +188,8 @@ static void step_face_to(int frame) {
     int64_t t0 = esp_timer_get_time();
     while (stackee_face_view_step_to(&ui.view, frame, &rect)) {
         paint_face_rect(&rect);
-        // ★ 1 回の遷移は最大 15 周 (240 行 / 16 行)。ここに入ってきたとき
+        // ★ 1 回の遷移は最大 15 周 (240 行 / 16 行。捨てた行も周回に入る)。
+        //   ここに入ってきたとき
         //   前の遷移が途中なら、それを終わらせてから新しい遷移を始めるので
         //   2 回ぶん見ておく。それを超えたら changes.bin が壊れている。
         if (++guard > 2 * (FACE_SIZE / STACKEE_FACE_CHUNK_ROWS) + 4) {
@@ -288,12 +307,12 @@ static void selftest_step(void) {
         paint_face_full(0);
         ui.view.current = 0;
         ui.view.target = -1;
-        ui.face_crc[0] = region_crc(FACE_Y, FACE_SIZE);
+        ui.face_crc[0] = region_crc(FACE_Y, FACE_ROWS);
     } else if (step < FACE_COUNT) {
         // 以後は changes.bin を使った差分で寄せる。全面で描いた絵と
         // 同じになることが、この検査でいちばん見たいところ。
         step_face_to(step);
-        ui.face_crc[step] = region_crc(FACE_Y, FACE_SIZE);
+        ui.face_crc[step] = region_crc(FACE_Y, FACE_ROWS);
     } else {
         int i = step - FACE_COUNT;
         if (i == 0) {
@@ -496,9 +515,9 @@ static size_t reply_crc(long id, const char *line, char *buf, size_t cap) {
                  id,
                  (unsigned long)stackee_crc32(0, ui.canvas.fb,
                                               (size_t)ui.canvas.height * ui.canvas.stride),
-                 (unsigned long)region_crc(FACE_Y, FACE_SIZE),
+                 (unsigned long)region_crc(FACE_Y, FACE_ROWS),
                  (unsigned long)region_crc(0, STACKEE_BAR_AREA_HEIGHT),
-                 FACE_Y, FACE_SIZE, STACKEE_BAR_AREA_HEIGHT, ui.canvas.stride);
+                 FACE_Y, FACE_ROWS, STACKEE_BAR_AREA_HEIGHT, ui.canvas.stride);
     }
     unlock();
     return at;
@@ -572,7 +591,7 @@ static size_t reply_face_set(long id, const char *line, char *buf, size_t cap) {
     stackee_lcd_flush();
     size_t at = put(buf, cap, 0,
                     "{\"id\":%ld,\"ok\":1,\"frame\":%d,\"face\":%lu,\"all\":%lu}",
-                    id, frame, (unsigned long)region_crc(FACE_Y, FACE_SIZE),
+                    id, frame, (unsigned long)region_crc(FACE_Y, FACE_ROWS),
                     (unsigned long)stackee_crc32(0, ui.canvas.fb,
                                                  (size_t)ui.canvas.height * ui.canvas.stride));
     unlock();
@@ -646,7 +665,7 @@ static size_t reply_subtitle(long id, const char *line, char *buf, size_t cap) {
                     "\"us\":%lu,\"max_us\":%lu}",
                     id, STACKEE_SUB_Y, STACKEE_SUB_HEIGHT,
                     (unsigned long)region_crc(STACKEE_SUB_Y, STACKEE_SUB_HEIGHT),
-                    stackee_font16_text_px(ui.have_font16 ? &ui.font16 : NULL, text),
+                    stackee_draw_subtitle_px(ui.have_font16 ? &ui.font16 : NULL, text),
                     (unsigned)strlen(text),
                     ui.have_font16 ? "true" : "false",
                     (unsigned long)ui.sub_paints,
@@ -773,6 +792,20 @@ static size_t ui_console(const char *cmd, const char *line, long id,
 // ---------------------------------------------------------------------------
 // 立ち上げ
 // ---------------------------------------------------------------------------
+// 展開した 240x240 のシートを、各コマの上下 FACE_TRIM 行を落として
+// 240x174 に詰め直す (同じ入れ物の前へ寄せるだけ)。元絵も faces.bin も
+// 変えない。落ちる画素の数は tools/render_expected.py --json の
+// "face_trim" に出る (RESULTS.md に実測を残してある)。
+static void trim_faces(uint8_t *sheet) {
+    const size_t row_bytes = (size_t)FACE_SIZE / 2;
+    for (int frame = 0; frame < FACE_COUNT; frame++) {
+        const uint8_t *src = sheet + (size_t)frame * FACE_SIZE * row_bytes +
+                             (size_t)FACE_TRIM * row_bytes;
+        uint8_t *dst = sheet + (size_t)frame * FACE_ROWS * row_bytes;
+        memmove(dst, src, (size_t)FACE_ROWS * row_bytes);
+    }
+}
+
 static void load_assets(void) {
     size_t len = 0;
     char *manifest = stackee_assets_read("manifest.json", &len, MALLOC_CAP_8BIT);
@@ -787,8 +820,17 @@ static void load_assets(void) {
     ui.faces = stackee_assets_read_inflate("faces.bin", FACE_SHEET_BYTES,
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ui.faces != NULL) {
-        ui.faces_len = FACE_SHEET_BYTES;
-        ui.faces_crc = stackee_crc32(0, ui.faces, FACE_SHEET_BYTES);
+        // ★ 素材は 240x240 のまま展開して丈を確かめ、**その場で** 上下 33 行を
+        //   捨てて 240x174 に詰め直す。行は前へしか動かないので同じ入れ物で
+        //   済む (余った 253,440 B は realloc で PSRAM へ返す)。
+        trim_faces(ui.faces);
+        ui.faces_len = FACE_KEPT_BYTES;
+        ui.faces_crc = stackee_crc32(0, ui.faces, FACE_KEPT_BYTES);
+        uint8_t *smaller = heap_caps_realloc(ui.faces, FACE_KEPT_BYTES,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (smaller != NULL) {
+            ui.faces = smaller;
+        }
     }
     ui.changes = stackee_assets_read_inflate("changes.bin", CHANGES_BYTES,
                                              MALLOC_CAP_8BIT);
@@ -847,7 +889,7 @@ esp_err_t stackee_ui_start(void) {
     if (ui.lock == NULL || ui.sub_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    // 起動直後は帯を出していない (y=290..319 は地の色のまま)。
+    // 起動直後は帯を出していない (y=224..319 は地の色のまま)。
     ui.sub_want[0] = '\0';
     ui.sub_shown[0] = '\0';
     ui.sub_shown_valid = true;

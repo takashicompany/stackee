@@ -28,7 +28,9 @@
 #define WIDTH      240
 #define HEIGHT     320
 #define STRIDE     (WIDTH * 2)
-#define FACE_SIZE  240
+#define FACE_SIZE  STACKEE_FACE_SIZE
+#define FACE_ROWS  STACKEE_FACE_ROWS      // 上下 33 行を捨てた丈 (174)
+#define FACE_TRIM  STACKEE_FACE_TRIM_ROWS
 #define FACE_X     0
 #define FACE_Y     50
 
@@ -139,6 +141,18 @@ int main(int argc, char **argv) {
     const int count = STACKEE_FACE_MAX_COUNT;
     uint8_t *faces = inflate_file(dir, "faces.bin",
                                   (size_t)FACE_SIZE * FACE_SIZE / 2 * count, &faces_len);
+    // 本体 (stackee_ui.c の trim_faces) と同じ切り詰め。素材は 240x240 の
+    // まま展開して丈を確かめ、その場で 240x174 へ詰め直す。
+    {
+        const size_t row_bytes = (size_t)FACE_SIZE / 2;
+        for (int f = 0; f < count; f++) {
+            memmove(faces + (size_t)f * FACE_ROWS * row_bytes,
+                    faces + (size_t)f * FACE_SIZE * row_bytes +
+                        (size_t)FACE_TRIM * row_bytes,
+                    (size_t)FACE_ROWS * row_bytes);
+        }
+        faces_len = (size_t)FACE_SIZE * FACE_ROWS / 2 * count;
+    }
     uint8_t *changes = inflate_file(dir, "changes.bin",
                                     (size_t)count * count * 4, &changes_len);
     uint8_t *icons = inflate_file(dir, "status_icons.bin",
@@ -159,9 +173,12 @@ int main(int argc, char **argv) {
     // 背景 (白) → 上段バー → 顔 0 を全面。ここが ui.selftest の出発点。
     stackee_draw_fill(&canvas, 0, 0, WIDTH, HEIGHT, stackee_draw_rgb565(STACKEE_SCREEN_BG));
     stackee_draw_bar(&canvas, stackee_selftest_bar(bar_index), icons, &font);
-    stackee_draw_face(&canvas, faces, FACE_SIZE, 0, FACE_X, FACE_Y, 0, 0, FACE_SIZE, FACE_SIZE);
+    stackee_draw_face(&canvas, faces, FACE_SIZE, FACE_ROWS, 0, FACE_X, FACE_Y,
+                      0, 0, FACE_SIZE, FACE_ROWS);
 
     printf("count %d\n", count);
+    printf("face_geom %d %d %d %d\n", FACE_Y, STACKEE_FACE_SIZE,
+           STACKEE_FACE_TRIM_ROWS, STACKEE_FACE_ROWS);
     printf("assets faces_len=%zu faces_crc=%u changes_len=%zu changes_crc=%u "
            "icons_len=%zu icons_crc=%u glyphs=%d ascent=%d\n",
            faces_len, stackee_crc32(0, faces, faces_len),
@@ -172,7 +189,7 @@ int main(int argc, char **argv) {
     // 顔 0 の CRC を出してから、changes.bin を使って 1 枚ずつ差分で寄せる。
     // 差分で作った絵が「全面で描いた絵」と同じであることが、この検査の肝。
     printf("face 0 %u\n", stackee_crc32(0, fb + (size_t)FACE_Y * STRIDE,
-                                        (size_t)FACE_SIZE * STRIDE));
+                                        (size_t)FACE_ROWS * STRIDE));
 
     // ダミーの cases (差分だけを使うので中身は問わない)。
     static stackee_face_cases_t cases;
@@ -188,9 +205,14 @@ int main(int argc, char **argv) {
         stackee_face_rect_t rect;
         int guard = 0;
         while (stackee_face_view_step_to(&view, frame, &rect)) {
-            if (rect.w > 0 && rect.h > 0) {
-                stackee_draw_face(&canvas, faces, FACE_SIZE, rect.frame,
-                                  FACE_X, FACE_Y, rect.x, rect.y, rect.w, rect.h);
+            // 本体 (stackee_ui.c の paint_face_rect) と同じ寄せ方と切り落とし。
+            int sy = rect.y - FACE_TRIM;
+            int rh = rect.h;
+            if (sy < 0) { rh += sy; sy = 0; }
+            if (sy + rh > FACE_ROWS) { rh = FACE_ROWS - sy; }
+            if (rect.w > 0 && rh > 0) {
+                stackee_draw_face(&canvas, faces, FACE_SIZE, FACE_ROWS, rect.frame,
+                                  FACE_X, FACE_Y, rect.x, sy, rect.w, rh);
             }
             if (++guard > 64) {
                 fprintf(stderr, "差分が終わらない (frame=%d)\n", frame);
@@ -198,12 +220,13 @@ int main(int argc, char **argv) {
             }
         }
         printf("face %d %u\n", frame,
-               stackee_crc32(0, fb + (size_t)FACE_Y * STRIDE, (size_t)FACE_SIZE * STRIDE));
+               stackee_crc32(0, fb + (size_t)FACE_Y * STRIDE, (size_t)FACE_ROWS * STRIDE));
     }
 
     // 顔を 0 に戻してからバーの 6 状態 (顔の絵が CRC に混ざらないよう、
     // バーの CRC は上段 28 行だけを見る)。
-    stackee_draw_face(&canvas, faces, FACE_SIZE, 0, FACE_X, FACE_Y, 0, 0, FACE_SIZE, FACE_SIZE);
+    stackee_draw_face(&canvas, faces, FACE_SIZE, FACE_ROWS, 0, FACE_X, FACE_Y,
+                      0, 0, FACE_SIZE, FACE_ROWS);
     for (int i = 0; i < STACKEE_SELFTEST_BARS; i++) {
         stackee_draw_bar(&canvas, stackee_selftest_bar(i), icons, &font);
         printf("bar %d %u %s\n", i,

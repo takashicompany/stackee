@@ -10,8 +10,9 @@
   3. ステータスバーの代表 6 状態が正しく描けるか (同上)
   4. 自己テストを回している **最中に** 打鍵の遅延が悪化しないか (key.inject)
   5. 顔 1 コマの描画時間と LCD 転送時間 (status の perf.ui_face / perf.ui)
-  6. 字幕の帯が正しく描けるか (`ui.subtitle` の CRC32 と subtitle_expected.py)
-     ★ 日本語 15 桁・半角混在・字形なし〓・空の 4 通りを含む
+  6. 字幕の帯 (y=224..319 の 4 行) が正しく描けるか
+     (`ui.subtitle` の CRC32 と subtitle_expected.py)
+     ★ 1 行・4 行・頁めくり直後・空・字形なし〓・半角混在を含む
      ★ 描画時間は 1 ケース 6 回描いて**最小値**で見る (理由は run_subtitles)
   7. **字幕を描いている最中に** 打鍵の遅延が悪化しないか (key.inject)
 
@@ -46,9 +47,14 @@ import console_hid                       # noqa: E402
 # 段階 1 の実測 (README §9)。画面を足しても悪くしない、が段階 2 の合否。
 LATENCY_MEDIAN_MS = 6.0
 LATENCY_MAX_MS = 10.0
-# 字幕の帯 (240x30) 1 回の「描画そのもの」の約束 (README §23-3)。
-# 実測 (2026-09-20、full b59358de): 空 164 us / 全角 15 桁 631 us。
-SUB_PAINT_MAX_US = 2000
+# 字幕の帯 1 回の「描画そのもの」の約束 (README §23-3)。
+# ★ 帯は 1 行 240x30 から **4 行 240x96** になった (顔を 240x174 に切り詰めて
+#   空いた 66 px を回した)。塗る画素は 3.2 倍 (7,200 -> 23,040)、点を打つ字も
+#   15 字から 60 字へ 4 倍。1 行のときの実測 (2026-09-20、full b59358de:
+#   空 164 us / 全角 15 桁 631 us) をそのまま伸ばすと
+#   164*3.2 + (631-164)*4 = 2,393 us なので、2 ms では通らない。
+#   4 ms は「その見積もりに 1.7 倍の余裕」。実測は README §23-3 と RESULTS.md。
+SUB_PAINT_MAX_US = 4000
 # 1 ケースあたり何回描いて最小値を取るか。割り込まれなかった 1 発が要る。
 SUB_BURST = 6
 INJECT_KEY = 'F24'          # ホスト側で何も起きないキー
@@ -253,9 +259,11 @@ def verdicts(result):
                    ('faces_len', 'faces_crc', 'changes_len', 'changes_crc',
                     'icons_len', 'icons_crc'))
         out.append(('素材の展開', same,
-                    '顔 %s B crc=%s (期待 %s) / 差分 %s B / アイコン %s B / フォント %s (%s 字)'
+                    '顔 %s B crc=%s (期待 %s、240x%d に切り詰めたあと) / '
+                    '差分 %s B / アイコン %s B / フォント %s (%s 字)'
                     % (assets.get('faces_len'), assets.get('faces_crc'),
-                       want['faces_crc'], assets.get('changes_len'),
+                       want['faces_crc'], expected['face_rows'],
+                       assets.get('changes_len'),
                        assets.get('icons_len'), assets.get('font'),
                        assets.get('glyphs'))))
         # 字幕用のフォントは FAT に置いた assets/font16.bin そのもの
@@ -281,7 +289,9 @@ def verdicts(result):
     else:
         bad_faces = result.get('bad_faces') or []
         bad_bars = result.get('bad_bars') or []
-        out.append(('32 表情', not bad_faces,
+        out.append(('32 表情 (y=%d h=%d)' % (expected['face_y'],
+                                               expected['face_rows']),
+                    not bad_faces,
                     '%d/%d 一致%s (%s ms)'
                     % (32 - len(bad_faces), 32,
                        '' if not bad_faces else ' / 違うのは %r' % bad_faces,
@@ -337,8 +347,8 @@ def verdicts(result):
                        rows[0].get('font16') if rows else '?')))
         bad_px = [r['name'] for r in rows if r['px'] != r['want_px']]
         out.append(('字幕の桁数', not bad_px,
-                    '15 桁 = %d px%s'
-                    % (sex.SUB_WIDTH,
+                    '15 桁 = %d px / 帯は %d 行 x %d px%s'
+                    % (sex.SUB_WIDTH, sex.SUB_LINES, sex.SUB_LINE_H,
                        '' if not bad_px else ' / 違うのは %r' % bad_px)))
     if rows:
         # 約束は「帯 1 回の**描画そのもの**が 2 ms 以下」(README §23-3)。

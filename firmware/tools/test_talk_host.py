@@ -102,8 +102,18 @@ def prints(text):
 
 
 def subtitles(text):
-    """SUB 行 (帯に出た文字列の並び)。"-" は「帯を消した」。"""
+    """SUB 行 (帯に渡した文字列の並び)。"-" は「帯を消した」。
+
+    ★ 帯は 4 行。ページは頭から 1 行ずつ**積む**ので、行は
+      `\n` (逆斜線 + n) 区切りで 1 行に出てくる。
+    """
     return re.findall(r'^SUB (.*)$', text, re.M)
+
+
+def bands(text):
+    """BAND 行 (ページ番号 -> 行数, 帯の中身)。"""
+    return [(int(p), int(n), t)
+            for p, n, t in re.findall(r'^BAND (\d+) (\d+) (.*)$', text, re.M)]
 
 
 class HappyPathTest(unittest.TestCase):
@@ -611,7 +621,9 @@ class InlineSubtitleTest(unittest.TestCase):
         self.assertEqual(mid['src'], 'inline')
         self.assertEqual(mid['dropped'], 0)
         self.assertEqual(subtitles(out),
-                         ['こんにちは', 'さようなら', 'またね', '-'])
+                         [r'こんにちは',
+                          r'こんにちは\nさようなら',
+                          r'こんにちは\nさようなら\nまたね', '-'])
 
     def test_the_status_request_asks_for_a_bigger_buffer(self):
         # done に 4 KB の本文が混ざるので 8 KB では足りない。
@@ -756,8 +768,11 @@ print
 
     def test_pages_are_shown_in_order_and_cleared_at_the_end(self):
         out = self.happy()
+        # ★ 行は積む。2 ページ目は 1 ページ目の下に足す (置き換えない)。
         self.assertEqual(subtitles(out),
-                         ['こんにちは', 'さようなら', 'またね', '-'])
+                         [r'こんにちは',
+                          r'こんにちは\nさようなら',
+                          r'こんにちは\nさようなら\nまたね', '-'])
         # 再生の途中では 3 ページを持っている。
         mid = prints(out)[0]
         self.assertEqual(mid['state'], 'playing')
@@ -813,7 +828,7 @@ pageat 60000
         mid = prints(out)[0]
         self.assertEqual(mid['pages'], 2)
         self.assertEqual(mid['dropped'], 4)
-        self.assertEqual(subtitles(out), ['よい', 'もうひとつ', '-'])
+        self.assertEqual(subtitles(out), [r'よい', r'よい\nもうひとつ', '-'])
 
     def test_too_many_pages_are_dropped(self):
         body = ''.join(r'%d\t%d\n' % (i * 10, i) for i in range(60))
@@ -821,6 +836,54 @@ pageat 60000
         mid = prints(out)[0]
         self.assertEqual(mid['pages'], 48)           # STACKEE_TALK_SUB_PAGES
         self.assertEqual(mid['dropped'], 60 - 48)
+
+    def test_lines_stack_until_the_band_is_full_then_the_page_turns(self):
+        """帯は 4 行。5 ページ目で帯を空にして 1 行目に置く。
+
+        ★ 行の集合はページ番号だけで決まる (i%4 行目に出る)。
+          ここは state machine を通さずに stackee_talk_band を直に呼ぶ。
+        """
+        body = ''.join(r'%d\tぺ%d\n' % (i * 1000, i) for i in range(9))
+        out = self.happy(subs=body) + run("""
+ack 0
+respdelay 10
+resp 202 %s
+resp 200 %s
+subs 200 %s
+resp 200 PCM:48000
+mic 40
+press
+t 400
+release
+t 2000
+band 0
+band 1
+band 2
+band 3
+band 4
+band 5
+band 8
+band 9
+""" % (ACCEPT_BODY, DONE_SUBS_BODY, body))
+        rows = bands(out)
+        self.assertEqual(rows, [
+            (0, 1, r'ぺ0'),
+            (1, 2, r'ぺ0\nぺ1'),
+            (2, 3, r'ぺ0\nぺ1\nぺ2'),
+            (3, 4, r'ぺ0\nぺ1\nぺ2\nぺ3'),
+            (4, 1, r'ぺ4'),                 # 頁めくり
+            (5, 2, r'ぺ4\nぺ5'),
+            (8, 1, r'ぺ8'),                 # 2 回目の頁めくり
+            (9, 0, '-'),                    # ページが無い
+        ])
+
+    def test_the_band_never_carries_more_than_four_lines(self):
+        body = ''.join(r'%d\tぺ%d\n' % (i * 1000, i) for i in range(9))
+        out = self.happy(subs=body)
+        for text in subtitles(out):
+            if text == '-':
+                continue
+            self.assertLessEqual(len(text.split(r'\n')), 4, text)
 
     def test_a_missing_subtitle_file_does_not_stop_the_reply(self):
         out = self.happy(status=404)
