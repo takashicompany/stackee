@@ -52,7 +52,7 @@ import {
   validateSettings,
   validateSsid,
   validateWifiEntry,
-} from '../web/js/protocol.js';
+} from '../docs/js/protocol.js';
 
 const RS = PROTOCOL.REQ_PREFIX;
 

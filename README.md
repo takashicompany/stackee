@@ -2,10 +2,11 @@
 
 M5Stack CoreS3 を使った自作キーボード **stackee** の公開リポジトリ。
 
-`web/` に静的サイト **「stackee 操作盤」**、`server/` に Mac / Linux で動かすサーバー側コードを置きます。
+`docs/` に静的サイト **「stackee 操作盤」**、`server/` に Mac / Linux で動かすサーバー側コードを置きます。
 音声受信サーバーの起動・API は [server/README.md](server/README.md) を参照してください。
 
-- 公開先: https://takashicompany.github.io/stackee/
+- 公開先: https://takashi.company/stackee/
+  (https://takashicompany.github.io/stackee/ はここへ転送されます)
 
 ---
 
@@ -113,7 +114,7 @@ SSID の手入力だけになります。
 ## 使い方
 
 1. stackee をパソコンに USB でつなぐ
-2. https://takashicompany.github.io/stackee/ を Chrome か Edge で開く
+2. https://takashi.company/stackee/ を Chrome か Edge で開く
 3. 「接続する」を押して、出てきた一覧から **M5Stack Core S3** を選ぶ
 4. Wi-Fi は「スキャンして選ぶ」→ パスワードを入れて「追加・更新」
    (最大 8 件。同じ SSID なら上書き)
@@ -124,35 +125,41 @@ SSID の手入力だけになります。
 **`file://` では動きません。** Web Serial は secure context (https: か
 `localhost`) でしか使えず、`file://` では `navigator.serial` がそもそも存在しません。
 
-`web/` を配信する簡易サーバを立てて `http://localhost:8000/` を開いてください。
+`docs/` を配信する簡易サーバを立てて `http://localhost:8000/` を開いてください。
 
 ```sh
 cd <このリポジトリ>
-python3 -m http.server 8000 --directory web
+python3 -m http.server 8000 --directory docs
 ```
 
-ビルド手順はありません。`web/index.html` と `web/js/*.js` を直接編集すれば、
+ビルド手順はありません。`docs/index.html` と `docs/js/*.js` を直接編集すれば、
 リロードするだけで反映されます。
 
 ---
 
 ## GitHub Pages への公開
 
-公開リポジトリ `takashicompany/stackee` の **Settings → Pages → Source** を
-**GitHub Actions** に設定します。`main` への push または手動実行で、
-`.github/workflows/pages.yml` が `web/` の内容だけを公開します。
-URL は引き続き https://takashicompany.github.io/stackee/ です。
+公開リポジトリ `takashicompany/stackee` の **Settings → Pages** で、
+**Source: Deploy from a branch**、**Branch: main**、**Folder: /docs** を選びます。
+`main` へ push すると `docs/` の中身がそのまま配信されます。
+GitHub Actions のワークフローは使いません。
 
-`server/`、テスト、README は Pages の配信対象に含みません。
+URL は https://takashi.company/stackee/ です。
+(アカウントに独自ドメインを設定しているためで、
+https://takashicompany.github.io/stackee/ はこちらへ転送されます。)
+
+`docs/.nojekyll` は Jekyll の処理を止めるためのものなので消さないでください。
+
+`server/`、テスト、README は `docs/` の外なので配信されません。
 サーバーは Mac などのホストで別途実行する想定です。
 
-参考: [GitHub 公式のカスタムワークフロー手順](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
+参考: [GitHub 公式のブランチ配信手順](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)
 
 ---
 
 ## プライバシー
 
-- **操作盤はブラウザだけで動きます。** GitHub Pages が `web/` の静的ファイルを
+- **操作盤はブラウザだけで動きます。** GitHub Pages が `docs/` の静的ファイルを
   配っているだけです。`server/` は Pages の配信対象に含めません。
 - **入力した内容はどこにも送信されません。** Wi-Fi のパスワードは
   「ブラウザ → USB ケーブル → デバイス」の 1 経路しか通りません。
@@ -198,7 +205,7 @@ URL は引き続き https://takashicompany.github.io/stackee/ です。
 
 ```
 .
-├── web/                      GitHub Pages の配信対象
+├── docs/                     GitHub Pages の配信対象 (Branch: main / Folder: /docs)
 │   ├── index.html            操作盤
 │   ├── style.css             見た目
 │   ├── js/
@@ -209,16 +216,15 @@ URL は引き続き https://takashicompany.github.io/stackee/ です。
 │   └── .nojekyll
 ├── server/                   Mac / Linux 音声受信サーバーと常駐 Codex エージェント
 ├── test/
-│   ├── protocol.test.mjs     web/js/protocol.js の単体テスト
-│   └── hid.test.mjs          web/js/hid.js の単体テスト
+│   ├── protocol.test.mjs     docs/js/protocol.js の単体テスト
+│   └── hid.test.mjs          docs/js/hid.js の単体テスト
 ├── package.json              Node 用の ES モジュール指定 (依存なし)
-├── .github/workflows/pages.yml  web/ だけを Pages に公開
 └── README.md
 ```
 
 ### プロトコル定数の置き場所
 
-デバイスとやりとりする **合図はすべて `web/js/protocol.js` の先頭にまとめて** あります
+デバイスとやりとりする **合図はすべて `docs/js/protocol.js` の先頭にまとめて** あります
 (`PROTOCOL` / `CMD` / `ERR` / `SETTING_KEYS`)。
 ほかのファイルはそこから読むだけで、生の値を書いていません。
 

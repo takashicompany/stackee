@@ -30,8 +30,8 @@ import {
   decodeRxReport,
   encodeTxReports,
   parseInfoReport,
-} from '../web/js/hid.js';
-import { Demux, PROTOCOL, buildRequest } from '../web/js/protocol.js';
+} from '../docs/js/hid.js';
+import { Demux, PROTOCOL, buildRequest } from '../docs/js/protocol.js';
 
 /** 0..n-1 の数を並べたバイト列。 */
 const seq = (n) => Uint8Array.from({ length: n }, (_, i) => i & 0xff);
