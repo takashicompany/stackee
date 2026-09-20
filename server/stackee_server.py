@@ -2,7 +2,8 @@
 """LAN voice receiver: WAV → whisper-cli → the configured agent → say or VOICEVOX.
 
 Python standard library only. POST /talk accepts WAV; poll the returned Location
-for status, then GET its /audio endpoint for 16 kHz, signed little-endian PCM.
+for status, then GET its /audio endpoint for 16 kHz, signed little-endian PCM and
+its /subtitles endpoint for the caption pages timed against that PCM.
 GET /admin serves the browser page that switches agent, model, effort and instructions.
 """
 from __future__ import annotations
@@ -121,6 +122,14 @@ def clean_reply(text):
 SENTENCE_MARKS = "。．！？!?\n"
 CLAUSE_MARKS = "、，,"
 SILENCE = b"\0\0" * (RATE * 150 // 1000)   # a breath between sentences
+BYTES_PER_MS = RATE * 2 // 1000
+
+# Subtitles: one televised line is 15 full-width characters, and the device draws
+# ASCII half as wide. A page never opens with punctuation or a closing bracket.
+SUBTITLE_COLUMNS = 15
+SUBTITLE_MAX_LINES = 48
+SUBTITLE_MAX_BYTES = 4096
+NO_PAGE_START = "。、．，,.！？!?」』）)】〕》〉］]｝}・ー:;：；"
 
 
 def split_parts(text, marks):
@@ -133,6 +142,70 @@ def split_parts(text, marks):
             current = ""
     parts.append(current)
     return [part for part in parts if part.strip()]
+
+
+def page_width(text):
+    """Display width in columns: ASCII is half a column wide, everything else one."""
+    return sum(.5 if " " <= character <= "~" else 1. for character in text)
+
+
+def split_columns(text, columns=SUBTITLE_COLUMNS):
+    """Cut text into pieces of at most `columns` columns, none opening with punctuation."""
+    pieces, start = [], 0
+    while start < len(text):
+        end, width = start, 0.
+        while end < len(text) and width + page_width(text[end]) <= columns:
+            width += page_width(text[end])
+            end += 1
+        while start + 1 < end < len(text) and text[end] in NO_PAGE_START:
+            end -= 1
+        pieces.append(text[start:end])
+        start = end
+    return pieces
+
+
+def clause_spans(text):
+    """Character ranges of the clauses of one sentence, in order, covering the text."""
+    spans, start = [], 0
+    for index, character in enumerate(text):
+        if character in CLAUSE_MARKS + SENTENCE_MARKS:
+            spans.append((start, index + 1))
+            start = index + 1
+    if start < len(text):
+        spans.append((start, len(text)))
+    return spans
+
+
+def subtitle_pages(text):
+    """Pages of one sentence as (character offset within the sentence, page text)."""
+    pages = []
+    for start, end in clause_spans(text):
+        offset = start
+        for piece in split_columns(text[start:end]):
+            page = " ".join(piece.split())
+            if page:
+                pages.append((offset, page))
+            offset += len(piece)
+    return pages
+
+
+def subtitle_body(sentences, max_lines=SUBTITLE_MAX_LINES, max_bytes=SUBTITLE_MAX_BYTES):
+    """`<start_ms>\\t<text>` lines for [(start_ms, duration_ms, sentence)].
+
+    A sentence boundary is exact, because its start comes from the PCM already joined.
+    Inside a sentence the pages share its duration in proportion to their characters.
+    """
+    lines = []
+    for start_ms, duration_ms, text in sentences:
+        for offset, page in subtitle_pages(text):
+            lines.append((round(start_ms + duration_ms * offset / len(text)), page))
+    body = b""
+    for start, page in lines[:max_lines]:
+        line = (str(start) + "\t" + page + "\n").encode("utf-8")
+        if len(body) + len(line) > max_bytes:
+            break
+        body += line
+    return body
 
 
 class Pipeline:
@@ -206,9 +279,12 @@ class Pipeline:
         inflates the engine's GPU arena, so each sentence is its own request and the pieces
         are joined with a short silence. A sentence the engine refuses, or the opening
         sentence when it alone is too long, is retried clause by clause.
+
+        Returns the text actually spoken, its PCM, and the subtitle body, whose page
+        times come from where each sentence starts in that PCM.
         """
         self.failure = None
-        chunks, kept, used = [], "", 0
+        chunks, kept, used, spoken = [], "", 0, []
         units = deque(split_parts(reply, SENTENCE_MARKS))
         while units:
             unit = units.popleft()
@@ -227,6 +303,7 @@ class Pipeline:
                 break
             chunks.append(gap)
             chunks.append(audio)
+            spoken.append(((used + len(gap)) / BYTES_PER_MS, len(audio) / BYTES_PER_MS, unit))
             used += len(gap) + len(audio)
             kept += unit
         kept = kept.strip().rstrip(CLAUSE_MARKS)
@@ -237,7 +314,7 @@ class Pipeline:
         if len(kept) < len(reply.strip()):
             logging.info("reply-shortened original=%d kept=%d bytes=%d limit=%d",
                          len(reply.strip()), len(kept), used, limit)
-        return kept, limit_speaker_peak(b"".join(chunks))
+        return kept, limit_speaker_peak(b"".join(chunks)), subtitle_body(spoken)
 
     def speak(self, text, root):
         """PCM for one piece of text, or None when the engine refuses it."""
@@ -315,10 +392,11 @@ class Pipeline:
             timings["codex_ms"] = round((time.monotonic() - stage) * 1000, 2)
             stage = time.monotonic()
             # Keep synthesis and device memory bounded even when the model ignores brevity.
-            reply, audio = self.fit(reply, root)
+            reply, audio, subtitles = self.fit(reply, root)
             timings["tts_ms"] = round((time.monotonic() - stage) * 1000, 2)
             timings["total_ms"] = round((time.monotonic() - started) * 1000, 2)
-            return {"state": "done", "transcript": text, "reply": reply, "timings": timings}, audio
+            return {"state": "done", "transcript": text, "reply": reply, "timings": timings,
+                    "subtitles": subtitles}, audio
 
 
 class Jobs:
@@ -481,19 +559,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, ADMIN_HTML.read_bytes(), "text/html; charset=utf-8")
         if self.path == "/admin/api/state":
             return self.admin_state()
-        match = re.fullmatch(r"/jobs/([0-9a-f]{32})(/audio)?", self.path)
+        match = re.fullmatch(r"/jobs/([0-9a-f]{32})(/audio|/subtitles)?", self.path)
         item = self.server.jobs.get(match[1]) if match else None
         if not item:
             return self.send(404, {"error": "not_found"})
         audio = item.pop("audio", b"")
+        subtitles = item.pop("subtitles", b"")
         item.pop("created")
-        if match[2]:
+        if match[2] == "/audio":
             if item["state"] != "done":
                 return self.send(409, {"error": "audio_not_ready"})
             return self.send(200, audio, "application/octet-stream")
+        if match[2] == "/subtitles":
+            if item["state"] == "processing":
+                return self.send(409, {"error": "subtitles_not_ready"})
+            if item["state"] != "done" or not subtitles:
+                return self.send(404, {"error": "not_found"})
+            return self.send(200, subtitles, "text/plain; charset=utf-8")
         if item["state"] == "done":
             item.update(audio_url=self.path + "/audio", sample_rate=RATE,
                         channels=1, sample_width=2, audio_bytes=len(audio))
+            if subtitles:
+                item["subtitles_url"] = self.path + "/subtitles"
         return self.send(200, item)
 
     def do_PUT(self):

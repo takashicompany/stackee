@@ -165,7 +165,7 @@ class VoicevoxTests(unittest.TestCase):
         self.thread.join()
 
     def test_japanese_query_format_and_peak(self):
-        reply, audio = self.pipeline.fit('こんにちは & 元気？', Path('/unused'))
+        reply, audio, _ = self.pipeline.fit('こんにちは & 元気？', Path('/unused'))
         self.assertEqual(reply, 'こんにちは & 元気？')
         self.assertEqual(len(audio), 16000)
         self.assertLessEqual(s.peak(audio), 8191)
@@ -201,7 +201,8 @@ class HttpTests(unittest.TestCase):
         def pipeline(data):
             self.calls.append(data)
             self.release.wait(3)
-            return {'state': 'done', 'transcript': 'test', 'reply': 'reply'}, b'\0\1' * 100
+            return {'state': 'done', 'transcript': 'test', 'reply': 'reply',
+                    'subtitles': '0\tこんにちは\n1200\tさようなら\n'.encode('utf-8')}, b'\0\1' * 100
         self.server = s.ThreadingHTTPServer(('127.0.0.1', 0), s.Handler)
         self.server.jobs = s.Jobs(pipeline)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -239,6 +240,44 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(audio, b'\0\1' * 100)
         self.assertEqual(len(self.calls), 1)
+
+    def test_subtitles_endpoint_and_unchanged_done_fields(self):
+        status, _, body = self.request('POST', '/talk', wav(), {'Content-Type': 'audio/wav'})
+        self.assertEqual(status, 202)
+        path = json.loads(body)['status_url']
+        self.assertEqual(self.request('GET', path + '/subtitles')[0], 409)
+        self.release.set()
+        self.server.jobs.worker.join(3)
+        state = json.loads(self.request('GET', path)[2])
+        self.assertEqual(state['subtitles_url'], path + '/subtitles')
+        self.assertEqual(set(state), {'state', 'transcript', 'reply', 'audio_url', 'audio_bytes',
+                                      'sample_rate', 'channels', 'sample_width', 'subtitles_url'})
+        self.assertEqual((state['audio_url'], state['audio_bytes'], state['sample_rate'],
+                          state['channels'], state['sample_width']),
+                         (path + '/audio', 200, 16000, 1, 2))
+        status, headers, subtitles = self.request('GET', state['subtitles_url'])
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Content-Type'], 'text/plain; charset=utf-8')
+        self.assertEqual(subtitles.decode('utf-8'), '0\tこんにちは\n1200\tさようなら\n')
+        self.assertEqual(self.request('GET', '/jobs/' + '0' * 32 + '/subtitles')[0], 404)
+
+    def test_subtitles_are_absent_for_ignored_failed_and_silent_jobs(self):
+        def ignored(data):
+            return {'state': 'ignored', 'reason': 'silence'}, b''
+        def failed(data):
+            raise RuntimeError('test failure')
+        def wordless(data):
+            return {'state': 'done', 'transcript': 'test', 'reply': 'reply'}, b'\0\1' * 10
+        for worker, expected in ((ignored, 'ignored'), (failed, 'error'), (wordless, 'done')):
+            with self.subTest(state=expected):
+                self.server.jobs.pipeline = worker
+                ident = self.server.jobs.submit(wav())
+                self.server.jobs.worker.join(3)
+                path = '/jobs/' + ident
+                state = json.loads(self.request('GET', path)[2])
+                self.assertEqual(state['state'], expected)
+                self.assertNotIn('subtitles_url', state)
+                self.assertEqual(self.request('GET', path + '/subtitles')[0], 404)
 
     def test_reject_bad_requests_without_work(self):
         cases = [('/wrong', wav(), {'Content-Type': 'audio/wav'}, 404),
@@ -465,7 +504,7 @@ class LengthTests(unittest.TestCase):
 
     def test_a_short_reply_is_a_single_synthesis(self):
         p, calls = self.pipeline()
-        reply, audio = p.fit('みじかい返答です。', Path('/unused'))
+        reply, audio, _ = p.fit('みじかい返答です。', Path('/unused'))
         self.assertEqual(reply, 'みじかい返答です。')
         self.assertEqual(calls, ['みじかい返答です。'])
         self.assertEqual(len(audio), 9 * 20000)
@@ -474,7 +513,7 @@ class LengthTests(unittest.TestCase):
     def test_each_sentence_is_synthesised_on_its_own_and_joined_with_silence(self):
         p, calls = self.pipeline()
         text = 'ひとつ目です。ふたつ目です！みっつ目ですか？'
-        reply, audio = p.fit(text, Path('/unused'))
+        reply, audio, _ = p.fit(text, Path('/unused'))
         self.assertEqual(reply, text)
         self.assertEqual(calls, ['ひとつ目です。', 'ふたつ目です！', 'みっつ目ですか？'])
         self.assertEqual(len(audio), len(text) * 20000 + 2 * len(s.SILENCE))
@@ -483,7 +522,7 @@ class LengthTests(unittest.TestCase):
     def test_the_total_stops_before_the_limit_without_cutting_a_sentence(self):
         p, calls = self.pipeline()
         text = ''.join('これは' + str(i) + '番目の文です。' for i in range(40))
-        reply, audio = p.fit(text, Path('/unused'))
+        reply, audio, _ = p.fit(text, Path('/unused'))
         self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
         self.assertTrue(text.startswith(reply), reply)
         self.assertTrue(reply.endswith('。'), reply)
@@ -497,7 +536,7 @@ class LengthTests(unittest.TestCase):
     def test_a_first_sentence_that_is_too_long_falls_back_to_clauses(self):
         p, calls = self.pipeline()
         text = '、'.join('とても長い句' + str(i) for i in range(50)) + '。'
-        reply, audio = p.fit(text, Path('/unused'))
+        reply, audio, _ = p.fit(text, Path('/unused'))
         self.assertLessEqual(len(audio), s.MAX_REPLY_BYTES)
         self.assertTrue(text.startswith(reply), reply)
         self.assertFalse(reply.endswith('、'), reply)
@@ -508,7 +547,7 @@ class LengthTests(unittest.TestCase):
     def test_a_sentence_the_engine_refuses_is_retried_clause_by_clause(self):
         p, calls = self.pipeline(bytes_per_char=100, refuse_over=30)
         text = 'みじかい文です。' + 'あ、' * 30 + 'おわり。'
-        reply, audio = p.fit(text, Path('/unused'))
+        reply, audio, _ = p.fit(text, Path('/unused'))
         self.assertTrue(calls[0] == 'みじかい文です。')
         self.assertIn('あ、' * 30, calls[1])
         self.assertTrue(all(len(c) <= 30 for c in calls[2:]), calls[2:])
@@ -530,7 +569,7 @@ class LengthTests(unittest.TestCase):
         p, calls = self.pipeline()
         text = ''.join('これは' + str(i) + '番目の文です。' for i in range(10))
         self.assertEqual(p.fit(text, Path('/unused'))[0], text)
-        tight, audio = p.fit(text, Path('/unused'), s.RATE * 2 * 30)
+        tight, audio, _ = p.fit(text, Path('/unused'), s.RATE * 2 * 30)
         self.assertLess(len(tight), len(text))
         self.assertLessEqual(len(audio), s.RATE * 2 * 30)
         self.assertTrue(tight.endswith('。'), tight)
@@ -549,6 +588,99 @@ class LengthTests(unittest.TestCase):
         pieces = s.split_parts(text, s.SENTENCE_MARKS)
         self.assertEqual(len(pieces), 4)
         self.assertEqual(''.join(pieces), text)
+
+
+class SubtitleTests(unittest.TestCase):
+    """Pages of at most 15 columns, timed from the PCM the server has already joined."""
+
+    def pipeline(self, bytes_per_char=20000):
+        p = s.Pipeline('unused')
+        p.synthesize = lambda text, root: b'\0\1' * (len(text) * bytes_per_char // 2)
+        return p
+
+    @staticmethod
+    def lines(body):
+        return [line.split('\t') for line in body.decode('utf-8').splitlines()]
+
+    def test_sentence_start_comes_from_the_joined_pcm(self):
+        p = self.pipeline()
+        reply, audio, body = p.fit('ひとつ目です。ふたつ目です。', Path('/unused'))
+        # 7 characters x 20000 bytes = 140000 bytes = 4375 ms, then 150 ms of silence.
+        self.assertEqual(len(audio), 7 * 20000 * 2 + len(s.SILENCE))
+        self.assertEqual(self.lines(body), [['0', 'ひとつ目です。'], ['4525', 'ふたつ目です。']])
+        self.assertEqual(4525, (7 * 20000 + len(s.SILENCE)) // (s.RATE * 2 // 1000))
+
+    def test_pages_inside_a_sentence_share_its_duration_by_characters(self):
+        p = self.pipeline()
+        text = '春はあたたかいです、夏はあついです。'
+        reply, audio, body = p.fit(text, Path('/unused'))
+        self.assertEqual(reply, text)
+        # 18 characters = 11250 ms; the second page starts after 10 of them.
+        self.assertEqual(self.lines(body), [['0', '春はあたたかいです、'], ['6250', '夏はあついです。']])
+        self.assertEqual(6250, round(len(text) * 20000 / 32 * 10 / len(text)))
+
+    def test_the_say_backend_times_its_pages_the_same_way(self):
+        p = s.Pipeline('unused', tts='say')
+        def run(argv, cwd, input=None):
+            Path(argv[argv.index('-o') + 1]).write_bytes(wav(seconds=len(argv[-1]) * .5))
+            return ''
+        p.run = run
+        with tempfile.TemporaryDirectory() as tmp:
+            reply, audio, body = p.fit('ひとつ目です。ふたつ目です。', Path(tmp))
+        self.assertEqual(len(audio), 7 * 16000 * 2 + len(s.SILENCE))
+        self.assertEqual(self.lines(body), [['0', 'ひとつ目です。'], ['3650', 'ふたつ目です。']])
+
+    def test_pages_are_cut_at_fifteen_columns(self):
+        self.assertEqual(s.split_columns('あ' * 40), ['あ' * 15, 'あ' * 15, 'あ' * 10])
+        for page in s.split_columns('あ' * 40):
+            self.assertLessEqual(s.page_width(page), 15)
+
+    def test_a_half_width_page_holds_thirty_characters(self):
+        self.assertEqual(s.page_width('abc'), 1.5)
+        self.assertEqual(s.page_width('あa'), 1.5)
+        self.assertEqual(s.split_columns('a' * 40), ['a' * 30, 'a' * 10])
+        self.assertEqual(s.split_columns('あ' * 10 + 'ab' * 20),
+                         ['あ' * 10 + 'ab' * 5, 'ab' * 15])
+
+    def test_punctuation_never_opens_a_page(self):
+        pages = [page for _, page in s.subtitle_pages('あ' * 15 + '」' + 'い' * 20 + '。')]
+        self.assertEqual(pages[0], 'あ' * 14)
+        self.assertTrue(pages[1].startswith('あ」'), pages)
+        for page in pages:
+            self.assertNotIn(page[0], s.NO_PAGE_START)
+            self.assertLessEqual(s.page_width(page), 15)
+        self.assertEqual(''.join(pages), 'あ' * 15 + '」' + 'い' * 20 + '。')
+
+    def test_clauses_start_their_own_page_with_the_comma_kept(self):
+        pages = s.subtitle_pages('春です、夏です。')
+        self.assertEqual(pages, [(0, '春です、'), (4, '夏です。')])
+
+    def test_the_body_stops_at_forty_eight_lines_and_four_kilobytes(self):
+        body = s.subtitle_body([(0, 60000., 'あ' * 15 * 60)])
+        self.assertEqual(len(body.splitlines()), 48)
+        self.assertLessEqual(len(body), 4096)
+        self.assertTrue(body.startswith('0\t'.encode('utf-8') + 'あ'.encode('utf-8') * 15))
+        short = s.subtitle_body([(0, 60000., 'あ' * 15 * 60)], max_bytes=200)
+        self.assertLessEqual(len(short), 200)
+        self.assertLess(len(short.splitlines()), 48)
+        self.assertTrue(body.startswith(short))
+
+    def test_every_page_of_a_long_reply_is_within_the_contract(self):
+        p = self.pipeline(bytes_per_char=2000)
+        text = ''.join('これは' + str(i) + '番目の、すこし長めの文です。' for i in range(12))
+        reply, audio, body = p.fit(text, Path('/unused'))
+        rows = self.lines(body)
+        starts = [int(row[0]) for row in rows]
+        self.assertEqual(starts[0], 0)
+        self.assertEqual(starts, sorted(starts))
+        self.assertLess(starts[-1], len(audio) / (s.RATE * 2 // 1000))
+        self.assertLessEqual(len(rows), 48)
+        self.assertLessEqual(len(body), 4096)
+        for start, page in rows:
+            self.assertLessEqual(s.page_width(page), 15)
+            self.assertNotIn(page[0], s.NO_PAGE_START)
+        self.assertEqual(''.join(page for _, page in rows), reply[:len(''.join(
+            page for _, page in rows))])
 
 
 if __name__ == '__main__':
