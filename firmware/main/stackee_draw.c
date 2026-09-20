@@ -77,7 +77,7 @@ void stackee_draw_face(const stackee_canvas_t *c, const uint8_t *sheet, int size
                 continue;
             }
             uint8_t byte = src[x >> 1];
-            // ★ 画素 0 が上位ニブル (tools/import_stackchan_assets.py の
+            // ★ 画素 0 が上位ニブル (tools/import_faces.py の
             //   `(pixels[i] << 4) | pixels[i+1]`)。
             int level = (x & 1) ? (byte & 0x0F) : (byte >> 4);
             uint16_t color = grey[level];

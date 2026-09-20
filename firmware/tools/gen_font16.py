@@ -6,14 +6,12 @@
 (全角 1 桁 = 16 px、半角 0.5 桁 = 8 px) なので、必要なのは 16 px の
 全角と 8x16 の半角の 2 つだけ。
 
-  python3 firmware/tools/gen_font16.py \
-      --wide   research/stackee/fonts/shinonome/shnmk16.bdf \
-      --narrow research/stackee/fonts/shinonome/shnm8x16r.bdf \
-      --out    firmware/assets/font16.bin
+  python3 firmware/tools/gen_font16.py          # 既定の BDF から作り直す
+  python3 firmware/tools/gen_font16.py --check  # 生成物が最新かだけ見る
 
-★ BDF 本体はリポジトリに入れない (未追跡の research/ にある)。入れるのは
-  この道具と生成物だけ。東雲フォントは Public Domain
-  (research/stackee/fonts/shinonome/LICENSE.utf8.txt)。
+★ BDF 本体もリポジトリに入れてある (`firmware/assets/src/fonts/shinonome/`)。
+  東雲フォントは Public Domain (同じ場所の `LICENSE.utf8.txt`)。
+  別の場所のものを使うなら --wide / --narrow で渡す。
 
 ■ 出来上がる形 (すべてリトルエンディアン)
 
@@ -241,12 +239,11 @@ def load(path):
 def main():
     here = Path(__file__).resolve().parent
     idf = here.parent
-    root = idf.parents[1]
-    shinonome = root / 'research/stackee/fonts/shinonome'
+    shinonome = idf / 'assets/src/fonts/shinonome'
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--wide', type=Path, default=shinonome / 'shnmk16.bdf',
-                    help='JIS X 0208 の 16x16 (既定: research/ の東雲)')
+                    help='JIS X 0208 の 16x16 (既定: assets/src/fonts/shinonome)')
     ap.add_argument('--narrow', type=Path, default=shinonome / 'shnm8x16r.bdf',
                     help='JIS X 0201 の 8x16')
     ap.add_argument('--out', type=Path, default=idf / 'assets/font16.bin')
@@ -257,8 +254,7 @@ def main():
     for path in (args.wide, args.narrow):
         if not path.is_file():
             print('BDF が無い: %s' % path, file=sys.stderr)
-            print('東雲 BDF はリポジトリに入れていない。'
-                  '置き場を --wide / --narrow で指定する。', file=sys.stderr)
+            print('置き場を --wide / --narrow で指定する。', file=sys.stderr)
             return 2
 
     narrow_bdf = parse_bdf(args.narrow)

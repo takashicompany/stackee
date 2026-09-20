@@ -48,6 +48,8 @@ EP0 込みで 5 本しかないので、全部は載らない。
 cd firmware
 for t in tools/test_*.py; do python3 "$t"; done
 python3 tools/gen_keymap.py --check      # 生成物が最新か
+python3 tools/gen_font16.py --check      # 字幕フォントが元の BDF と合うか
+python3 tools/import_faces.py --check    # 顔の素材が元絵と合うか (Pillow が要る)
 python3 tools/hid_desc_check.py          # HID 記述子の構成を目で見る
 ```
 
@@ -286,6 +288,8 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | `tools/fs_put.py` / `tools/install_assets.sh` | **段階 4**。素材を FAT へ送る |
 | `tools/check_phase4.py` | **段階 4** の合否を実機で測る (読むだけ) |
 | `tools/gen_keymap.py` | keymap.py から配列と VIA 定義を作る |
+| `tools/import_faces.py` | 元絵 (`assets/src/faces/`) から顔の素材を作る (`--check` で一致だけ見る) |
+| `tools/gen_font16.py` | 東雲 BDF (`assets/src/fonts/shinonome/`) から字幕フォントを作る |
 | `tools/keycodes.md` | KMK と QMK の対応表 (読み物) |
 | `tools/flash.py` | ota_0 だけを書き換える。退避・照合・復帰つき |
 | `tools/check_phase1.py` | 段階 1 の合否を実機で測る (読むだけ) |

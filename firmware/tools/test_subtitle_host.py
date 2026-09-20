@@ -24,9 +24,8 @@ import zlib
 from pathlib import Path
 
 IDF = Path(__file__).resolve().parents[1]
-ROOT = IDF.parents[1]
 FONT16 = IDF / 'assets/font16.bin'
-SHINONOME = ROOT / 'research/stackee/fonts/shinonome'
+SHINONOME = IDF / 'assets/src/fonts/shinonome'
 sys.path.insert(0, str(IDF / 'tools'))
 import gen_font16                                  # noqa: E402
 import subtitle_expected as sub                    # noqa: E402
@@ -221,7 +220,7 @@ class IndexTest(unittest.TestCase):
         self.assertEqual(len(self.font.data), want)
 
     @unittest.skipUnless((SHINONOME / 'shnmk16.bdf').is_file(),
-                         '東雲 BDF はリポジトリに入れていない')
+                         '東雲 BDF が見つからない')
     def test_the_generator_is_deterministic(self):
         # 生成物が BDF から作り直したものと 1 バイトも違わないか。
         out = subprocess.run(

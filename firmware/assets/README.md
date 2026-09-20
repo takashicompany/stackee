@@ -4,24 +4,65 @@
 [`../tools/install_assets.sh`](../tools/install_assets.sh)。
 ファームの像には含まれない (起動時にファイルとして読む)。
 
-| ファイル | 中身 | 出所とライセンス |
-|---|---|---|
-| `faces.bin` | 顔 32 枚。4bpp の縦長シートを zlib 圧縮 | Stack-chan の v2 の顔を 200px 四方・16 階調へ変換したもの |
-| `changes.bin` | 顔のフレーム間で変わる領域 (差分描画の下ごしらえ) | 同上 |
-| `manifest.json` | 上の 2 つと音声の目録 (寸法・オフセット・SHA-256) | — |
-| `status_icons.bin` | 上段のアイコン 18 枚。24×24・2bit を zlib 圧縮 | Material Design Icons (Google) / **Apache-2.0** → `LICENSE-material-design-icons.txt` |
-| `status_icons.json` | 上のタイル番号と寸法 | — |
-| `status_h24.bdf` | 上段の数字。半角 12×24 の ASCII 95 文字 | /efont/ Unicode Bitmap Fonts の `h24.bdf` → `LICENSE-efont.txt` |
-| `font16.bin` | 字幕用の日本語 16px フォント (7,037 字) | **東雲 (Shinonome) フォント / Public Domain**。`../tools/gen_font16.py` が BDF から作る |
-| `ack_01..05.pcmz` | 一次回答の音声 5 本。16 kHz / 16bit / mono PCM を zlib 圧縮 | VOICEVOX: ずんだもん (ノーマル、speaker 3) で合成 |
+元データも `src/` に入れてある。**生成物だけでなく、そこから作り直せる
+ものを置く**のが方針。ただし元データをここへ置けていないものが 2 つあり
+(アイコンと一次回答の音声)、それは下の表に正直に書いてある。
+
+## 一覧
+
+| ファイル | 中身 | 元データ | 作者 / ライセンス | 作り直し方 |
+|---|---|---|---|---|
+| `faces.bin` | 顔 32 枚。240×240・4bpp の縦長シートを zlib 圧縮 | `src/faces/<状態>/*.png` (800×800、32 枚) | **takashicompany (ユーザー本人)。ライセンス未指定** | `python3 ../tools/import_faces.py` |
+| `changes.bin` | 顔のフレーム間で変わる領域 (差分描画の下ごしらえ) | 同上 | 同上 | 同上 (一緒に出る) |
+| `manifest.json` | 上の 2 つと音声の目録 (寸法・オフセット・SHA-256) | 同上 | — | 同上 (一緒に出る) |
+| `font16.bin` | 字幕用の日本語 16px フォント (7,037 字) | `src/fonts/shinonome/shnmk16.bdf` と `shnm8x16r.bdf` | **東雲フォント / Public Domain** (`src/fonts/shinonome/LICENSE.utf8.txt`) | `python3 ../tools/gen_font16.py` |
+| `status_icons.bin` | 上段のアイコン 18 枚。24×24・2bit を zlib 圧縮 | **このリポジトリには無い** (下の「元データが入っていないもの」) | Material Design Icons (Google) / **Apache-2.0** (`LICENSE-material-design-icons.txt`) | 親リポジトリの `firmware/kmk/tools/generate_status_assets.py --fetch` |
+| `status_icons.json` | 上のタイル番号と寸法 | 同上 | — | 同上 (一緒に出る) |
+| `status_h24.bdf` | 上段の数字。半角 12×24 の ASCII 95 文字 | **このリポジトリには無い** (/efont/ の `h24.bdf` を切り出したもの) | /efont/ Unicode Bitmap Fonts (`LICENSE-efont.txt`) | 同上 |
+| `ack_01..05.pcmz` | 一次回答の音声 5 本。16 kHz / 16bit / mono PCM を zlib 圧縮 | **このリポジトリには無い** (合成の入力は日本語の文 5 つ) | VOICEVOX: ずんだもん (ノーマル、speaker 3)。VOICEVOX の利用規約に従う | 親リポジトリの `firmware/kmk/tools/generate_ack_assets.py --host <合成サーバ>` |
+
+## 作り直しが合っているかを見る
+
+どちらも**書かずに一致だけ**を見る。同じ元データからは毎回同じバイト列が出る。
+
+```sh
+python3 firmware/tools/import_faces.py --check     # faces.bin / changes.bin / manifest.json
+python3 firmware/tools/gen_font16.py  --check      # font16.bin
+```
+
+`import_faces.py` は Pillow が要る (`python3 -m pip install --user pillow`)。
+**どちらも実機に触らず、音も鳴らさない。**
+
+## 元データが入っていないもの
+
+- **アイコン** — Material Design Icons の SVG は上流のリポジトリから取る。
+  `generate_status_assets.py --fetch` が `google/material-design-icons` から
+  必要なものだけ落としてきて、`rsvg-convert` で 24×24 にラスタライズし、
+  4 階調 (2bit) へ減らして 1 枚のシートにまとめる。
+  SVG そのものはここには置いていない。
+- **上段の数字のフォント** — /efont/ の `h24.bdf` (439 KB) から ASCII 95 文字
+  だけを抜いたものが `status_h24.bdf`。元の BDF は配布元から取る。
+- **一次回答の音声** — 合成は稼働中の音声サーバ (ubook) の VOICEVOX を
+  そのまま使う。文面と合成設定と PCM の SHA-256 は `manifest.json` の
+  `acks` に記録してある。**この道具は音を鳴らさない。**
+
+この 3 つを作り直す道具は親リポジトリ (非公開) の `firmware/kmk/tools/` に
+ある。生成物と、その出所・ライセンス・作り方はここに全部書いてあるので、
+作り直さずにそのまま使う分にはこのリポジトリだけで足りる。
 
 ## ライセンスの表記
+
+### 顔 (`src/faces/`, `faces.bin`, `changes.bin`)
+
+作者は takashicompany (このリポジトリのユーザー本人)。Stack-chan の v2 の顔
+として描いたもの。**ライセンスは指定していない。** 変換は
+`../tools/import_faces.py` が、白背景に合成 → 状態ごとに倍率を固定して
+中央基準で 240×240 へ縮小 → 16 階調 (4bpp) へ減色、の順で行う。
 
 ### Material Icons (アイコン)
 
 Material Icons by Google —
 https://github.com/google/material-design-icons
-(コミット `40a7a292a79d9394157e1ea24f83d52d5e17c556`)
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use
 these files except in compliance with the License. You may obtain a copy of the
@@ -43,14 +84,17 @@ or implied.
 
 ### 東雲 (Shinonome) フォント (字幕)
 
-`font16.bin` は東雲フォント (`shnmk16.bdf` / `shnm8x16r.bdf`) から
-`../tools/gen_font16.py` が作った生成物。**Public Domain**。
-BDF 本体はこのリポジトリに入れていないので、作り直すときは配布元から取ってきて
-`--wide` / `--narrow` で場所を渡す。
+`src/fonts/shinonome/` に BDF そのものを入れてある。**Public Domain**
+(日本の法律では著作権を放棄できないため、作者が権利を行使しないと宣言する
+形での Public Domain。全文は同じ場所の `LICENSE.utf8.txt`)。
+`font16.bin` はそこから `../tools/gen_font16.py` が作った生成物。
 
-### 顔と一次回答
+### 一次回答の音声 (`ack_*.pcmz`)
 
-顔は Stack-chan の素材を変換したもの、一次回答は VOICEVOX で合成したもの。
-どちらも元の配布条件に従う。**このディレクトリの素材は、上のディレクトリ
-(`firmware/` の GPL-2.0-or-later) とは別のライセンスで、それぞれの出所の
-条件が効く。**
+VOICEVOX: ずんだもん (ノーマル、speaker 3) で合成したもの。VOICEVOX と
+キャラクターそれぞれの利用規約に従う。
+
+---
+
+**この `assets/` の中身は、上のディレクトリ (`firmware/` の
+GPL-2.0-or-later) とは別のライセンスで、それぞれの出所の条件が効く。**
