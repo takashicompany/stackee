@@ -22,9 +22,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IDF = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
+import stackee_tree as tree  # noqa: E402
 import gen_keymap  # noqa: E402
 
+# 1 と 2 は移植元 (現行 CircuitPython 版の firmware/kmk) を読んで出す。
+# 非公開なので、公開リポジトリだけの clone では飛ばす。3 は生成物そのものを
+# 読むだけなので、どちらの木でも走る。
+NEEDS_KMK = unittest.skipIf(tree.KMK is None,
+                            '移植元 (firmware/kmk) が無いので生成し直せない')
 
+
+@NEEDS_KMK
 class GeneratedFilesAreUpToDateTest(unittest.TestCase):
     def test_no_pending_regeneration(self):
         keymap_c, keycodes_h, via, _grid, _conv = gen_keymap.generate()
@@ -40,6 +48,7 @@ class GeneratedFilesAreUpToDateTest(unittest.TestCase):
                                  % os.path.basename(path))
 
 
+@NEEDS_KMK
 class ConversionTest(unittest.TestCase):
     """KMK のキー -> QMK のキーコード。"""
 
@@ -115,6 +124,7 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(self.conv.ext_mods[0][3], 0x0233)
 
 
+@NEEDS_KMK
 class MatrixTest(unittest.TestCase):
     """生成した keymaps[][][] が配線表どおりか。"""
 

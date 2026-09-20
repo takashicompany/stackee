@@ -18,6 +18,68 @@
 
 ## 0. まずこれだけ
 
+### 0-0. clone しただけの PC で、ビルドできるまで
+
+この木には**取得物が入っていない**。ESP-IDF もツールチェーンも TinyUSB も、
+`clone` の後に取ってくる。順番はこれだけ。
+
+```
+git clone https://github.com/takashicompany/stackee.git
+cd stackee/firmware
+
+./setup.sh                          # ESP-IDF v6.0.3 + ツールチェーン + Python
+./build.sh                          # dev  -> build/stackee.bin
+./build.sh --profile full           # full -> build-full/stackee.bin
+for t in tools/test_*.py; do python3 "$t"; done    # 実機に触らない確認
+```
+
+`setup.sh` が入れるのは 3 つ。**何度走らせても壊れない**ので、途中で切れたら
+そのまま走らせ直す。中身だけ見たいなら `./setup.sh --dry-run`。
+
+| 何 | どこへ | 変えるには |
+|---|---|---|
+| ESP-IDF v6.0.3 (upstream espressif/esp-idf のタグ) | `~/.local/share/stackee/esp-idf-v6.0.3` | `STACKEE_IDF_PATH` |
+| ツールチェーン (xtensa-esp-elf / gdb / openocd。4〜5 GB) | `~/.local/share/stackee/.idf_tools-v6.0.3` | `STACKEE_IDF_TOOLS_PATH` |
+| ホスト側の Python ([requirements.txt](requirements.txt)) | `pip install --user` | `--venv` で専用の venv に |
+
+置き場をリポジトリの**外**にしてあるのは、clone し直しても取り直しにならない
+ようにするため。`build.sh` はこの場所を自分で見つける (§3 の表の 5 番目)。
+すでに ESP-IDF v6.0.3 を持っているなら `STACKEE_IDF_PATH=... ./build.sh` で
+そのまま使える (ツールチェーンは同じ階層の `.idf_tools-v6.0.3` を見る)。
+
+**TinyUSB (`managed_components/`) は何もしなくていい。** 初回のビルドで
+IDF のコンポーネントマネージャが [dependencies.lock](dependencies.lock)
+どおりに取ってくる。
+
+要るもの:
+
+| | |
+|---|---|
+| OS | macOS (Apple Silicon / Intel) か Ubuntu 22.04 以降 |
+| `git` / `python3` | Python は 3.9 以降 (ESP-IDF v6.0.3 の条件) |
+| `cc` | ホスト側のテストがこれで C を直接ビルドする。macOS は `xcode-select --install`、Ubuntu は `build-essential` |
+| ディスク | ESP-IDF 約 1 GB + ツールチェーン 4〜5 GB |
+| Ubuntu の下ごしらえ | `sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0 build-essential` |
+
+**この木だけで確かめられること / 確かめられないこと**。現行 CircuitPython 版
+(`firmware/kmk`) は非公開なので、そこから期待値を出す検査は「SKIP」と出して
+飛ばす。**飛ばしても終了コードは 0** で、ビルドにも書き込みにも関係ない。
+clone しただけの木での実測 (2026-09-21) は **242 件** — うち 17 件が skip、
+別に 5 ファイル (`test_cfg_host` / `test_conhid_host` / `test_console_host` /
+`test_render_host` / `test_touch_host`) が丸ごと SKIP。移植元がある開発元の
+木では 307 件が走る。所要は 12 秒。
+
+```
+python3 tools/gen_font16.py --check      # 走る (字幕フォント)
+python3 tools/import_faces.py --check    # 走る (顔の素材。Pillow が要る)
+python3 tools/gen_keymap.py --check      # SKIP (生成物そのものは入っている)
+```
+
+書き込みは `tools/flash.py` (§5)。**CircuitPython へ戻す道 (§6) には、戻し先の
+像が要る。この木には入っていない**ので、書き込む前に自分で吸い出して退避して
+おくこと (`tools/flash.py --dry-run` が今の像を退避する。置き場は
+`STACKEE_BACKUP_DIR`、既定は `~/.local/share/stackee/backups`)。
+
 ### 0-1. ビルドする
 
 ```
@@ -53,7 +115,14 @@ python3 tools/import_faces.py --check    # 顔の素材が元絵と合うか (Pi
 python3 tools/hid_desc_check.py          # HID 記述子の構成を目で見る
 ```
 
-全部で **380 件**。どれも実機に触らない。内訳は §4。
+どれも実機に触らない。内訳は §4。要るのは **`cc` (clang か gcc) と python3**
+だけ — ホスト側の検査は C をその場でホスト向けにビルドして走らせる。
+ESP-IDF は要らない。`--check` の 3 つと `import_faces.py` は
+[requirements.txt](requirements.txt) の Pillow が要る。
+
+★ 移植元 (現行 CircuitPython 版の `firmware/kmk`) は非公開なので、公開
+リポジトリだけの clone では一部が「SKIP」と出て飛ぶ (§0-0)。**飛ばしても
+終了コードは 0**。
 
 ### 0-3. 書き込む
 
@@ -236,6 +305,10 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | 旧 VoiceLink (Mac の 5555 番へ TCP、`stackee_voice.py`) | **移植しない。** 現行でも使われていない経路 (会話は HTTPS の `stackee_talk` に移っている)。`STACKEE_HOST` / `STACKEE_PORT` は読まない |
 | カメラの表情 | 段階 4 (顔の状態機械には `camera` の口が既にある) |
 | コンソールの残りのコマンド、UAC (full プロファイル) | 段階 4 |
+| ESP-IDF v6.0.3 とツールチェーン | 取得物。`setup.sh` が取ってくる (§0-0 / §3) |
+| TinyUSB (`managed_components/`) | 取得物。**初回のビルドで** `dependencies.lock` どおりに取れる |
+| 移植元 (`firmware/kmk`、現行 CircuitPython 版) | 非公開。**無くてもビルドも書き込みもできる**。突き合わせの検査だけ SKIP になる (§0-0) |
+| CircuitPython へ戻すための像 | 非公開。**書き込む前に自分で吸い出して退避する** (§0-0 / §6) |
 
 ---
 
@@ -243,6 +316,9 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 
 | ファイル | 役割 |
 |---|---|
+| `setup.sh` | **下ごしらえ**。ESP-IDF v6.0.3 + ツールチェーン + ホスト側の Python を揃える (§0-0)。冪等 |
+| `requirements.txt` | ホスト側 (自分の PC) の Python パッケージ。**ビルドには要らない**。`tools/` の道具が使う |
+| `build.sh` | ビルド。ESP-IDF の場所を決めるのもここ (§3)。実機には触らない |
 | `third_party/qmk/` | **QMK 0.34.4 のコピー (無改変)**。版・コミット・ファイル一覧は [`third_party/qmk/IMPORT.md`](third_party/qmk/IMPORT.md)。ライセンスは GPL-2.0 |
 | `main/qmk_port/` | QMK と Stackee の橋渡し。時計 / EEPROM (NVS) / host driver / マトリクス / 待ち / 再起動 / デバッグ出口 |
 | `main/qmk_port/stackee_qmk_config.h` | QMK の `config.h` に当たるもの。`-include` で全翻訳単位に差し込む (QMK と同じ作法) |
@@ -314,14 +390,17 @@ firmware/build.sh size       # ビルドしてから内訳も出す
 ### ESP-IDF は upstream の v6.0.3 (2026-09-18 に更新)
 
 `build.sh` が使う ESP-IDF は upstream espressif/esp-idf のタグ `v6.0.3`。
-**取得物なのでこのリポジトリには入っていない。** 自分で用意する。
+**取得物なのでこのリポジトリには入っていない。** `setup.sh` が取ってくる
+(§0-0)。手で置くならこれと同じこと:
 
 ```
-git clone --depth 1 --branch v6.0.3 --recursive \
+git clone --depth 1 --branch v6.0.3 --recursive --shallow-submodules \
   https://github.com/espressif/esp-idf.git esp-idf-v6.0.3
 IDF_TOOLS_PATH=$PWD/.idf_tools-v6.0.3 \
   esp-idf-v6.0.3/install.sh esp32s3
 ```
+
+浅い clone で困ったら `STACKEE_IDF_FULL_CLONE=1 ./setup.sh` (深さを切らない)。
 
 `build.sh` は場所を上から順に見て、`export.sh` があるものを使う。
 
@@ -331,9 +410,13 @@ IDF_TOOLS_PATH=$PWD/.idf_tools-v6.0.3 \
 | 2 | `IDF_PATH` | すでに用意してある環境をそのまま使う |
 | 3 | `firmware/` の隣の `esp-idf-v6.0.3/` | 上の手順どおりに置いた場合 |
 | 4 | 親リポジトリの `firmware/esp-idf-v6.0.3/` | 開発元の置き方 |
+| 5 | `~/.local/share/stackee/esp-idf-v6.0.3/` | `setup.sh` の既定の置き場 |
 
-ツールチェーンも同じ順で `STACKEE_IDF_TOOLS_PATH` → `IDF_TOOLS_PATH` →
-IDF と同じ階層の `.idf_tools-v6.0.3/`。
+ツールチェーンは `STACKEE_IDF_TOOLS_PATH` → `IDF_TOOLS_PATH` →
+**実際に使うことにした IDF と同じ階層**の `.idf_tools-v6.0.3/`。
+★ 3 番目は「既定の置き場」ではなく「決まった IDF」から数える。そうしないと
+`STACKEE_IDF_PATH` だけを指定したときに、よその IDF と空のツールチェーンの
+組み合わせになって `export.sh` が黙って落ちる (2026-09-21 に踏んで直した)。
 
 **なぜ upstream に移したか**: 2026-09-18 まで使っていたのは
 CircuitPython 側に同梱されていた Adafruit fork (v6.0.1 相当) で、ESP32-S3 の

@@ -34,8 +34,8 @@ import stackee_tree as tree             # noqa: E402
 
 # 期待値は移植元 (現行 CircuitPython 版の stackee_touch.py) から出す。
 if tree.KMK is None:
-    raise unittest.SkipTest(
-        '移植元 (firmware/kmk) が無いので突き合わせられない')
+    tree.skip_module('移植元 (firmware/kmk) が無いので突き合わせられない',
+                     __name__)
 KMK = str(tree.KMK)
 
 SOURCES = ['stackee_touch_core.c']

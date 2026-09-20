@@ -36,9 +36,8 @@ WEB = str(tree.WEB) if tree.WEB else os.path.join(IDF, '_no_docs_js')
 import console_hid as ch          # noqa: E402
 
 if not tree.add_kmk_tools(sys.path):
-    raise unittest.SkipTest(
-        '現行 CircuitPython 版の道具 (firmware/kmk/tools) が無いので、'
-        'Mac 側の枠との突き合わせはできない')
+    tree.skip_module('現行 CircuitPython 版の道具 (firmware/kmk/tools) が無いので、'
+                     'Mac 側の枠との突き合わせはできない', __name__)
 import stackee_console_client as ccl    # noqa: E402
 
 SANITIZE = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']

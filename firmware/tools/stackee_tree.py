@@ -78,3 +78,23 @@ def backups_dir():
     if env:
         return Path(env).expanduser()
     return Path.home() / '.local' / 'share' / 'stackee' / 'backups'
+
+
+def skip_module(reason, module_name):
+    """移植元 (非公開) が無いので、この検査ファイルを丸ごと飛ばす。
+
+    公開リポジトリだけを clone した木では、現行 CircuitPython 版
+    (`firmware/kmk`) が無い検査がいくつかある。**無いのは異常ではない**ので、
+
+      * 直接走らせたとき (`python3 tools/test_xxx.py`) は「飛ばした」と
+        出して終了コード 0 で降りる。README の一括実行が赤くならない。
+      * pytest から読まれたときは SkipTest を投げる。pytest が skipped として
+        数える。
+
+    使い方: `tree.skip_module('...が無い', __name__)`
+    """
+    import unittest
+    if module_name == '__main__':
+        print('SKIP: %s' % reason)
+        raise SystemExit(0)
+    raise unittest.SkipTest(reason)

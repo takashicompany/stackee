@@ -32,8 +32,8 @@ sys.path.insert(0, str(IDF / 'tools'))
 import stackee_tree as tree                     # noqa: E402
 
 if tree.KMK is None:
-    raise unittest.SkipTest(
-        '移植元 (firmware/kmk) が無いので突き合わせられない')
+    tree.skip_module('移植元 (firmware/kmk) が無いので突き合わせられない',
+                     __name__)
 KMK = tree.KMK
 import render_expected as expected_mod          # noqa: E402
 

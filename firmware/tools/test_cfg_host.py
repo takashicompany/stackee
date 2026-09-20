@@ -34,8 +34,8 @@ import stackee_tree as tree             # noqa: E402
 # 期待値は移植元 (現行 CircuitPython 版) をそのまま import して出す。
 # 非公開側にしか無いので、無ければこのファイルは丸ごと飛ばす。
 if tree.KMK is None:
-    raise unittest.SkipTest(
-        '移植元 (firmware/kmk) が無いので突き合わせられない')
+    tree.skip_module('移植元 (firmware/kmk) が無いので突き合わせられない',
+                     __name__)
 KMK = str(tree.KMK)
 
 SOURCES = ['stackee_jsonlite.c', 'stackee_settings.c', 'stackee_wifistore.c',

@@ -31,8 +31,8 @@ sys.path.insert(0, str(IDF / 'tools'))
 import stackee_tree as tree                     # noqa: E402
 
 if not tree.add_kmk_tools(sys.path):
-    raise unittest.SkipTest(
-        'ホスト側の枠の実物 (firmware/kmk/tools) が無いので読み解けない')
+    tree.skip_module('ホスト側の枠の実物 (firmware/kmk/tools) が無いので読み解けない',
+                     __name__)
 
 
 def compile_and_run(source, extra_sources=(), args=(), extra_include=None):

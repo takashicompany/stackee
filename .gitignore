@@ -1,0 +1,5 @@
+# 取得物。firmware/README.md §0-0 の setup.sh は既定でリポジトリの**外**
+# (~/.local/share/stackee) に置くが、§3 の手順どおり手で置くとここに来る。
+/esp-idf-v6.0.3/
+/.idf_tools-v6.0.3/
+/venv/

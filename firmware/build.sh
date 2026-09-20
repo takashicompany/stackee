@@ -12,6 +12,7 @@
 #   2. IDF_PATH                  すでに用意してある環境をそのまま使う
 #   3. <firmware の隣>/esp-idf-v6.0.3
 #   4. <親リポジトリ>/firmware/esp-idf-v6.0.3   (開発元の置き方)
+#   5. ~/.local/share/stackee/esp-idf-v6.0.3    (setup.sh の既定の置き場)
 # ツールチェーンも同じ順で STACKEE_IDF_TOOLS_PATH / IDF_TOOLS_PATH /
 # 同じ階層の .idf_tools-v6.0.3。どちらも取得物なのでリポジトリには入れない。
 #
@@ -36,21 +37,38 @@ if [ -f "$OUTER/firmware/esp-idf-v6.0.3/export.sh" ] \
    && [ ! -f "$IDF_DEFAULT/export.sh" ]; then
     IDF_DEFAULT="$OUTER/firmware/esp-idf-v6.0.3"
 fi
-TOOLS_DEFAULT="$(dirname "$IDF_DEFAULT")/.idf_tools-v6.0.3"
+# setup.sh の既定の置き場 (リポジトリの外)。clone しただけの木ではここに入る。
+IDF_SHARED="$HOME/.local/share/stackee/esp-idf-v6.0.3"
+if [ -f "$IDF_SHARED/export.sh" ] && [ ! -f "$IDF_DEFAULT/export.sh" ]; then
+    IDF_DEFAULT="$IDF_SHARED"
+fi
 export IDF_PATH="${STACKEE_IDF_PATH:-${IDF_PATH:-$IDF_DEFAULT}}"
 if [ ! -f "$IDF_PATH/export.sh" ]; then
     echo "ESP-IDF v6.0.3 が無い: $IDF_PATH" >&2
-    echo "用意する: git clone --depth 1 --branch v6.0.3 --recursive \\" >&2
-    echo "            https://github.com/espressif/esp-idf.git $IDF_DEFAULT" >&2
+    echo "用意する: $HERE/setup.sh" >&2
+    echo "  (自分で置くなら: git clone --depth 1 --branch v6.0.3 --recursive \\" >&2
+    echo "     https://github.com/espressif/esp-idf.git $IDF_DEFAULT )" >&2
     echo "  (別の場所のものを使うなら STACKEE_IDF_PATH=... か IDF_PATH=... を指定)" >&2
     exit 1
 fi
+# ★ ツールチェーンの既定は **実際に使う IDF** と同じ階層にする。
+#   既定の置き場ではなく IDF_PATH から数えないと、STACKEE_IDF_PATH だけを
+#   指定したときに「よその IDF + 空のツールチェーン」の組み合わせになる。
+TOOLS_DEFAULT="$(dirname "$IDF_PATH")/.idf_tools-v6.0.3"
 
 # --- ツールチェーンの場所 ---------------------------------------------------
 # コンパイラ自体 (xtensa-esp-elf 15.2.0_20251204) は 2026-09-18 まで使っていた
 # 土台と同じ版だが、gdb (16.3 → 17.1) / openocd / esp-rom-elfs が違うので
 # **別の場所**に入れる (古いほうの .idf_tools は書き換えない)。
 export IDF_TOOLS_PATH="${STACKEE_IDF_TOOLS_PATH:-${IDF_TOOLS_PATH:-$TOOLS_DEFAULT}}"
+# export.sh はツールチェーンが無いと **黙って** シェルごと降りることがある。
+# 先に見て、無いなら用意の仕方を出す。
+if [ ! -d "$IDF_TOOLS_PATH/tools" ]; then
+    echo "ツールチェーンが無い: $IDF_TOOLS_PATH" >&2
+    echo "用意する: $HERE/setup.sh" >&2
+    echo "  (自分で入れるなら: IDF_TOOLS_PATH=$IDF_TOOLS_PATH $IDF_PATH/install.sh esp32s3)" >&2
+    exit 1
+fi
 # TinyUSB は IDF Component Registry から取る (main/idf_component.yml で版固定)。
 # 初回だけ取りに行き、以後は managed_components/ と dependencies.lock を使う。
 export IDF_COMPONENT_MANAGER=1

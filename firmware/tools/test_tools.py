@@ -31,7 +31,7 @@ def _load_flash():
     try:
         import flash
         return flash
-    except Exception as err:      # pragma: no cover - 環境依存
+    except (Exception, SystemExit) as err:      # pragma: no cover - 環境依存
         raise unittest.SkipTest('flash.py を import できない: %s' % err)
 
 
@@ -416,7 +416,10 @@ class CheckPhase0Test(unittest.TestCase):
     def setUp(self):
         try:
             import check_phase0
-        except Exception as err:   # pragma: no cover - 環境依存
+        except (Exception, SystemExit) as err:   # pragma: no cover - 環境依存
+            # ★ SystemExit も拾う。check_phase0.py は移植元 (firmware/kmk/tools)
+            #   が無いと import の途中で sys.exit() する。公開リポジトリだけの
+            #   clone では普通に起きることなので、飛ばす。
             raise unittest.SkipTest('check_phase0.py を import できない: %s' % err)
         self.check = check_phase0
 

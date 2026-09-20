@@ -717,6 +717,20 @@ def main():
                         help='書き出さず、生成物が最新かどうかだけ見る')
     args = parser.parse_args()
 
+    # 移植元 (現行 CircuitPython 版の firmware/kmk) は非公開。公開リポジトリ
+    # だけの clone には無い。生成物 (main/keymaps/default_keymap.c /
+    # main/qmk_port/stackee_keycodes.h / via/stackee.json) はリポジトリに
+    # 入っているので、**無くてもビルドと書き込みはできる**。作り直せないだけ。
+    if tree.KMK is None:
+        if args.check:
+            print('SKIP: 移植元 (firmware/kmk) が無いので作り直して'
+                  '突き合わせられない (生成物はリポジトリに入っている)')
+            return 0
+        print('移植元 (firmware/kmk) が無いので生成できない。'
+              '配列を変えるだけなら VIA / Remap を使う (README §0-5)',
+              file=sys.stderr)
+        return 1
+
     keymap_c, keycodes_h, via, _grid, _conv = generate()
     via_text = json.dumps(via, ensure_ascii=False, indent=2) + '\n'
 
