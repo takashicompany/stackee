@@ -1,0 +1,9 @@
+{
+  "name": "stackee-firmware-tools",
+  "private": true,
+  "type": "module",
+  "description": "Node 側の道具 (tools/ota.mjs)。操作盤の配信物 (docs/) には Node の依存を混ぜないため、ここに分けてある。",
+  "dependencies": {
+    "node-hid": "^3.1.2"
+  }
+}

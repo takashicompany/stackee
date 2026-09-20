@@ -307,3 +307,19 @@ code {
   padding: .05em .3em;
   border-radius: 4px;
 }
+
+/* --- ファームウェア更新 ------------------------------------------------- */
+/* sha256 は 64 文字。等幅で折り返して、目で突き合わせられるようにする。 */
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .78rem;
+  word-break: break-all;
+}
+
+progress {
+  width: 100%;
+  height: .6rem;
+  margin: .4rem 0;
+}
+
+#ota-file { font-size: .9rem; }

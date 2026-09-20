@@ -381,6 +381,43 @@ USB HID でつないだ場合も、**この行そのものは 1 バイトも変�
 
 ---
 
+## ファームウェア更新 (アプリ内 OTA)
+
+デバイスが**動いたまま**、使っていないほうの区画 (`ota_1`) に新しい
+ファームウェアを書き込みます。ROM のダウンロードモードには一切入りません。
+書き込んでいる間もキーボードは使え、失敗しても切り替えるまでは今の版のまま
+起動します。方式と本体側の作りは
+[firmware/README.md §25](firmware/README.md) と
+[firmware/DESIGN.md §6c](firmware/DESIGN.md)。
+
+* 中核は `docs/js/ota.js`。**運び方を一切知りません。** 転送層
+  (`sendOtaReport` / `onOtaStatus` / `request`) を渡すと動きます。
+* ブラウザは `docs/js/hid.js` (WebHID)、コマンドラインは
+  `firmware/tools/ota.mjs` (node-hid) が同じ `ota.js` を読みます。
+  **人が押すボタンと、道具から叩く経路が 1 本**になっているので、
+  書き込みの筋道が食い違いません。
+* 像そのものは JSON では運びません。Raw HID の**専用のレポート種別
+  (0xC3)** で 27 バイトずつ流し、本体は「書き終えた累積バイト数」を
+  1 KB ごとに返します。ホストはそこから 32 KB 先まで先行して送ります
+  (1 枠ごとの ack にすると、フラッシュ消去で USB が数十 ms 黙るたびに
+  止まります)。
+* 選んだ `.bin` は**どこにも送られません**。ページが外から取ってくるのは、
+  同じサイトに置いてある配布版 (`docs/firmware/manifest.json` と `.bin`)
+  だけです。このために CSP の `connect-src` を `'none'` → `'self'` に
+  しています (同一オリジンだけ。第三者のサーバへは 1 バイトも出せません)。
+* **sha256 は 2 種類あります。** 「像の sha256」は `.bin` の末尾に
+  埋め込まれている値 (`esptool image_info` と同じ) で、どの区画に何が
+  入っているかを見るための名札。「ファイル全体の sha256」
+  (`shasum -a 256`) は転送で化けていないかを見るための値です。
+
+```sh
+cd firmware/tools && npm install                     # 初回だけ (node-hid)
+node firmware/tools/ota.mjs --info                   # いま載っている版
+node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin --no-commit
+```
+
+---
+
 ## テスト
 
 デバイスもブラウザも要りません。Node 18 以降で動きます (確認したのは v22.22.2)。
@@ -407,6 +444,11 @@ node --test                      # 引数なしでも自動で見つかる (ど�
   (壊れた `len` を弾くこと、割って繋ぎ直すと元のバイト列に戻ること、
   多バイト文字がレポートの切れ目で割れても化けないこと)
 - どちらの接続方法を使うかの決め方 (`chooseTransport`)
+- アプリ内 OTA (`test/ota.test.mjs`): 0xC3 の枠の組み立てと読み取り、
+  credit で「書き終えた + 32 KB」より先へ送らないこと、応答を取りこぼしても
+  最後まで通ること、枠が落ちても本体が言う位置から送り直して**重複なく**
+  届くこと、本体が黙ったら諦めること、`app.info` → `ota.begin` → 転送 →
+  `ota.end` → `ota.commit` の順序、sha256 が合わなければ**切り替えない**こと
 
 ---
 

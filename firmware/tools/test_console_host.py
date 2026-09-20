@@ -95,7 +95,7 @@ class ConsoleOutputTest(unittest.TestCase):
         hello = self.frames[0]
         self.assertEqual(hello['id'], 7)
         self.assertEqual(hello['proto'], 2)
-        self.assertEqual(hello['fw'], 'stackee-idf/4')
+        self.assertEqual(hello['fw'], 'stackee-idf/5')
         self.assertIn('status', hello['features'])
         # 段階 1 で足した脱出路 (README の「戻し方」で使う)。
         self.assertIn('reset', hello['features'])
@@ -115,7 +115,7 @@ class ConsoleOutputTest(unittest.TestCase):
                     'talk', 'audio_null', 'audio_busy', 'talk_url',
                     'talk_token', 'screen'):
             self.assertIn(key, status, '%s が無い' % key)
-        self.assertEqual(status['fw'], 'stackee-idf/4')
+        self.assertEqual(status['fw'], 'stackee-idf/5')
         # 送信先の既定は BLE (現行 CircuitPython 版と同じ)。
         self.assertEqual(status['hid'], 'BLE')
         self.assertEqual(status['hid_sel'], 'BLE')

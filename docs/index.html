@@ -26,10 +26,18 @@
 
   つまりこの CSP は Web Serial / WebHID を妨げないまま「外に一切出ない」ことを保証する。
 
+  ★ connect-src は 'none' ではなく 'self' にしてある。
+    「ファームウェア更新」の節が、**このサイト自身に置いてある**
+    docs/firmware/manifest.json と .bin を取りに行くため。
+    'self' は同一オリジンだけを許すので、
+      ・入力した内容 (Wi-Fi のパスワードなど) の送信先は 1 つも増えない
+      ・第三者のサーバへは 1 バイトも出せない
+    ままである。手元の .bin をファイル選択で渡すぶんには通信は起きない。
+
   meta 版の CSP では frame-ancestors / report-uri / sandbox は無視される。
   埋め込み防止は GitHub Pages ではヘッダを書けないので実現できない。
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>stackee 操作盤</title>
 <link rel="stylesheet" href="./style.css">
 </head>
@@ -45,6 +53,8 @@
     <strong>ブラウザから USB ケーブルを通ってデバイスへ行くだけ</strong>で、
     どこにも送信されず、ブラウザにも保存されません。
     Wi-Fi のパスワードも同じ経路しか通りません。
+    ページが外から取ってくるのは、このサイト自身に置いてある
+    配布版のファームウェアだけです (「ファームウェア更新」で選んだときのみ)。
   </p>
 </header>
 
@@ -217,6 +227,79 @@
   <p id="srv-note" class="notice notice-warn" hidden></p>
   <p id="srv-error" class="notice notice-error" hidden></p>
   <p id="srv-ok" class="notice notice-ok" hidden></p>
+</section>
+
+<!-- ===================== 再起動 ===================== -->
+<!-- ===================== ファームウェア更新 ===================== -->
+<section id="sec-ota" class="needs-conn">
+  <h2>ファームウェア更新</h2>
+  <p class="muted small">
+    デバイスが<strong>動いたまま</strong>、使っていないほうの区画 (<code>ota_1</code>) に
+    新しいファームウェアを書き込みます。書き込みのあいだもキーボードは使えます
+    (フラッシュを消すたびに数十 ms ずつ引っかかります)。
+    書き込みに失敗しても、切り替えるまでは今の版のまま起動します。
+  </p>
+  <p class="muted small">
+    <strong>選んだファイルはどこにも送られません。</strong>
+    ブラウザから USB ケーブルを通ってデバイスへ行くだけです。
+    1.4 MB でおよそ 1〜2 分かかります。
+  </p>
+
+  <div class="row">
+    <button id="btn-ota-info" type="button">いま載っている版を見る</button>
+    <span id="ota-state" class="badge badge-off">—</span>
+  </div>
+  <dl class="grid">
+    <div><dt>動いている区画</dt><dd id="ota-running">—</dd></div>
+    <div><dt>いま載っている版</dt><dd id="ota-running-ver">—</dd></div>
+    <div><dt>いま載っている像の sha256</dt><dd id="ota-running-sha" class="mono">—</dd></div>
+    <div><dt>書き込み先</dt><dd id="ota-next">—</dd></div>
+  </dl>
+
+  <div class="row">
+    <label class="check" for="ota-file">手元の .bin を選ぶ</label>
+    <input type="file" id="ota-file" accept=".bin,application/octet-stream">
+  </div>
+  <div class="row" id="ota-dist-row" hidden>
+    <label class="check" for="ota-dist">配布版</label>
+    <select id="ota-dist"></select>
+    <button id="btn-ota-dist" type="button">読み込む</button>
+  </div>
+
+  <dl class="grid">
+    <div><dt>これから書く版</dt><dd id="ota-new-name">—</dd></div>
+    <div><dt>大きさ</dt><dd id="ota-new-size">—</dd></div>
+    <div><dt>これから書く像の sha256</dt><dd id="ota-new-sha" class="mono">—</dd></div>
+    <div><dt>ファイル全体の sha256</dt><dd id="ota-new-file-sha" class="mono">—</dd></div>
+  </dl>
+  <p class="muted small">
+    ★ <strong>sha256 は 2 種類あります。</strong>
+    「像の sha256」は .bin の末尾に埋め込まれている値で、
+    <code>esptool image_info</code> が出す値・デバイスが区画から読み返す値と同じです。
+    <strong>どの区画に何が入っているかを見るのはこちら</strong>です。
+    「ファイル全体の sha256」は <code>shasum -a 256 stackee.bin</code> の値で、
+    転送の途中で 1 バイトも化けていないかを見るために使います。
+  </p>
+
+  <div class="row">
+    <label class="check">
+      <input type="checkbox" id="chk-ota-commit" checked>
+      書き終わったら、新しい版で起動するように切り替える
+    </label>
+  </div>
+  <div class="row">
+    <button id="btn-ota-write" type="button" class="primary" disabled>書き込む</button>
+    <button id="btn-ota-cancel" type="button" hidden>中止する</button>
+  </div>
+  <progress id="ota-progress" max="100" value="0" hidden></progress>
+  <p id="ota-step" class="muted small"></p>
+  <p id="ota-error" class="notice notice-error" hidden></p>
+  <p id="ota-done" class="notice notice-ok" hidden></p>
+
+  <p class="muted small">
+    ★ 同時に 2 つのタブから書き込むことはできません。先に始めたほうだけが通り、
+    あとから来たほうはデバイスが断ります (「別の転送が進行中です」と出ます)。
+  </p>
 </section>
 
 <!-- ===================== 再起動 ===================== -->

@@ -138,6 +138,12 @@ void stackee_conhid_stats(stackee_conhid_stats_t *out) {
     out->listening = stackee_conhid_host_listening();
 }
 
+static stackee_conhid_raw_hook_t s_raw_hook;
+
+void stackee_conhid_set_raw_hook(stackee_conhid_raw_hook_t hook) {
+    s_raw_hook = hook;
+}
+
 void stackee_conhid_init(void) {
     s_tx_head = s_tx_tail = 0;
     s_rx_head = s_rx_tail = 0;
@@ -152,6 +158,19 @@ void stackee_conhid_init(void) {
 bool via_command_kb(uint8_t *data, uint8_t length) {
     if (length < 3) {
         return false;
+    }
+    // ★ まず横取りの口 (OTA の 0xC3) に聞く。知らなければ下の本来の処理へ。
+    if (s_raw_hook != NULL) {
+        uint8_t hook_reply[RAW_SIZE];
+        bool want = false;
+        if (s_raw_hook(data, length, hook_reply, &want)) {
+            s_reports_in++;
+            if (want) {
+                raw_hid_send(hook_reply, RAW_SIZE);
+                s_reports_out++;
+            }
+            return true;
+        }
     }
     uint8_t id = data[0];
     if (id != STACKEE_CONHID_CMD_TX && id != STACKEE_CONHID_CMD_RX &&

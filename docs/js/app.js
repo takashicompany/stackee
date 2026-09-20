@@ -35,6 +35,10 @@ import {
   isSupported as hidSupported,
   unsupportedReason as hidUnsupportedReason,
 } from './hid.js';
+// ★ ファームウェア更新。中核 (枠・credit・sha256・ota.* の順序) は
+//   Node 側の firmware/tools/ota.mjs とまったく同じ ota.js を読む。
+//   ここからはこの 1 行だけ。
+import { attachOtaUi } from './ota.js';
 
 // 接続方法の選び方は DOM に触らない純関数として hid.js に置いてある
 // (Node から単体テストするため)。ここからも使えるように出し直す。
@@ -267,6 +271,8 @@ function onConnState(state, info) {
   for (const sec of document.querySelectorAll('.needs-conn')) {
     sec.classList.toggle('locked', state !== 'connected');
   }
+  // 「書き込む」は像を選んでいて、かつ繋がっているときだけ押せる。
+  if (otaUi) otaUi.refreshButton();
   if (state === 'connected') {
     logAppend('[操作盤] 接続しました\n');
     void afterConnect();
@@ -416,6 +422,8 @@ let longJobBusy = false;
 const LONG_JOB_BUTTONS = [
   'btn-save', 'btn-load', 'btn-scan', 'btn-status', 'btn-reset',
   'btn-net-reload', 'btn-net-add',
+  // ファームウェア更新 (1〜2 分かかる。ほかを押させない)
+  'btn-ota-info', 'btn-ota-write', 'btn-ota-dist',
 ];
 
 function setLongJobBusy(busy) {
@@ -847,6 +855,9 @@ function show(el, text) {
 }
 function hide(el) { el.hidden = true; }
 
+/** ファームウェア更新の節 (attachOtaUi が返すもの)。 */
+let otaUi = null;
+
 function boot() {
   for (const sec of document.querySelectorAll('.needs-conn')) sec.classList.add('locked');
   // ★ 生の値は protocol.js の 1 か所だけに置く (README「プロトコル定数の置き場所」)。
@@ -855,6 +866,9 @@ function boot() {
   updateBrowserWarning();
   // 許可済みのデバイスを先に調べておく (クリック時に同期で見るため)。
   void refreshPermitted().then(updateBrowserWarning);
+  // ファームウェア更新の節。転送層は「今つないでいるほう」を毎回聞きに行く
+  // (接続のたびに link が差し替わるため)。
+  otaUi = attachOtaUi({ getLink: () => link, setBusy: setLongJobBusy });
   renderLog();
 }
 

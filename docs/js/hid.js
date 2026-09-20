@@ -14,6 +14,7 @@
 // プロトコル (JSON の中身) は一切知らない。定数はすべて protocol.js から取る。
 
 import { PROTOCOL, Demux, RequestTracker } from './protocol.js';
+import { OTA, parseStatusReport } from './ota.js';
 
 /**
  * Raw HID インターフェースの指定。
@@ -308,6 +309,10 @@ export class StackeeHid {
     this._txChain = Promise.resolve();
     /** 送った順に並ぶ応答待ち。 */
     this._waiters = [];
+    /** 0xC3 (アプリ内 OTA) の応答を聞きたい人。ota.js が登録する。 */
+    this._otaListeners = new Set();
+    /** 受信ポーリング (0xC1) を止めているか。OTA の転送中だけ true。 */
+    this._pollPaused = false;
     this._onInput = (ev) => this._handleInputReport(ev);
 
     if (isSupported()) {
@@ -432,6 +437,15 @@ export class StackeeHid {
   _handleInputReport(ev) {
     // Report ID を持たないデバイスなので 0 で来る。それ以外は他人の面。
     if (ev.reportId !== 0) return;
+    // ★ アプリ内 OTA (0xC3) は JSON の経路に混ぜない。ここで抜く。
+    //   既存の 0xC0/0xC1/0xC2 の扱いは 1 行も変わっていない。
+    if (ev.data && ev.data.byteLength > 0 && ev.data.getUint8(0) === OTA.CMD_DATA) {
+      const st = parseStatusReport(ev.data);
+      for (const cb of this._otaListeners) {
+        try { cb(st); } catch (e) { /* 聞き手の都合で受信を止めない */ }
+      }
+      return;
+    }
     const rep = decodeRxReport(ev.data);
     if (!rep) {
       this.on.onFrameError({ reason: 'hidreport', raw: '' });
@@ -516,6 +530,12 @@ export class StackeeHid {
   /** 受信の取り出しを回し続ける。 */
   async _poll() {
     while (this._device && !this._closing) {
+      // ★ OTA の転送中は 0xC1 を撃たない。1 枠 = 1 ms なので、撃つだけ
+      //   像の転送が遅くなる。応答枠が要るのは転送の前後だけ。
+      if (this._pollPaused) {
+        await sleep(POLL_IDLE_MS);
+        continue;
+      }
       let rep = null;
       try {
         rep = (await this._exchange(buildPollReport())).rep;
@@ -598,6 +618,46 @@ export class StackeeHid {
     if (!this._device) return null;
     const { view } = await this._exchange(buildInfoReport());
     return view ? parseInfoReport(view) : null;
+  }
+
+  // --- アプリ内 OTA (0xC3) ---------------------------------------------------
+
+  /**
+   * 0xC3 のレポートを 1 枚送る。**応答は待たない。**
+   *
+   * ★ ここが `_exchange` と違うところ。1 枠ごとに返事を待つと、Chromium の
+   *   sendReport がブラウザプロセスとの往復になるぶんで律速し、しかも
+   *   フラッシュ消去のたびに数十 ms 黙るのでタイムアウトが積み上がる。
+   *   本体は「受け取った累積」を 1 KB ごとに勝手に返してくるので、
+   *   こちらは送るだけでよい (credit 制御、ota.js の transferImage)。
+   *   直列化の鎖 (_txChain) だけは共有する = 送る順番は狂わない。
+   *
+   * @param {Uint8Array} report 32 バイト
+   */
+  sendOtaReport(report) {
+    const run = async () => {
+      const device = this._device;
+      if (!device || this._closing) throw new Error('デバイスが開いていません');
+      await device.sendReport(0, report);
+    };
+    const next = this._txChain.then(run, run);
+    this._txChain = next.then(() => {}, () => {});
+    return next;
+  }
+
+  /**
+   * 0xC3 の応答を受け取る。返り値を呼ぶと外れる。
+   * @param {(status: object|null) => void} cb
+   * @returns {() => void}
+   */
+  onOtaStatus(cb) {
+    this._otaListeners.add(cb);
+    return () => this._otaListeners.delete(cb);
+  }
+
+  /** 受信ポーリング (0xC1) を止める / 再開する。OTA の転送中だけ止める。 */
+  setPollPaused(paused) {
+    this._pollPaused = !!paused;
   }
 
   // --- 後始末 ---------------------------------------------------------------

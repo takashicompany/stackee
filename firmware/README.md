@@ -479,11 +479,12 @@ python3 firmware/tools/test_wifi_host.py       # 段階 3: Wi-Fi の状態機械
 python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
 python3 firmware/tools/test_subtitle_host.py   # 字幕: フォントと帯の描画 (22 件)
+python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 (32 件、§25)
 python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **380 件**。どれも実機に触らない。
+全部で **412 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -2537,3 +2538,182 @@ PSRAM でよい。PSRAM が取れない機体では内蔵 RAM に落ちる (動�
   あと自然に戻った。`bench` の `main_max_us` が **4,427,755 us** (4.4 秒) なので、
   コンソールを持つ main タスク (CPU0 の優先度 1) が長く止められている。
   `status` は集める項目がいちばん多いので最初に現れる。**原因は未調査。**
+
+---
+
+## 25. アプリ内 OTA — 操作盤 (Web ページ) からファームを書き換える (2026-09-21)
+
+本体が**動いたまま** Raw HID で像を受け取り、使っていないほうの区画
+(`ota_1`) へ書き、`otadata` を切り替えて再起動する。ROM のダウンロード
+モードには**一切入らない**。方式の比較は
+`research/stackee/web_flash_2026-09-20.md`、設計は `DESIGN.md §6c`。
+
+今回入れたのは同報告書 §6 の**段階 0〜2**。段階 3 (ロールバック) と
+段階 4 (Wi-Fi 入口) は**まだ入っていない**。
+
+### 25-1. 何が変わるか
+
+| | いまの `tools/flash.py` (ROM 経由) | アプリ内 OTA |
+|---|---|---|
+| 書く先 | `ota_0` (いま動いている区画) | **`ota_1`** → otadata 切替 |
+| 書き込み中のキーボード | **死ぬ (約 1 分)** | **生きている** (消去のたびに数十 ms 引っかかる) |
+| 失敗したら | **ROM に取り残される = 文鎮化の入口** | 古い像のまま起動。無傷 |
+| 途中で切れたら | 致命的 | 無害。最初から送り直せばよい |
+| 要るもの | Mac + esptool + pyusb | ブラウザ (Chrome/Edge) か Node |
+
+`tools/flash.py` は**復旧専用**として残す。像が起動しなくなったときの
+最後の手段はこちら。
+
+### 25-2. 使い方
+
+**人 (操作盤のページ)**
+
+1. 操作盤を開いて「接続する」(full プロファイル = USB HID)
+2. 「ファームウェア更新」の節で「いま載っている版を見る」
+3. 手元の `.bin` を選ぶ (`build-full/stackee.bin`)。または
+   `docs/firmware/manifest.json` を置いてあれば「配布版」から選べる
+4. **いま載っている版 / これから書く版 / sha256** を見比べてから「書き込む」
+5. 進捗が出る。終わったら新しい `app.info` が出る
+
+「書き終わったら新しい版で起動するように切り替える」のチェックを外すと、
+`ota_1` に書くところまでで止まる (起動する側は切り替えない)。
+
+**AI / コマンドライン (同じ中核 JS を通る)**
+
+```
+cd firmware/tools && npm install        # 初回だけ (node-hid)
+node firmware/tools/ota.mjs --info                       # いま載っている版
+node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin --no-commit
+node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin   # 切り替えまで
+node firmware/tools/ota.mjs --abort                      # 止まった転送を畳む
+```
+
+★ `tools/ota.mjs` は操作盤とまったく同じ `docs/js/ota.js` を import して
+いる。**人が押すボタンと AI が叩く道具が同じ筋道を通る**ので、書き込みの
+手順が食い違いようがない。`node-hid` はネイティブ拡張なので、依存は
+`firmware/tools/package.json` に分けてあり、操作盤の配信物 (`docs/`) には
+Node の依存を 1 つも混ぜていない。
+
+**配布版を置く**
+
+```
+firmware/tools/release_image.sh                 # build-full/stackee.bin
+firmware/tools/release_image.sh --profile dev
+```
+
+`docs/firmware/stackee-full.bin` と `manifest.json` を書く。
+**コミットはしない** (どの像をいつ配るかは人が決める)。
+
+### 25-3. 命令
+
+どれもコンソール (Raw HID の 0xC0/0xC1、`tools/console_hid.py` や操作盤から)。
+
+| 命令 | 返すもの |
+|---|---|
+| `app.info` | `running` / `boot` / `next` の区画名・`esp_app_desc_t.version`・`esp_partition_get_sha256`、`ota_state`、いまの転送の状態 |
+| `ota.begin {size, sha256}` | 受け入れ可否、書き込み先、1 枠の本文の大きさ、credit、無通信で諦めるまでの時間 |
+| `ota.status` | 受け取った / 書いたバイト数、環状バッファの残り、断った枠の数、経過 |
+| `ota.end` | 数えた sha256 と申告の一致、`esp_ota_end`、**書いた区画から読み直した名札**。★ 切り替えない |
+| `ota.commit` | `esp_ota_set_boot_partition` → 応答を返してから 500 ms 後に再起動 |
+| `ota.abort` | `esp_ota_abort`。最初からやり直せる |
+| `app.boot_factory` | otadata を消して factory (`uf2` = CircuitPython の UF2 ブートローダ) を選ぶ。**戻れる道**。実機では未確認 |
+
+像そのものは JSON では運ばない。**専用のレポート種別 0xC3** で生バイトを
+流す (既存の 0xC0/0xC1/0xC2 とは衝突しない)。枠の中身と credit の約束は
+`DESIGN.md §6c`。
+
+### 25-4. ★ sha256 は 2 種類ある
+
+ここを混ぜると一生合わない。
+
+| | 何 | どこで出る | 何のため |
+|---|---|---|---|
+| **ファイル全体** | `shasum -a 256 stackee.bin` | `ota.begin` の引数、`ota.end` の `sha256` | 転送で 1 バイトも化けていないか |
+| **像の名札** | 像の**末尾 32 バイト** (`hash_appended`) | `esptool image_info`、`esp_partition_get_sha256()`、`app.info` の running/boot/next、`ota.end` の `partition_sha256`、`manifest.json` の `image_sha256` | **どの区画に何が入っているか** |
+
+名札は「末尾 32 バイトを除いた部分の SHA-256」なので、ファイル全体の値とは
+必ず違う。実測 (`build-full/stackee.bin`, 1,391,824 B、版 `979c000-dirty`):
+
+```
+ファイル全体 b8318a083e7c1644771f332dcae32ca1c0f2ac4ec21eea933dbfa782a7dd5e41
+像の名札     62a80a12acccd94a3c8d7510d2d0217e6c6c73827f374df78d8d403f073519aa
+```
+
+`esp_partition_get_sha256()` は返す前に中身を検証する
+(`bootloader_common.c`) ので、`ota.end` の `partition_sha256` が期待と一致
+したら「ディスクの `.bin` とフラッシュの像が同じで、かつ ESP-IDF の検査も
+通った」と端から端まで言い切れる。
+
+### 25-5. 速さと、書き込み中のキーボード
+
+| | 値 |
+|---|---|
+| 1 枠の本文 | 27 バイト (32 - 5。位置を毎枠に書くため) |
+| 理論上限 | 27 B x 1 kHz = **27 KB/s** → 1.4 MB で **51 秒** |
+| 見込み | 1〜2 分 (WebHID の `sendReport` のぶん) |
+| credit | 「書き終えた位置 + 32 KB」まで先行して送ってよい |
+| 本体が返す間隔 | 受け取った累積が 1 KB を跨ぐたびに 1 枚 |
+| キーボードが止まる時間 | 再起動の約 3 秒。転送中は数十 ms ずつ (フラッシュの消去) |
+
+★ **1 枠ごとの ack にしない。** フラッシュの消去・書き込み中はキャッシュが
+止まり、IRAM 非常駐の割り込み (TinyUSB を含む) が数十 ms 止まる。1 枚ごとに
+返事を待つ作りだと毎回そこでタイムアウトする。
+
+★ **本体は自分からは何も言わない。** 応答を返すのは 0xC3 を受けたときだけ。
+credit で送れなくなったホストは、本文 0 バイトの 0xC3 (「状態だけ返せ」) を
+撃って `written` の伸びを聞きに行く。
+
+### 25-6. 戻れる道
+
+* **切り替えるまでは無傷。** `esp_ota_set_boot_partition()` を呼ぶまで
+  otadata は 1 バイトも変わらない。転送中に電源が切れても古い像で起動する。
+* **`ota.end` と `ota.commit` は分けてある。** 「書けた」と「そっちで起動
+  する」は別の決断。`--no-commit` で「書いたが切り替えていない」状態に
+  できる。
+* **`app.boot_factory`** で otadata を消すと、ROM を通らずに `uf2`
+  (CircuitPython の UF2 ブートローダ) へ戻れる。**実機では未確認。**
+* **`tools/flash.py` (ROM 経由) は復旧専用**として残す。
+
+### 25-7. 内蔵 RAM
+
+**64 KB の環状バッファも 4 KB の作業バッファも `.bss` に置いていない。**
+環状バッファは PSRAM、作業バッファは内蔵 RAM の**ヒープ**から取り、受信が
+終わったら返す。`.bss` の増分は **192 B** (full、`.dram0.bss`
+0x123e8 → 0x124a8 = 74,728 → 74,920 B) / **208 B** (dev)。`.data` は変化なし。
+
+### 25-8. 版
+
+`CMakeLists.txt` が `git describe --always --dirty --tags` を `PROJECT_VER`
+に入れる。`app.info` の `version` と `hello` の `app` に出る。
+**cmake の構成時にしか評価されない**ので、コミットしたあとに入れ直すには
+`./build.sh clean` か `idf.py -B <dir> reconfigure` を挟むこと。
+段階を表す文字列 (`stackee-idf/N`) は `hello` の `fw` が別に返す
+(この段階で `stackee-idf/5` に上げた)。
+
+### 25-9. 実機に触らない確認
+
+```
+python3 firmware/tools/test_ota_host.py    # 段階 5: アプリ内 OTA (32 件)
+node --test 'test/**/*.mjs'                # 操作盤 (139 件。うち ota は 30 件)
+```
+
+`test_ota_host.py` は `hostbuild/ota_main.c` で本体の中核 (`stackee_otacore.c`)
+を **偽のフラッシュ** と自前の SHA-256 (`hostbuild/stub/sha256_stub.c`) を
+差し込んで Mac 上で回す。見ているのは枠の分解・環状バッファ・credit の
+数え方・ストリーミング SHA-256 (Python の `hashlib` と突き合わせ)・
+断りどころ (二重 begin / 位置違い / magic 違い / sha 違い / 長さ違い /
+溢れ / 無通信の自動 abort / フラッシュの失敗)・途中で切れてからの
+やり直し。**さらに `docs/js/ota.js` が node で作った枠をそのまま
+デバイス側に食わせて通す**ので、ホストと本体の枠が食い違ったら落ちる。
+
+### 25-10. まだ確かめていないこと
+
+* **実機での書き込み一式。** ホストテストは通っているが、実機では 1 度も
+  走らせていない (この時点では書き込みの許可を得ていないため)。
+* **実測のスループット。** 27 KB/s は理論上限で、WebHID / node-hid で
+  どこまで出るかは測っていない。
+* **`app.boot_factory`。** otadata を消して UF2 へ戻る道。実装はあるが
+  実機では試していない。
+* **フラッシュ消去中に USB がどれだけ黙るか。** 設計では credit で吸収して
+  いるが、実機の数字を取っていない。
+* **段階 3 (ロールバック) と段階 4 (Wi-Fi 入口)。** 入れていない。

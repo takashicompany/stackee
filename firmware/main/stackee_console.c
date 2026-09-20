@@ -50,7 +50,7 @@
 // このファームの版。CircuitPython 版は "stackee-console/2"。
 // ★ 段階ごとに上げる。実機にどちらの像が載っているかが hello / status で
 //    すぐ分かるようにするため (sha256 を照合しなくても分かる)。
-#define STACKEE_FW  "stackee-idf/4"
+#define STACKEE_FW  "stackee-idf/5"
 #define STACKEE_PROTO 2
 
 
@@ -355,7 +355,9 @@ static void reply_hello(long id) {
                 "\"lcd.status\",\"lcd.full\",\"usb.status\",\"axp.read\",\"axp.write\",\"crypto.selftest\","
                 "\"touch.status\",\"touch.inject\",\"touch.scroll\","
                 "\"camera.capture\",\"camera.power\",\"camera.dump\","
-                "\"camera.status\"],"
+                "\"camera.status\","
+                "\"app.info\",\"app.boot_factory\",\"ota.begin\",\"ota.status\","
+                "\"ota.end\",\"ota.commit\",\"ota.abort\"],"
                 "\"profile\":\"%s\",\"cdc\":%s}",
                 id, STACKEE_PROTO, STACKEE_FW, IDF_VER,
                 app ? app->version : "?", stackee_usb_profile(),

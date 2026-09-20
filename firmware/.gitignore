@@ -12,3 +12,6 @@ tools/_test_tmp/
 managed_components/
 # clangd の索引 (エディタが作る)
 .cache/
+# tools/ota.mjs が使う node-hid (ネイティブ拡張)。取得物なので入れない。
+tools/node_modules/
+tools/package-lock.json

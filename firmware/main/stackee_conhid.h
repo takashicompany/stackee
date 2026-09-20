@@ -77,3 +77,18 @@ typedef struct {
 } stackee_conhid_stats_t;
 
 void stackee_conhid_stats(stackee_conhid_stats_t *out);
+
+// ---------------------------------------------------------------------------
+// 別の command id を横取りする口 (アプリ内 OTA の 0xC3)
+// ---------------------------------------------------------------------------
+// ★ このファイルを ESP-IDF からも OTA からも切り離しておくための関数ポインタ。
+//   登録が無ければ何も変わらない (hostbuild/conhid_main.c はそのまま)。
+//   呼ばれるのは **入力タスク**。中でフラッシュに触らないこと。
+//
+//   戻り値 true  … この 32 バイトは横取りした (VIA には渡さない)。
+//                   *want_reply が true なら reply の 32 バイトを送り返す。
+//   戻り値 false … 知らない id。conhid の本来の処理へ進む。
+typedef bool (*stackee_conhid_raw_hook_t)(const uint8_t *report, uint32_t len,
+                                          uint8_t *reply, bool *want_reply);
+
+void stackee_conhid_set_raw_hook(stackee_conhid_raw_hook_t hook);

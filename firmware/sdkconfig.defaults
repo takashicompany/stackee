@@ -49,8 +49,10 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # ビルド時刻を像に埋めない。同じソースからは同じ sha256 が出るので、
 # tools/flash.py に渡す「書き込む像の sha256」が毎回変わらずに済む。
 CONFIG_APP_COMPILE_TIME_DATE=n
-CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="stackee-idf/3"
+# ★ 版は CMakeLists.txt が `git describe --always --dirty --tags` から作る。
+#   ここを y にすると、その PROJECT_VER が捨てられて下の固定文字列になる。
+#   段階を表す文字列 ("stackee-idf/N") は hello の "fw" が別に返す。
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=n
 
 # 応答の組み立てに 1 KB の一時領域を積むので、app_main の既定 3584 では足りない。
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

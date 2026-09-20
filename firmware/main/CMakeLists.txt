@@ -54,6 +54,9 @@ idf_component_register(
         "stackee_fat.c"
         "stackee_conhid.c"
         "stackee_uac.c"
+        # --- アプリ内 OTA (Raw HID から ota_1 へ) ------------------------
+        "stackee_otacore.c"
+        "stackee_ota.c"
         # --- 橋渡し層 (自前) --------------------------------------------
         "qmk_port/qmk_port_timer.c"
         "qmk_port/qmk_port_matrix.c"
@@ -121,6 +124,8 @@ idf_component_register(
         fatfs
         nvs_flash
         esp_app_format
+        app_update
+        esp_partition
         efuse
         bt
         esp_hid

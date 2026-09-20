@@ -27,6 +27,7 @@
 #include "stackee_volume.h"
 #include "stackee_wifi.h"
 #include "stackee_console.h"
+#include "stackee_ota.h"
 #include "stackee_ble.h"
 #include "stackee_hid_dest.h"
 #include "stackee_hid_out.h"
@@ -116,6 +117,8 @@ void app_main(void) {
     stackee_logbuf_install();
     stackee_perf_init();
     stackee_console_init();
+    // アプリ内 OTA (app.info / ota.*)。★ ここでは何も確保しない。
+    stackee_ota_init();
     stackee_uac_init();
 
     esp_err_t err = nvs_flash_init();
@@ -223,6 +226,8 @@ void app_main(void) {
     int64_t broken_seen = 0;
     for (;;) {
         stackee_console_poll();
+        // 溜まった像をフラッシュへ。★ ここは数十 ms 止まることがある。
+        stackee_ota_poll();
         int64_t now = esp_timer_get_time();
         stackee_perf_sample(STACKEE_PERF_MAIN, (uint32_t)(now - last));
         last = now;

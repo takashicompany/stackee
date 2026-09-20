@@ -37,4 +37,29 @@ elseif(NOT STACKEE_USB_PROFILE STREQUAL "dev")
 endif()
 message(STATUS "Stackee USB profile: ${STACKEE_USB_PROFILE}")
 
+# ---------------------------------------------------------------------------
+# 版 (esp_app_desc_t.version)
+# ---------------------------------------------------------------------------
+# ★ ビルドした木の `git describe` をそのまま像に焼く。操作盤の
+#   「ファームウェア更新」は **いま載っている版 / これから書く版 / sha256** を
+#   並べて見せるので、像が自分の出所を名乗れないと突き合わせられない。
+#   esp_app_desc_t.version は 32 バイト。長すぎるものは切る。
+#   sdkconfig の CONFIG_APP_PROJECT_VER_FROM_CONFIG は **切ってある**
+#   (立っていると、こちらの PROJECT_VER が捨てられる)。
+#
+# ★ 評価されるのは cmake の構成時だけ。コミットしたあとに版を入れ直すには
+#   `./build.sh clean` か `idf.py -B <dir> reconfigure` を挟むこと。
+execute_process(
+    COMMAND git describe --always --dirty --tags
+    WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    OUTPUT_VARIABLE STACKEE_GIT_VER
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT STACKEE_GIT_VER)
+    set(STACKEE_GIT_VER "nogit")
+endif()
+string(SUBSTRING "${STACKEE_GIT_VER}" 0 31 STACKEE_GIT_VER)
+set(PROJECT_VER "${STACKEE_GIT_VER}")
+message(STATUS "Stackee version: ${PROJECT_VER}")
+
 project(stackee)

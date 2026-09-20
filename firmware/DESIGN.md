@@ -145,6 +145,151 @@ y=50..289 なので**領域が重ならない**。顔の差分描画と字幕は
   描画時間は `perf.ui_sub`（約束 ≤ 2 ms）、打鍵の遅延は `key.inject` の中央値。
   目視での確認を合格条件にしない（§8 の作法どおり）。
 
+## 6c. アプリ内 OTA — 操作盤からファームを書き換える（2026-09-21）
+
+本体が**動いたまま** Raw HID で像を受け取り、使っていないほうの区画（`ota_1`）
+へ書き、otadata を切り替えて再起動する。方式の比較は
+`research/stackee/web_flash_2026-09-20.md`。ここは段階 0〜2（本体の受け皿と、
+人と AI で 1 本になる中核 JS）まで。**段階 3（ロールバック）と段階 4
+（Wi-Fi 入口）はまだ入れていない。**
+
+### なぜ ROM を通らないか
+
+いまの `tools/flash.py` は ROM のダウンロードモードへ落として書く。ROM に
+入った瞬間、戻る道は 3 段構え（`write_reg` + watchdog / pyusb の USB バス
+リセット / ROM から I2C で AXP2101 を再投入）に頼ることになるが、**ブラウザ
+からは 1 段目しか撃てない**。2026-09-16 に 1 段目が 2 回空振りした実績がある
+以上、日常の経路を ROM 経由にはしない。`flash.py` は復旧専用として残す。
+
+アプリ内 OTA なら、
+* 書いている間もキーボードは生きている（止まるのは再起動の約 3 秒だけ）
+* 途中で切れても otadata は触っていないので、次も古い像で起動する
+* 二重起動は `esp_ota_begin` のハンドルが 1 つしかないので構造的に防げる
+
+### 層の分け方
+
+| 層 | 責務 | 置き場 |
+|---|---|---|
+| 中核（本体） | 0xC3 の枠の分解・環状バッファ・credit・SHA-256 の照合・状態機械。**ESP-IDF に依存しない**のでホストビルドでそのまま回せる | `main/stackee_otacore.c` |
+| 実機（本体） | `esp_ota_*` と PSA の SHA-256 を差し込む。バッファの確保。`app.info` / `ota.*` の受け答え。遅延再起動 | `main/stackee_ota.c` |
+| 入口（本体） | Raw HID の 0xC3 を横取りして中核へ渡す。登録が無ければ何も変わらない | `main/stackee_conhid.c` の `stackee_conhid_set_raw_hook()` |
+| 中核（ホスト） | 枠の組み立て・分割・credit・sha256 の照合・`ota.*` の順序。**運び方を知らない** | `docs/js/ota.js` |
+| 転送（ホスト） | WebHID（人）/ node-hid（AI） | `docs/js/hid.js` / `tools/ota.mjs` |
+| 画面 | ファイル選択・版と sha256 の並べ表示・進捗 | `docs/index.html` + `ota.js` の `attachOtaUi()` |
+
+**中核 JS を 1 つにしてあるのが肝。** 人が押すボタンと AI が叩く
+`node tools/ota.mjs` が同じ `ota.js` を通るので、書き込みの筋道が食い違い
+ようがない（研究報告 §3-3 の (ii)）。
+
+### 0xC3 の枠（JSON の 0xC0/0xC1/0xC2 とは別の種別）
+
+```
+ホスト → デバイス (32 B)
+  byte 0      0xC3
+  byte 1      len       本文の有効バイト数 0..27 (0 は「状態だけ返せ」)
+  byte 2..4   offset    像の先頭からの位置 (24 bit little endian)
+  byte 5..31  payload   27 バイト
+
+デバイス → ホスト (32 B)
+  byte 0      0xC3
+  byte 1      state     0 idle / 1 receiving / 2 done / 3 failed
+  byte 2      err
+  byte 3..6   accepted  環状バッファに入れた累積 = 次に送るべき位置
+  byte 7..10  written   esp_ota_write に渡し終えた累積 = credit の起点
+  byte 11..14 size
+  byte 15     flags     bit0 = この枠は受け取らなかった
+  byte 16..19 free      環状バッファの空き
+```
+
+**位置を毎枠に書く。** 1 バイトの通し番号では credit の窓（32 KB ≒ 1,200 枠）
+の中で一周してしまい、取りこぼしたときにどこから送り直すか決められない。
+位置を持たせると、本体は「期待する位置と違えば捨てる」、ホストは「本体が言う
+`accepted` から送り直す」だけでよい。代償は本文 29 → 27 バイト
+（理論上限 29 → 27 KB/s、1.4 MB で 47 → 51 秒）。
+
+**1 枠ごとの ack にしない。** フラッシュの消去・書き込み中はキャッシュが止まり、
+IRAM 非常駐の割り込み（TinyUSB を含む）が数十 ms 止まる。1 枚ごとに返事を
+待つ作りだと毎回そこでタイムアウトする。本体は「受け取った累積が 1 KB を
+跨ぐたびに 1 枚だけ」返し、ホストは `written + 32 KB` まで先行して送る。
+
+**本体は自分からは何も言わない。** 応答を返すのは 0xC3 を受けたときだけ。
+だから credit で送れなくなったホストは、本文 0 バイトの 0xC3（「状態だけ
+返せ」）を撃って `written` の伸びを聞きに行く。これを忘れると、そこで止まる。
+
+### 誰がどのタスクで何をするか
+
+| 仕事 | タスク | 理由 |
+|---|---|---|
+| 0xC3 を環状バッファに積む | **入力タスク**（CPU1・1 ms 周期） | `via_command_kb()` がここから呼ばれる。フラッシュに触ると打鍵が数十 ms 止まる |
+| 環状バッファ → フラッシュ | **メインループ**（CPU0・優先度 1） | ここはコンソールしか見ていないので、数十 ms 止まってよい。画面も音も別タスク |
+| `ota.begin` / `end` / `abort` | メインループ | 書き手と同じタスクなので、バッファの付け替えで競合しない |
+
+環状バッファ（64 KB）は **PSRAM**。フラッシュへ渡す直前に **内蔵 RAM の
+4 KB** へ写す — ESP-IDF の `esp_flash_write()` は元バッファが外部 RAM だと
+**32 バイトずつ**しか書けず、その都度キャッシュを落とすので桁違いに遅くなる
+（`esp_flash_api.c` の `temp_buf[8]`）。4 KB に揃えると、1 回の書き込みで
+消えるのがフラッシュ 1 セクタちょうどになる。
+
+`OTA_WITH_SEQUENTIAL_WRITES` を使う。`OTA_SIZE_UNKNOWN` だと 2 MB を最初に
+全部消すので、その間ずっと USB が止まる。
+
+### sha256 は 2 種類ある（混ぜると一生合わない）
+
+| | 何 | どこで出る | 何のため |
+|---|---|---|---|
+| ファイル全体 | `shasum -a 256 stackee.bin` | `ota.begin` の引数、`ota.end` の `sha256` | 転送で 1 バイトも化けていないか |
+| 像の名札 | 像の**末尾 32 バイト**（`hash_appended`） | `esptool image_info`、`esp_partition_get_sha256()`、`app.info` の running/boot/next、`ota.end` の `partition_sha256` | **どの区画に何が入っているか** |
+
+名札のほうは「末尾 32 バイトを除いた部分の SHA-256」なので、ファイル全体の
+値とは必ず違う。`esp_partition_get_sha256()` は返す前に中身を検証する
+（`bootloader_common.c`）ので、`ota.end` の `partition_sha256` が期待と
+一致したら「ディスクの .bin とフラッシュの像が同じで、かつ ESP-IDF の検査も
+通った」と端から端まで言い切れる。
+
+### 内蔵 RAM
+
+**64 KB の環状バッファも 4 KB の作業バッファも `.bss` に置かない。**
+環状バッファは PSRAM から最初の `ota.begin` で取り、そのあとは手放さない
+（受信中に `free()` すると、入力タスクが書いている最中の領域を返すことに
+なる）。作業バッファは内蔵 RAM のヒープから取り、受信が終わったら
+メインループが返す。SHA-256 の途中経過と「走っている像の名札」の控えも
+PSRAM の小さな構造体にまとめてある。
+
+残る `.bss` の増分は **192 B**（full、`.dram0.bss` 0x123e8 → 0x124a8）。
+中身は状態機械のカウンタと 2 本の 32 B の sha だけ。
+
+### 戻れる道
+
+* **切り替えるまでは無傷。** `esp_ota_set_boot_partition()` を呼ぶまで
+  otadata は 1 バイトも変わらない。転送中に電源が切れても古い像で起動する。
+* **`ota.end` と `ota.commit` を分けてある。** 「書けた」と「そっちで起動
+  する」は別の決断。分けておけば「書いたが切り替えていない」状態で人が
+  読み返せる。
+* **`app.boot_factory`** は otadata を消して factory（`uf2`）を選ぶ。
+  ROM を通らずに CircuitPython の UF2 ブートローダへ戻る道が 1 命令でできる
+  （ESP-IDF の `esp_ota_set_boot_partition()` は factory を指されたとき
+  「ota info 区画を初期化するだけ」）。**まだ実機では試していない。**
+* **`tools/flash.py`（ROM 経由）は復旧専用として残す。**
+
+### 版
+
+`CMakeLists.txt` が `git describe --always --dirty --tags` を
+`PROJECT_VER` に入れる（`CONFIG_APP_PROJECT_VER_FROM_CONFIG` は切った）。
+`app.info` の `version` と `hello` の `app` に出る。cmake の構成時にしか
+評価されないので、コミットしたあとに入れ直すには `./build.sh clean` か
+`idf.py -B <dir> reconfigure` を挟むこと。段階を表す文字列
+（`stackee-idf/N`）は `hello` の `fw` が別に返す。
+
+### まだやっていないこと
+
+* **段階 3: ロールバック**（`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`）。
+  「何をもって valid とするか」を決めて、**わざと壊れた像で 1 回試す**まで
+  入れない。試さないなら入れないほうがよい（研究報告 §6 の最大のリスク 2）。
+* **段階 4: Wi-Fi 入口**（`ota.fetch <url>`）。受け皿は同じなので入口を
+  1 本足すだけだが、内蔵ヒープを先に測る必要がある。
+* **再開**（`esp_ota_resume`）。いまは途中で切れたら最初から送り直す。
+  1.4 MB で 1〜2 分なので、まずは作らない。
+
 ## 7. ライセンスと公開範囲
 
 - QMK 由来のコードは GPL-2.0-or-later。QMK は「via.c を他ファームへ翻案すること」「非公開の無線ライブラリとリンクした配布」を違反例に挙げている（docs.qmk.fm/license_violations）。ESP-IDF の Wi-Fi/BLE はバイナリ提供。

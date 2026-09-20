@@ -1,0 +1,345 @@
+#!/usr/bin/env node
+// stackee のファームウェアを **Raw HID 経由で** 書き換える (Node 版)。
+//
+//   node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin
+//   node firmware/tools/ota.mjs --image ... --no-commit   # 書くだけ。切り替えない
+//   node firmware/tools/ota.mjs --info                    # いま載っている版を見るだけ
+//   node firmware/tools/ota.mjs --abort                   # 途中で止まった転送を畳む
+//
+// ★ 中核 (枠の組み立て・credit・sha256 の照合・ota.* の順序) は
+//   **操作盤のページとまったく同じ** docs/js/ota.js を import している。
+//   ここにあるのは「node-hid で運ぶ」ぶんだけ。人が押すボタンと AI が叩く
+//   この道具が食い違いようがない、というのがこの形の目的
+//   (research/stackee/web_flash_2026-09-20.md §3-3)。
+//
+// 要るもの: node-hid。firmware/tools/package.json に入れてある。
+//   cd firmware/tools && npm install
+// ★ 操作盤の配信物 (docs/) には Node の依存を一切混ぜていない。
+//   node-hid はネイティブ拡張なので、ブラウザ側とは置き場を分けてある。
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { Demux, RequestTracker, PROTOCOL } from '../../docs/js/protocol.js';
+import {
+  OTA, parseStatusReport, runOta, sha256Hex, looksLikeEspImage,
+  embeddedSha, verifyEmbeddedSha,
+} from '../../docs/js/ota.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+// docs/js/hid.js の USB_FILTER と同じ面。
+const USB_VID = 0x303a;
+const USB_PID = 0x811a;
+const USAGE_PAGE = 0xff60;
+const USAGE = 0x61;
+
+// stackee_conhid.h。
+const CMD_TX = 0xc0;
+const CMD_RX = 0xc1;
+const REPORT_SIZE = 32;
+const HEADER_SIZE = 3;
+const MAX_PAYLOAD = REPORT_SIZE - HEADER_SIZE;   // 29
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// node-hid の転送層 (docs/js/hid.js と同じ口を持つ)
+// ---------------------------------------------------------------------------
+class NodeHidLink {
+  constructor(device, opts = {}) {
+    this.device = device;
+    this.tracker = new RequestTracker();
+    this._demux = new Demux();
+    this._decoder = new TextDecoder('utf-8');
+    this._otaListeners = new Set();
+    this._pollPaused = false;
+    this._closing = false;
+    this._txChain = Promise.resolve();
+    this.verbose = !!opts.verbose;
+    this.logs = [];
+
+    device.on('data', (buf) => this._onReport(buf));
+    device.on('error', (err) => {
+      if (!this._closing) process.stderr.write(`HID: ${err}\n`);
+    });
+    this._sweep = setInterval(() => this.tracker.sweep(), 200);
+    this._pollLoop = this._poll();
+  }
+
+  _onReport(buf) {
+    const a = new Uint8Array(buf);
+    if (a.length === 0) return;
+    if (a[0] === OTA.CMD_DATA) {
+      const st = parseStatusReport(a);
+      for (const cb of this._otaListeners) {
+        try { cb(st); } catch (e) { /* 聞き手の都合で受信を止めない */ }
+      }
+      return;
+    }
+    if (a[0] !== CMD_RX) return;          // 0xC0 / 0xC2 の ack は使わない
+    const len = Math.min(a[1], MAX_PAYLOAD);
+    if (len === 0) return;
+    const out = this._demux.push(
+      this._decoder.decode(a.slice(HEADER_SIZE, HEADER_SIZE + len), { stream: true }));
+    if (out.text) {
+      this.logs.push(out.text);
+      if (this.verbose) process.stderr.write(out.text);
+    }
+    for (const f of out.frames) this.tracker.onFrame(f);
+  }
+
+  /** hidapi の約束: 先頭に Report ID (このデバイスは 0) を足して書く。 */
+  _write(report) {
+    const buf = Buffer.alloc(REPORT_SIZE + 1);
+    buf[0] = 0x00;
+    Buffer.from(report).copy(buf, 1);
+    this.device.write(buf);
+  }
+
+  _serial(fn) {
+    const next = this._txChain.then(fn, fn);
+    this._txChain = next.then(() => {}, () => {});
+    return next;
+  }
+
+  async _poll() {
+    while (!this._closing) {
+      if (!this._pollPaused) {
+        const rep = Buffer.alloc(REPORT_SIZE);
+        rep[0] = CMD_RX;
+        try {
+          await this._serial(() => this._write(rep));
+        } catch (e) {
+          if (!this._closing) process.stderr.write(`受信が途切れました: ${e}\n`);
+          return;
+        }
+      }
+      await sleep(this.tracker.pendingCount > 0 ? 2 : 15);
+    }
+  }
+
+  async request(cmd, args, opts) {
+    const { line, promise } = this.tracker.create(cmd, args, opts);
+    const bytes = new TextEncoder().encode(line);
+    await this._serial(() => {
+      for (let off = 0; off < bytes.length; off += MAX_PAYLOAD) {
+        const chunk = bytes.subarray(off, Math.min(off + MAX_PAYLOAD, bytes.length));
+        const rep = new Uint8Array(REPORT_SIZE);
+        rep[0] = CMD_TX;
+        rep[1] = chunk.length;
+        rep.set(chunk, HEADER_SIZE);
+        this._write(rep);
+      }
+    });
+    return promise;
+  }
+
+  sendOtaReport(report) {
+    return this._serial(() => this._write(report));
+  }
+
+  onOtaStatus(cb) {
+    this._otaListeners.add(cb);
+    return () => this._otaListeners.delete(cb);
+  }
+
+  setPollPaused(paused) {
+    this._pollPaused = !!paused;
+  }
+
+  /** 再起動のあと、同じ面が戻ってくるのを待って開き直す。 */
+  async waitAndReconnect(opts = {}) {
+    const timeoutMs = opts.timeoutMs || 40000;
+    const deadline = Date.now() + timeoutMs;
+    this.close();
+    await sleep(1500);
+    while (Date.now() < deadline) {
+      try {
+        const next = await openDevice();
+        if (next) {
+          this.device = next.device;
+          this._closing = false;
+          this._demux.reset();
+          this.device.on('data', (buf) => this._onReport(buf));
+          this._sweep = setInterval(() => this.tracker.sweep(), 200);
+          this._txChain = Promise.resolve();
+          this._pollLoop = this._poll();
+          return true;
+        }
+      } catch (e) { /* まだ現れていない */ }
+      await sleep(500);
+    }
+    return false;
+  }
+
+  close() {
+    this._closing = true;
+    if (this._sweep) clearInterval(this._sweep);
+    this._sweep = null;
+    try { this.device.close(); } catch (e) { /* 無視 */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+async function openDevice() {
+  let HID;
+  try {
+    HID = await import('node-hid');
+  } catch (e) {
+    throw new Error(
+      'node-hid がありません。firmware/tools で `npm install` してください。\n' +
+      `  (${e && e.message})`);
+  }
+  const hid = HID.default || HID;
+  const found = hid.devices().filter(
+    (d) => d.vendorId === USB_VID && d.productId === USB_PID &&
+           d.usagePage === USAGE_PAGE && d.usage === USAGE);
+  if (found.length === 0) {
+    throw new Error(
+      `stackee の Raw HID が見えません ` +
+      `(VID 0x${USB_VID.toString(16)} / PID 0x${USB_PID.toString(16)} / ` +
+      `usagePage 0x${USAGE_PAGE.toString(16)} / usage 0x${USAGE.toString(16)})。` +
+      'USB に刺さっているか、像が full プロファイルかを確かめてください。');
+  }
+  return { device: new hid.HID(found[0].path), info: found[0] };
+}
+
+function parseArgs(argv) {
+  const out = { commit: true, verbose: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--image' || a === '-i') out.image = argv[++i];
+    else if (a === '--no-commit') out.commit = false;
+    else if (a === '--commit') out.commit = true;
+    else if (a === '--force') out.force = true;
+    else if (a === '--info') out.info = true;
+    else if (a === '--abort') out.abort = true;
+    else if (a === '--status') out.status = true;
+    else if (a === '--verbose' || a === '-v') out.verbose = true;
+    else if (a === '--help' || a === '-h') out.help = true;
+    else if (!out.image && !a.startsWith('-')) out.image = a;
+  }
+  return out;
+}
+
+const USAGE_TEXT = `使い方:
+  node tools/ota.mjs --image <stackee.bin> [--no-commit] [--force] [-v]
+  node tools/ota.mjs --info      いま載っている版と sha256 を見る
+  node tools/ota.mjs --status    進行中の転送の様子
+  node tools/ota.mjs --abort     途中で止まった転送を畳む
+
+  --no-commit  ota_1 に書くところまでで止める (起動する側は切り替えない)
+  --force      同じ sha256 が動いていても書く
+`;
+
+function fmtPart(name, p) {
+  if (!p) return `  ${name}: (なし)`;
+  return `  ${name}: ${p.label} ver=${p.version || '?'} sha256=${p.sha256 || '(なし)'}`;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    process.stdout.write(USAGE_TEXT);
+    return 0;
+  }
+
+  const { device, info } = await openDevice();
+  process.stderr.write(`# ${info.product || 'stackee'} ${info.path}\n`);
+  const link = new NodeHidLink(device, { verbose: args.verbose });
+
+  try {
+    if (args.abort) {
+      const r = await link.request('ota.abort', null, { timeoutMs: 10000 });
+      process.stdout.write(JSON.stringify(r) + '\n');
+      return 0;
+    }
+    if (args.status) {
+      const r = await link.request('ota.status', null, { timeoutMs: 10000 });
+      process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      return 0;
+    }
+    if (args.info || !args.image) {
+      const r = await link.request('app.info', null, { timeoutMs: 20000 });
+      process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      if (!args.image && !args.info) {
+        process.stderr.write('\n' + USAGE_TEXT);
+      }
+      return 0;
+    }
+
+    const file = path.resolve(args.image);
+    const image = new Uint8Array(fs.readFileSync(file));
+    if (!looksLikeEspImage(image)) {
+      throw new Error(`${file} は ESP32 のアプリ像ではありません (先頭が 0xE9 ではない)`);
+    }
+    if (!(await verifyEmbeddedSha(image))) {
+      throw new Error(
+        `${file} には末尾の SHA-256 が付いていません ` +
+        '(途中で切れているか、hash_appended 無しでビルドされています)');
+    }
+    // ★ sha256 は 2 種類ある (docs/js/ota.js の embeddedSha を読むこと)。
+    const want = await sha256Hex(image);        // ファイル全体 = 転送の照合
+    const wantImage = embeddedSha(image);       // 埋め込み = 像の名札
+    process.stderr.write(`# 像: ${file}\n`);
+    process.stderr.write(`#     ${image.length} B\n`);
+    process.stderr.write(`#     sha256       ${want} (ファイル全体)\n`);
+    process.stderr.write(`#     image_sha256 ${wantImage} (esptool image_info と同じ)\n`);
+
+    const started = Date.now();
+    let lastShown = 0;
+    const result = await runOta(link, image, {
+      commit: args.commit,
+      force: args.force,
+      onStep: (kind, text) => process.stderr.write(`# [${kind}] ${text}\n`),
+      onProgress: (p) => {
+        const pct = Math.floor((p.accepted / p.size) * 100);
+        if (pct !== lastShown) {
+          lastShown = pct;
+          const kbs = p.accepted / Math.max(1, (Date.now() - started) / 1000) / 1024;
+          process.stderr.write(
+            `\r#   ${pct}%  ${p.accepted}/${p.size} B  ${kbs.toFixed(1)} KB/s   `);
+        }
+      },
+    });
+    process.stderr.write('\n');
+
+    if (result.skipped) {
+      process.stderr.write('# すでに同じ像が動いています (--force で上書きできます)\n');
+      process.stdout.write(JSON.stringify(
+        { skipped: true, sha256: result.want, image_sha256: result.wantImage }) + '\n');
+      return 0;
+    }
+    const secs = (result.transfer.ms / 1000).toFixed(1);
+    const kbs = (result.size / 1024 / Math.max(0.001, result.transfer.ms / 1000)).toFixed(1);
+    process.stderr.write(`# 転送 ${secs} 秒 (${kbs} KB/s、送り直し ${result.transfer.resyncs} 回)\n`);
+    process.stderr.write(`# 本体が数えた sha256    : ${result.ended.sha256}\n`);
+    process.stderr.write(`# 区画から読み直した名札 : ${result.ended.partition_sha256}\n`);
+    if (result.committed) {
+      process.stderr.write('# 切り替えて再起動しました。新しい版で動いています。\n');
+      process.stderr.write(fmtPart('running', result.after.running) + '\n');
+    } else {
+      process.stderr.write('# 書き込みました。**まだ切り替えていません** '
+                          + '(切り替えるには --commit)。\n');
+    }
+    process.stdout.write(JSON.stringify({
+      ok: true, committed: !!result.committed, sha256: result.want,
+      image_sha256: result.wantImage, size: result.size, ms: result.transfer.ms, resyncs: result.transfer.resyncs,
+      end: result.ended, after: result.after || null,
+    }) + '\n');
+    return 0;
+  } finally {
+    link.close();
+  }
+}
+
+// ★ 直に起動されたときだけ走る (テストから import しても勝手に動かない)。
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().then((code) => process.exit(code), (err) => {
+    process.stderr.write(`\n${err && err.stack ? err.stack : err}\n`);
+    process.exit(1);
+  });
+}
+
+export { NodeHidLink, openDevice, HERE, PROTOCOL };
