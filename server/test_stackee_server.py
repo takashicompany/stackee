@@ -248,18 +248,40 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.request('GET', path + '/subtitles')[0], 409)
         self.release.set()
         self.server.jobs.worker.join(3)
-        state = json.loads(self.request('GET', path)[2])
+        raw = self.request('GET', path)[2]
+        state = json.loads(raw)
         self.assertEqual(state['subtitles_url'], path + '/subtitles')
         self.assertEqual(set(state), {'state', 'transcript', 'reply', 'audio_url', 'audio_bytes',
-                                      'sample_rate', 'channels', 'sample_width', 'subtitles_url'})
+                                      'sample_rate', 'channels', 'sample_width', 'subtitles_url',
+                                      'subtitles'})
         self.assertEqual((state['audio_url'], state['audio_bytes'], state['sample_rate'],
                           state['channels'], state['sample_width']),
                          (path + '/audio', 200, 16000, 1, 2))
+        # The tabs and newlines travel escaped, in one JSON string.
+        self.assertIn(b'"subtitles": "0\\t\xe3\x81\x93\xe3\x82\x93\xe3\x81\xab\xe3\x81\xa1\xe3\x81\xaf\\n', raw)
         status, headers, subtitles = self.request('GET', state['subtitles_url'])
         self.assertEqual(status, 200)
         self.assertEqual(headers['Content-Type'], 'text/plain; charset=utf-8')
         self.assertEqual(subtitles.decode('utf-8'), '0\tこんにちは\n1200\tさようなら\n')
+        self.assertEqual(state['subtitles'], subtitles.decode('utf-8'))
         self.assertEqual(self.request('GET', '/jobs/' + '0' * 32 + '/subtitles')[0], 404)
+
+    def test_a_trimmed_status_and_its_subtitles_endpoint_agree(self):
+        full = ('999999\t' + 'あ' * 26 + '\n').encode('utf-8') * 48
+        ident = 'a' * 32
+        self.server.jobs.entries[ident] = {
+            'created': time.monotonic(), 'state': 'done',
+            'transcript': 'い' * 300, 'reply': 'あ' * 1200, 'audio': b'\0\1' * 100,
+            'timings': {'total_ms': 1000.0}, 'subtitles': full}
+        path = '/jobs/' + ident
+        raw = self.request('GET', path)[2]
+        state = json.loads(raw)
+        served = self.request('GET', path + '/subtitles')[2].decode('utf-8')
+        self.assertLessEqual(len(raw), 8192)
+        self.assertEqual(state['subtitles'], served)
+        self.assertTrue(full.decode('utf-8').startswith(served), served[:40])
+        self.assertLess(len(served), len(full.decode('utf-8')))
+        self.assertTrue(served.endswith('\n'))
 
     def test_subtitles_are_absent_for_ignored_failed_and_silent_jobs(self):
         def ignored(data):
@@ -683,6 +705,35 @@ class SubtitleTests(unittest.TestCase):
         self.assertLessEqual(len(short), 200)
         self.assertLess(len(short.splitlines()), 48)
         self.assertTrue(body.startswith(short))
+
+    def test_the_status_never_outgrows_the_device_buffer(self):
+        # The widest body the contract allows: 48 lines, just under 4096 bytes.
+        subtitles = ('999999\t' + 'あ' * 26 + '\n').encode('utf-8') * 47
+        subtitles += ('999999\t' + 'あ' * 15 + '\n').encode('utf-8')
+        self.assertEqual((len(subtitles.splitlines()), len(subtitles) <= 4096), (48, True))
+        item = {'state': 'done', 'transcript': 'い' * 300, 'reply': 'あ' * 1200,
+                'timings': {'prepare_ms': 3.58, 'stt_ms': 2050.72, 'codex_ms': 3361.72,
+                            'tts_ms': 1536.7, 'total_ms': 6952.74},
+                'audio_url': '/jobs/' + 'a' * 32 + '/audio', 'sample_rate': 16000,
+                'channels': 1, 'sample_width': 2, 'audio_bytes': s.MAX_REPLY_BYTES,
+                'subtitles_url': '/jobs/' + 'a' * 32 + '/subtitles'}
+        body, kept = s.job_body(item, subtitles)
+        self.assertLessEqual(len(body), 8192)
+        self.assertEqual(json.loads(body)['subtitles'], kept.decode('utf-8'))
+        self.assertTrue(subtitles.startswith(kept))
+        self.assertTrue(kept.endswith(b'\n'))
+        self.assertLess(len(kept), len(subtitles))
+        # A reply of ordinary length keeps every page, escapes and all.
+        short = dict(item, reply='あ' * 200, transcript='い' * 30)
+        body, kept = s.job_body(short, subtitles)
+        self.assertEqual(kept, subtitles)
+        self.assertLessEqual(len(body), 8192)
+        self.assertEqual(json.loads(body)['subtitles'], subtitles.decode('utf-8'))
+        # With nothing left to drop, the link goes too rather than a dangling URL.
+        body, kept = s.job_body(item, subtitles, limit=100)
+        self.assertEqual(kept, b'')
+        self.assertNotIn('subtitles', json.loads(body))
+        self.assertNotIn('subtitles_url', json.loads(body))
 
     def test_every_page_of_a_long_reply_is_within_the_contract(self):
         p = self.pipeline(bytes_per_char=2000)

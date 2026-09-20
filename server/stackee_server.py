@@ -2,8 +2,8 @@
 """LAN voice receiver: WAV → whisper-cli → the configured agent → say or VOICEVOX.
 
 Python standard library only. POST /talk accepts WAV; poll the returned Location
-for status, then GET its /audio endpoint for 16 kHz, signed little-endian PCM and
-its /subtitles endpoint for the caption pages timed against that PCM.
+for status, then GET its /audio endpoint for 16 kHz, signed little-endian PCM. The
+status carries the caption pages timed against that PCM, which /subtitles also serves.
 GET /admin serves the browser page that switches agent, model, effort and instructions.
 """
 from __future__ import annotations
@@ -129,6 +129,10 @@ BYTES_PER_MS = RATE * 2 // 1000
 SUBTITLE_COLUMNS = 15
 SUBTITLE_MAX_LINES = 48
 SUBTITLE_MAX_BYTES = 4096
+# The device fetches the status with one request; a second one for the subtitles cost it
+# about eight seconds, so they travel inside the status JSON, which stays small enough
+# for a fixed device buffer.
+MAX_JOB_BYTES = 8192
 NO_PAGE_START = "。、．，,.！？!?」』）)】〕》〉］]｝}・ー:;：；"
 
 
@@ -221,6 +225,25 @@ def subtitle_body(sentences, max_lines=SUBTITLE_MAX_LINES, max_bytes=SUBTITLE_MA
             break
         body += line
     return body
+
+
+def job_body(item, subtitles, limit=MAX_JOB_BYTES):
+    """The status JSON with the subtitles inline, and the subtitles that survived.
+
+    The device reads the status into a fixed buffer, so end pages are dropped until the
+    JSON fits. /subtitles then serves exactly what the status carried.
+    """
+    lines = subtitles.splitlines(keepends=True)
+    while True:
+        result = dict(item)
+        if lines:
+            result["subtitles"] = b"".join(lines).decode("utf-8")
+        else:
+            result.pop("subtitles_url", None)
+        body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        if len(body) <= limit or not lines:
+            return body, b"".join(lines)
+        lines.pop()
 
 
 class Pipeline:
@@ -585,18 +608,21 @@ class Handler(BaseHTTPRequestHandler):
             if item["state"] != "done":
                 return self.send(409, {"error": "audio_not_ready"})
             return self.send(200, audio, "application/octet-stream")
+        body = None
+        if item["state"] == "done":
+            job = "/jobs/" + match[1]
+            item.update(audio_url=job + "/audio", sample_rate=RATE,
+                        channels=1, sample_width=2, audio_bytes=len(audio))
+            if subtitles:
+                item["subtitles_url"] = job + "/subtitles"
+            body, subtitles = job_body(item, subtitles)
         if match[2] == "/subtitles":
             if item["state"] == "processing":
                 return self.send(409, {"error": "subtitles_not_ready"})
-            if item["state"] != "done" or not subtitles:
+            if not subtitles:
                 return self.send(404, {"error": "not_found"})
             return self.send(200, subtitles, "text/plain; charset=utf-8")
-        if item["state"] == "done":
-            item.update(audio_url=self.path + "/audio", sample_rate=RATE,
-                        channels=1, sample_width=2, audio_bytes=len(audio))
-            if subtitles:
-                item["subtitles_url"] = self.path + "/subtitles"
-        return self.send(200, item)
+        return self.send(200, item if body is None else body)
 
     def do_PUT(self):
         if self.path not in ("/admin/api/config", "/admin/api/instructions/codex",
