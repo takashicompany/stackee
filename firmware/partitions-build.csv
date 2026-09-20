@@ -1,0 +1,21 @@
+# ★ ビルド専用のパーティション表。**実機にはこの表を焼かない。**
+#
+# 実機に載っている表 (partitions.csv) は CircuitPython 16MB 版そのままで、
+# その中の uf2 が app/factory になっている。ESP-IDF は「アプリの置き場は
+# factory」と解釈するので、ビルドの最後に「0x410000 に書け」という誤った
+# 案内を出し、サイズ検査も 256 KB を基準にしてしまう (README §2)。
+#
+# この表は uf2 の型だけを data (SubType 0x20) に読み替えたもの。
+# **オフセットもサイズも 1 バイトも変えていない** ので、ota_0 = 0x10000 /
+# 2048K という前提は同じまま、誤った案内だけが消える。
+# 書き込みは今までどおり tools/flash.py が ota_0 に対して行う。
+#
+# Name,             Type,   SubType,    Offset,     Size
+# bootloader,       app,    boot,       0x1000/0x0, 28/32K
+# partition_table,  data,   table,      0x8000,     4K
+nvs,                data,   nvs,        0x9000,     20K
+otadata,            data,   ota,        0xe000,     8K
+ota_0,              app,    ota_0,      0x10000,    2048K
+ota_1,              app,    ota_1,      0x210000,   2048K
+uf2,                data,   0x20,       0x410000,   256K
+user_fs,            data,   fat,        0x450000,   11968K

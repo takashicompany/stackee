@@ -1,0 +1,14 @@
+build/
+# 段階 4: full プロファイル (UAC マイク入り) の出来上がり。
+# プロファイルごとにディレクトリを分けている (build.sh --profile full)。
+build-full/
+sdkconfig
+sdkconfig.old
+tools/__pycache__/
+tools/_test_tmp/
+# IDF Component Registry から取ってきた TinyUSB の実体。
+# 版は main/idf_component.yml と dependencies.lock で固定してあるので、
+# 実体そのものはリポジトリに入れない。
+managed_components/
+# clangd の索引 (エディタが作る)
+.cache/

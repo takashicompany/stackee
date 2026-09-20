@@ -1,0 +1,190 @@
+# Stackee phase 0 defaults. Matches the CircuitPython build for this board
+# (firmware/cp-uac/circuitpython/ports/espressif/boards/m5stack_cores3/mpconfigboard.mk)
+# so the flash layout and the PSRAM/flash timing stay identical.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---- Flash: 16MB QIO 80MHz (mpconfigboard.mk) ------------------------------
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# ---- PSRAM: 8MB quad QIO 80MHz --------------------------------------------
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_TYPE_ESPPSRAM64=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ---- Partition table: byte-identical to the CircuitPython 16MB table -------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-build.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# ---- Console --------------------------------------------------------------
+# The USB pins belong to the OTG PHY (TinyUSB), so the secondary USB-Serial-JTAG
+# console must stay off or it fights for the same PHY. Logs go to UART0 (not
+# wired on this board) and, once CDC is up, to the CDC console as well.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ---- FreeRTOS -------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_UNICORE=n
+
+# ---- FATFS: read-only mount of user_fs (the CIRCUITPY filesystem) ----------
+# Long file names are required: /stackee_assets/manifest.json is not 8.3.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_CODEPAGE_437=y
+
+# ---- Size -----------------------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ---- 再現性 ---------------------------------------------------------------
+# ビルド時刻を像に埋めない。同じソースからは同じ sha256 が出るので、
+# tools/flash.py に渡す「書き込む像の sha256」が毎回変わらずに済む。
+CONFIG_APP_COMPILE_TIME_DATE=n
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="stackee-idf/3"
+
+# 応答の組み立てに 1 KB の一時領域を積むので、app_main の既定 3584 では足りない。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ---- BLE (NimBLE + esp_hid) -----------------------------------------------
+# 現行 CircuitPython 版と同じ NimBLE を、同じ IDF の同じ版で使う。ボンドの
+# 保存先も同じ nvs 名前空間 ("nimble_bond") なので、うまくいけば
+# 再ペアリングなしで繋がる (実機で確かめるまでは分からない)。
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_NONE=y
+# ボンドを NVS に残す。これが無いと再起動のたびに再ペアリングになる。
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# esp_hid の HID サービス (GATT 0x1812)。
+CONFIG_BT_NIMBLE_HID_SERVICE=y
+# ★ **レポートの上限。既定の 3 では足りない。**
+#   2026-09-16 の実機: esp_hidd_dev_init() が ESP_FAIL を返して BLE が
+#   丸ごと立ち上がらなかった。原因はこれ。我々の記述子から esp_hid が
+#   作るレポートは 7 個:
+#     ID1 キーボード IN (report/boot の 2 通り) + OUT (2 通り)
+#     ID2 マウス IN (report/boot の 2 通り)
+#     ID3 コンシューマ IN
+#   ble_svc_hid.c:725 が rpts_len > BLE_SVC_HID_MAX_RPTS で弾く。
+#   8 にして 1 個ぶん余裕を持たせる (tools/test_hid_report_map.py が
+#   記述子から数え直して、この値を超えていないか毎回確かめる)。
+CONFIG_BT_NIMBLE_SVC_HID_MAX_RPTS=8
+# HID サービスは 1 つ (レポートマップも 1 つ) しか使わない。
+CONFIG_BT_NIMBLE_SVC_HID_MAX_INSTANCES=1
+# 接続は 1 本だけ (キーボードは 1 台のホストにしか繋がない)。
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# 名前は "stackee" (アドバタイズにも GAP のデバイス名にも出る)。
+CONFIG_BT_NIMBLE_SVC_GAP_DEVICE_NAME="stackee"
+# アドバタイズは最初だけ速く撒く (CircuitPython 版と同じ)。
+CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL=y
+
+# ---- TLS のメモリ ----------------------------------------------------------
+# ★ **これが無いと会話の HTTPS が必ず失敗する** (2026-09-16 の実機):
+#     E esp-tls-mbedtls: mbedtls_ssl_setup returned -0x008D
+#   -0x008D = -141 = PSA_ERROR_INSUFFICIENT_MEMORY = MBEDTLS_ERR_SSL_ALLOC_FAILED
+#   (mbedtls 4 / TF-PSA-Crypto: components/mbedtls/mbedtls/include/mbedtls/ssl.h
+#    の MBEDTLS_ERR_SSL_ALLOC_FAILED → psa/crypto_values.h の -141)。
+#   mbedtls_ssl_setup() が入出力バッファ (既定 16 KB + 4 KB) を確保するところで、
+#   BLE + Wi-Fi + TinyUSB + I2S に内蔵 DRAM を取られていて足りない。
+#
+#   現行 CircuitPython 版は **同じ本体で TLS が通っている**。その設定が
+#   ports/espressif/esp-idf-config/sdkconfig-psram.defaults の
+#   CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y (= SSL のバッファを PSRAM へ) と、
+#   sdkconfig.defaults の CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048。
+#   **動いている設定に合わせる**。Kconfig の条件は
+#   SPIRAM_USE_CAPS_ALLOC || SPIRAM_USE_MALLOC で、こちらは後者が立っている。
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
+# 受信側 (16 KB) は縮めない。証明書の連鎖が長い相手と握手できなくなる。
+# PSRAM に載るので内蔵 RAM は使わない。
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+
+# ---- Wi-Fi が内蔵 RAM を使う量 ---------------------------------------------
+# ★ 既定 (静的 RX 16 本 / PSRAM の TX キャッシュ 32 本) は、BLE も TinyUSB も
+#   I2S も居るこの機械には大きすぎる。静的 RX バッファは **DMA が使える内蔵
+#   RAM** から取るので、ここが太いと BLE のコントローラも mbedTLS も
+#   痩せたところを取り合うことになる (2026-09-16 の実機: TLS が
+#   ALLOC_FAILED、Wi-Fi が up の間 BLE が繋がらない)。
+#
+#   現行 CircuitPython 版は **同じ基板で Wi-Fi と BLE を同時に動かしている**。
+#   その設定 (ports/espressif/esp-idf-config/sdkconfig-esp32s3.defaults) に
+#   合わせる。**動いている設定からの差分を増やさない。**
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM=16
+# ★ RX_BA_WIN は静的 RX バッファの 2 倍を超えられない (esp_wifi/src/
+#   wifi_init.c:56 が #error で止める)。CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP
+#   を立てていると既定が 16 になるので、静的 RX を 4 にしたら一緒に下げる。
+#   6 は CircuitPython 版と同じ値 (あちらは PSRAM 優先を立てていないので既定の 6)。
+#   Kconfig が PSRAM 優先のとき 16 を薦めているのは**帯域の話**で、
+#   決まりではない。返答の PCM は最大 1 MB で、現行版はこの値で足りている。
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+# 認証情報はこちらが登録簿で持っている (esp_wifi_set_storage は RAM)。
+# ドライバ側に NVS を持たせない = 消したはずの AP へ勝手に繋ぎに行かない。
+# CONFIG_ESP_WIFI_NVS_ENABLED is not set
+
+# ---- Wi-Fi / BLE 共存 ------------------------------------------------------
+# ★ Wi-Fi は段階 3 まで使わないが、共存の設定は**今から**入れておく。
+#   あとから有効にすると BLE 側のタイミングが変わり、「前は繋がっていたのに」
+#   という切り分けの難しい退行を招く。いま入れておけば、段階 3 で Wi-Fi を
+#   足したときに BLE 側の条件が変わらない。
+CONFIG_ESP_COEX_ENABLED=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# ★ CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL は **立てない**。
+#   NimBLE のバッファを PSRAM に置く設定だが、現行 CircuitPython 版
+#   (ports/espressif/esp-idf-config/sdkconfig-ble.defaults) は立てていない。
+#   コントローラ側は DMA の都合で内部 RAM が要るので、ここを変えるのは
+#   「動いている設定からの差分」を無駄に増やすだけだった (2026-09-16)。
+
+# ---------------------------------------------------------------------------
+# 段階 4: カメラ (espressif/esp32-camera)
+# ---------------------------------------------------------------------------
+# ★ **内蔵 DMA でやり直すとき**の保険。普段は PSRAM DMA を使うので
+#   ここは効かないが、PSRAM DMA で開けなかったときに内蔵の連続領域を
+#   30,720 バイトも要求されると必ず失敗する (実機の実測: 断片化して
+#   いちばん大きい空き塊が 4,096 バイトしかなかった)。
+#   8,192 にすると半バッファが 3,840 バイト = 内蔵の要求は 7,680 バイト。
+CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=8192
+
+# 使うのは GC0308 だけ。他の素子のドライバを像に入れない (フラッシュの節約)。
+CONFIG_OV7670_SUPPORT=n
+CONFIG_OV7725_SUPPORT=n
+CONFIG_NT99141_SUPPORT=n
+CONFIG_OV2640_SUPPORT=n
+CONFIG_OV3660_SUPPORT=n
+CONFIG_OV5640_SUPPORT=n
+CONFIG_GC2145_SUPPORT=n
+CONFIG_GC032A_SUPPORT=n
+CONFIG_GC0308_SUPPORT=y
+CONFIG_BF3005_SUPPORT=n
+CONFIG_BF20A6_SUPPORT=n
+CONFIG_SC101IOT_SUPPORT=n
+CONFIG_SC030IOT_SUPPORT=n
+CONFIG_SC031GS_SUPPORT=n
+
+# ---- mbedTLS のハードウェア加速 -------------------------------------------
+# ★ ハードウェア SHA / MPI は **戻した** (2026-09-18、ESP-IDF v6.0.3 へ更新)。
+#   2026-09-17 に PSA_ERROR_INVALID_SIGNATURE (-149) で証明書検証が落ちて
+#   両方切っていたが、真因は v6.0.1 に入っていなかった以下の修正だった:
+#     c41dd724d  mbedtls: fix ESP32-S3 hardware MPI cached Rinv size mismatch
+#                (キャッシュした Rinv の語長が足りず署名検証が落ちる)
+#     86f6192f1  mbedtls: validate esp_mpi_exp_mod inputs (RSA-4096)
+#   どちらも v6.0.3 のツリーに入っている (README §20)。
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HARDWARE_MPI=y
+# ★ ハードウェア AES は **当面 n のまま** (2026-09-18)。
+#   esp-idf#18640: I2S チャネルを削除したあと GDMA を引き継いだハードウェア
+#   AES-GCM が壊れた暗号文を出し、TLS ハンドシェイクは通るのに本文で相手が
+#   切る (HTTP 400 / RST)。本機で 2026-09-18 に同じ切れ方が出た (README §20)。
+#   これは MPI の不具合とは別件で、v6.0.3 でも直っていない。
+#   2026-09-18: I2S チャネルを常設化 (i2s_del_channel を呼ばない) したので y に戻した。
+#   #18640 の引き金 (I2S 削除後の GDMA 引き継ぎ) は起きない。
+CONFIG_MBEDTLS_HARDWARE_AES=y

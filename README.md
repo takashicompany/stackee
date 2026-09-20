@@ -2,7 +2,8 @@
 
 M5Stack CoreS3 を使った自作キーボード **stackee** の公開リポジトリ。
 
-`docs/` に静的サイト **「stackee 操作盤」**、`server/` に Mac / Linux で動かすサーバー側コードを置きます。
+`docs/` に静的サイト **「stackee 操作盤」**、`server/` に Mac / Linux で動かすサーバー側コード、
+`firmware/` に本体の C ファームウェア (ESP-IDF) を置きます。
 音声受信サーバーの起動・API は [server/README.md](server/README.md) を参照してください。
 
 - 公開先: https://takashi.company/stackee/
@@ -150,7 +151,7 @@ https://takashicompany.github.io/stackee/ はこちらへ転送されます。)
 
 `docs/.nojekyll` は Jekyll の処理を止めるためのものなので消さないでください。
 
-`server/`、テスト、README は `docs/` の外なので配信されません。
+`server/`、`firmware/`、テスト、README は `docs/` の外なので配信されません。
 サーバーは Mac などのホストで別途実行する想定です。
 
 参考: [GitHub 公式のブランチ配信手順](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)
@@ -215,6 +216,13 @@ https://takashicompany.github.io/stackee/ はこちらへ転送されます。)
 │   │   └── app.js            画面とイベント
 │   └── .nojekyll
 ├── server/                   Mac / Linux 音声受信サーバーと常駐 Codex エージェント
+├── firmware/                 本体の C ファームウェア (ESP-IDF)。**GPL-2.0-or-later**
+│   ├── main/                 ファーム本体
+│   ├── third_party/qmk/      QMK 0.34.4 のコピー (無改変)
+│   ├── tools/                Mac 側の道具とホストテスト (実機に触らない)
+│   ├── assets/               本体へ送る素材 (顔・アイコン・フォント・音声)
+│   ├── build.sh              ビルド (ESP-IDF v6.0.3 は別途用意する)
+│   └── README.md             使い方。設計は DESIGN.md、実測は RESULTS.md
 ├── test/
 │   ├── protocol.test.mjs     docs/js/protocol.js の単体テスト
 │   └── hid.test.mjs          docs/js/hid.js の単体テスト
@@ -404,5 +412,15 @@ node --test                      # 引数なしでも自動で見つかる (ど�
 
 ## ライセンス
 
-このリポジトリのコードは stackee プロジェクトのものです。外部ライブラリは
-1 つも同梱していません。
+**`firmware/` だけが GPL-2.0-or-later** です。キーボードの処理に
+QMK (GPL-2.0-or-later) のコードを `firmware/third_party/qmk/` へ取り込んで
+一緒にビルドしているため、その派生物として同じ条件で配っています。
+全文は [firmware/LICENSE](firmware/LICENSE)、取り込みの範囲は
+[firmware/third_party/qmk/IMPORT.md](firmware/third_party/qmk/IMPORT.md)。
+
+**それ以外 (`docs/` の操作盤、`server/`、`test/`) は従来どおり**
+stackee プロジェクトのコードで、外部ライブラリは 1 つも同梱していません。
+
+本体へ送る素材 (`firmware/assets/`) は、それぞれの出所の条件に従います
+(Material Design Icons は Apache-2.0、/efont/ は BSD 系、東雲フォントは
+Public Domain)。表記は [firmware/assets/README.md](firmware/assets/README.md)。

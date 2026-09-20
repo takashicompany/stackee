@@ -1,0 +1,29 @@
+## TinyUSB は IDF Component Registry から取る (DESIGN.md §8b の決定)。
+##
+## 段階 0 では firmware/cp-uac が持っている CircuitPython のツリーを
+## 直接参照していたが、それだと cp-uac を消したり動かしたりした瞬間に
+## この像がビルドできなくなる。版はここで固定する。
+##
+## 0.21.0~1 は cp-uac に入っているものと同じ TinyUSB v0.21.0 (Espressif の
+## 派生)。つまり「実機で列挙が通ったことのある版」から動かしていない。
+##
+## ★ espressif/esp_tinyusb は使わない。あちらは記述子の組み立てと CDC の
+##   面倒まで見る層で、こちらは記述子を自前で持っている (IN エンドポイントを
+##   5 本に収めるため。DESIGN.md §4) ので、噛み合わない。
+dependencies:
+  idf: ">=5.0"
+  espressif/tinyusb:
+    version: "==0.21.0~1"
+
+## 段階 4: カメラ (GC0308)。
+##
+## ★ 版は固定する。2.1.7 は
+##   ・sccb-ng.c (新しい i2c_master ドライバ) を持っていて、
+##     既に開いている I2C ポート (内部 I2C = AXP2101 と同じバス) に
+##     相乗りできる (sccb_i2c_port + pin_sccb_sda = -1)
+##   ・ESP-IDF 6.0 の依存 (esp_driver_gpio / esp_driver_i2c / esp_driver_ledc)
+##     を CMakeLists.txt で明示している
+##   の 2 つが要るため。これより古い版は legacy の driver/i2c.h を使い、
+##   こちらの i2c_master と同じポートを取り合って壊れる。
+  espressif/esp32-camera:
+    version: "==2.1.7"

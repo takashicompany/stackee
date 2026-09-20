@@ -1,0 +1,127 @@
+{
+ "v": 1,
+ "size": 24,
+ "bpp": 2,
+ "packing": "rows top-down, tiles stacked vertically, pixel 0 in high bits, zlib",
+ "icons": {
+  "source": "https://github.com/google/material-design-icons",
+  "commit": "40a7a292a79d9394157e1ea24f83d52d5e17c556",
+  "license": "Apache-2.0",
+  "renderer": "rsvg-convert",
+  "tiles": [
+   {
+    "name": "blank"
+   },
+   {
+    "name": "battery_1",
+    "icon": "battery_1_bar",
+    "path": "src/device/battery_1_bar/materialicons/24px.svg",
+    "svg_sha256": "312ae58ef921e23f817d15b7d3f169864faa191225d2d1a8325c72cb8242d7e5"
+   },
+   {
+    "name": "battery_2",
+    "icon": "battery_3_bar",
+    "path": "src/device/battery_3_bar/materialicons/24px.svg",
+    "svg_sha256": "a145cca0175b33952138145aa728a96190636166e196aeb56667af1f90967758"
+   },
+   {
+    "name": "battery_3",
+    "icon": "battery_4_bar",
+    "path": "src/device/battery_4_bar/materialicons/24px.svg",
+    "svg_sha256": "980795166070a30c407420a90f5362a059e8bafd22d58c5cc066d80d61e6a09d"
+   },
+   {
+    "name": "battery_4",
+    "icon": "battery_6_bar",
+    "path": "src/device/battery_6_bar/materialicons/24px.svg",
+    "svg_sha256": "7636d7c676f70828534c2fc4f529dbd11b111b816c095f79058797601faf1acd"
+   },
+   {
+    "name": "battery_5",
+    "icon": "battery_full",
+    "path": "src/device/battery_full/materialicons/24px.svg",
+    "svg_sha256": "67f427dbaca071849dda06cbc2088097e27cb37a105611455ff25869a9656307"
+   },
+   {
+    "name": "battery_charging",
+    "icon": "battery_charging_full",
+    "path": "src/device/battery_charging_full/materialicons/24px.svg",
+    "svg_sha256": "340317309fc2418f9b9e0304251fbedb807286750d03e42013fddeecd9512437"
+   },
+   {
+    "name": "battery_unknown",
+    "icon": "battery_unknown",
+    "path": "src/device/battery_unknown/materialicons/24px.svg",
+    "svg_sha256": "a22278d0f5317bae4945d59614cd2356fbc8c819dfc64e2f984868b9138c7ba3"
+   },
+   {
+    "name": "volume_off",
+    "icon": "volume_off",
+    "path": "src/av/volume_off/materialicons/24px.svg",
+    "svg_sha256": "6a4654c0b1dc391fae376a996f760d58297ecd38ffc46e80e0dbfaf239adf9d1"
+   },
+   {
+    "name": "volume_1",
+    "icon": "volume_mute",
+    "path": "src/av/volume_mute/materialicons/24px.svg",
+    "svg_sha256": "8a0c5b179cb823f635bc0fa68bb9dc9a93be5abe9e49169c23d54f1ecb2d7dc5"
+   },
+   {
+    "name": "volume_2",
+    "icon": "volume_down",
+    "path": "src/av/volume_down/materialicons/24px.svg",
+    "svg_sha256": "c4fc7485c188804148bd94b0ea1b0a09e7d5c68ed6a540fe01b2499d69e32f3c"
+   },
+   {
+    "name": "volume_3",
+    "icon": "volume_up",
+    "path": "src/av/volume_up/materialicons/24px.svg",
+    "svg_sha256": "0042b73f6a3a8ea2f61fdf0b54c0d4e9281b3c20a18fd94aa5bcd54b16fd7f88"
+   },
+   {
+    "name": "wifi_on",
+    "icon": "wifi",
+    "path": "src/notification/wifi/materialicons/24px.svg",
+    "svg_sha256": "45c8ca5cd92527a8eceb017ab5ba85c746369e6ac500e745015de0911dbba71f"
+   },
+   {
+    "name": "wifi_search",
+    "icon": "wifi_find",
+    "path": "src/device/wifi_find/materialicons/24px.svg",
+    "svg_sha256": "51ff8c97856fd7e7ef7d69eb86658046bdada4248fc2087448d7fa898d6373a5"
+   },
+   {
+    "name": "wifi_off",
+    "icon": "wifi_off",
+    "path": "src/notification/wifi_off/materialicons/24px.svg",
+    "svg_sha256": "409f4c8406eb1631bcdf6c79d824a61510d1a2ebe6e03c235b0e5819d5e0c70d"
+   },
+   {
+    "name": "ble_connected",
+    "icon": "bluetooth_connected",
+    "path": "src/device/bluetooth_connected/materialicons/24px.svg",
+    "svg_sha256": "d77591ec18ba3125e9f0bc521c933f1fb59973aaf40c76083ba4fcb1f1bd300f"
+   },
+   {
+    "name": "ble_advertising",
+    "icon": "bluetooth_searching",
+    "path": "src/device/bluetooth_searching/materialicons/24px.svg",
+    "svg_sha256": "d55d9dc54366a3df37da5dc63cae6f8dc7edd9134c41fb570bca0bc7ea6e5e5a"
+   },
+   {
+    "name": "usb",
+    "icon": "usb",
+    "path": "src/device/usb/materialicons/24px.svg",
+    "svg_sha256": "3a3cf1ee41921a75503d1507896a35c160a8cc94639277a0db6861b8d17d2806"
+   }
+  ]
+ },
+ "font": {
+  "file": "status_h24.bdf",
+  "source": "http://openlab.ring.gr.jp/efont/",
+  "from": "h24.bdf",
+  "from_sha256": "650bb4fe1ed9e2ed5bf8d8afb9e10b2ec33e57d17aa817db82a19e4b43bdf3e6",
+  "range": "U+0020-U+007E",
+  "license": "BSD-3-Clause-like (/efont/)"
+ }
+}
