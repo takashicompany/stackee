@@ -630,26 +630,45 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual(len(audio), 7 * 16000 * 2 + len(s.SILENCE))
         self.assertEqual(self.lines(body), [['0', 'ひとつ目です。'], ['3650', 'ふたつ目です。']])
 
-    def test_pages_are_cut_at_fifteen_columns(self):
-        self.assertEqual(s.split_columns('あ' * 40), ['あ' * 15, 'あ' * 15, 'あ' * 10])
-        for page in s.split_columns('あ' * 40):
-            self.assertLessEqual(s.page_width(page), 15)
+    def test_a_long_clause_is_split_evenly_without_a_stub_page(self):
+        # 40 columns need three pages, so they come out 13 + 13 + 14, not 15 + 15 + 10.
+        self.assertEqual(s.split_columns('あ' * 40), ['あ' * 13, 'あ' * 13, 'あ' * 14])
+        self.assertEqual(s.split_columns('北の地域では雪が多く降る季節です。'),
+                         ['北の地域では雪が', '多く降る季節です。'])
+        self.assertEqual(s.split_columns('あ' * 15), ['あ' * 15])
+        for width in range(1, 121):
+            pages = s.split_columns('あ' * width)
+            with self.subTest(width=width):
+                self.assertEqual(''.join(pages), 'あ' * width)
+                self.assertEqual(len(pages), -(-width // 15))
+                self.assertLessEqual(max(map(s.page_width, pages)), 15)
+                self.assertLessEqual(max(map(s.page_width, pages))
+                                     - min(map(s.page_width, pages)), 1)
 
     def test_a_half_width_page_holds_thirty_characters(self):
         self.assertEqual(s.page_width('abc'), 1.5)
         self.assertEqual(s.page_width('あa'), 1.5)
-        self.assertEqual(s.split_columns('a' * 40), ['a' * 30, 'a' * 10])
+        self.assertEqual(s.split_columns('a' * 30), ['a' * 30])
+        self.assertEqual(s.split_columns('a' * 40), ['a' * 20, 'a' * 20])
         self.assertEqual(s.split_columns('あ' * 10 + 'ab' * 20),
                          ['あ' * 10 + 'ab' * 5, 'ab' * 15])
 
     def test_punctuation_never_opens_a_page(self):
-        pages = [page for _, page in s.subtitle_pages('あ' * 15 + '」' + 'い' * 20 + '。')]
-        self.assertEqual(pages[0], 'あ' * 14)
-        self.assertTrue(pages[1].startswith('あ」'), pages)
-        for page in pages:
-            self.assertNotIn(page[0], s.NO_PAGE_START)
-            self.assertLessEqual(s.page_width(page), 15)
-        self.assertEqual(''.join(pages), 'あ' * 15 + '」' + 'い' * 20 + '。')
+        # An even split would open the second page with the bracket, so it moves back one.
+        text = 'あ' * 12 + '」' + 'い' * 11
+        pages = [page for _, page in s.subtitle_pages(text)]
+        self.assertEqual(pages, ['あ' * 11, 'あ」' + 'い' * 11])
+        # The space before the bracket is dropped when the page is trimmed, so it counts too.
+        self.assertEqual([page for _, page in s.subtitle_pages('あ' * 12 + ' 」' + 'い' * 10)],
+                         ['あ' * 11, 'あ 」' + 'い' * 10])
+        for text in ('あ' * 15 + '」' + 'い' * 20 + '。', 'あ、' * 30, 'あ' * 12 + '」' + 'い' * 11,
+                     'あ' * 12 + ' 」' + 'い' * 10):
+            pages = [page for _, page in s.subtitle_pages(text)]
+            with self.subTest(text=text):
+                self.assertEqual(''.join(pages), text)
+                for page in pages:
+                    self.assertNotIn(page[0], s.NO_PAGE_START)
+                    self.assertLessEqual(s.page_width(page), 15)
 
     def test_clauses_start_their_own_page_with_the_comma_kept(self):
         pages = s.subtitle_pages('春です、夏です。')
@@ -679,6 +698,10 @@ class SubtitleTests(unittest.TestCase):
         for start, page in rows:
             self.assertLessEqual(s.page_width(page), 15)
             self.assertNotIn(page[0], s.NO_PAGE_START)
+        for (_, page), (_, following) in zip(rows, rows[1:] + [('', 'x' * 8)]):
+            # A page is only short when its clause is short, never as the stub of a long one.
+            self.assertTrue(s.page_width(page) > 3 or page.endswith(tuple(s.NO_PAGE_START))
+                            or s.page_width(page + following) <= 15, page)
         self.assertEqual(''.join(page for _, page in rows), reply[:len(''.join(
             page for _, page in rows))])
 

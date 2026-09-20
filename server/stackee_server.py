@@ -149,15 +149,30 @@ def page_width(text):
     return sum(.5 if " " <= character <= "~" else 1. for character in text)
 
 
+def opens_badly(text, index):
+    """True when the page starting at `index` would open with punctuation."""
+    rest = text[index:].lstrip()
+    return bool(rest) and rest[0] in NO_PAGE_START
+
+
 def split_columns(text, columns=SUBTITLE_COLUMNS):
-    """Cut text into pieces of at most `columns` columns, none opening with punctuation."""
+    """Cut text into pieces of at most `columns` columns, none opening with punctuation.
+
+    The pieces are as even as possible: what is left is always shared between the
+    fewest pages that can hold it, so a long clause never ends in a stub page.
+    """
     pieces, start = [], 0
     while start < len(text):
-        end, width = start, 0.
+        rest = page_width(text[start:])
+        target = rest / -(-rest // columns)   # ceil division: the fewest pages left
+        end, width, best = start, 0., None
         while end < len(text) and width + page_width(text[end]) <= columns:
             width += page_width(text[end])
             end += 1
-        while start + 1 < end < len(text) and text[end] in NO_PAGE_START:
+            if best is None or abs(width - target) < best[1]:
+                best = end, abs(width - target)
+        end = best[0]
+        while start + 1 < end < len(text) and opens_badly(text, end):
             end -= 1
         pieces.append(text[start:end])
         start = end
