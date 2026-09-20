@@ -1,0 +1,13 @@
+{
+  "builds": [
+    {
+      "file": "stackee-full.bin",
+      "profile": "full",
+      "version": "5639a53",
+      "size": 1391824,
+      "sha256": "3c4707fb1dd8ad63175d59f0ee6b479aa9741d93c493d2c482e897c3a2ceaf46",
+      "image_sha256": "f6ba59615656085122c443f44c782c73fdd70dfa9e95d5c5097391eaf51e02e0",
+      "date": "2026-09-20T22:48:11Z"
+    }
+  ]
+}

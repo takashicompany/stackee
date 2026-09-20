@@ -59,12 +59,28 @@ class NodeHidLink {
     this.verbose = !!opts.verbose;
     this.logs = [];
 
-    device.on('data', (buf) => this._onReport(buf));
-    device.on('error', (err) => {
-      if (!this._closing) process.stderr.write(`HID: ${err}\n`);
-    });
+    this._attach(device);
     this._sweep = setInterval(() => this.tracker.sweep(), 200);
     this._pollLoop = this._poll();
+  }
+
+  /**
+   * デバイスに聞き耳を付ける。
+   *
+   * ★ **'error' を必ず付けること。** node-hid の HID は EventEmitter なので、
+   *   聞き手のいない 'error' は Node の既定で**プロセスごと落とす**。
+   *   再起動を待っている間に device が消えると読みが失敗して 'error' が
+   *   飛ぶので、付け忘れると「commit のあと必ず落ちる」ことになる
+   *   (2026-09-21 に実機で踏んだ。waitAndReconnect が開き直した device に
+   *   'data' しか付けていなかった)。
+   */
+  _attach(device) {
+    this.device = device;
+    device.on('data', (buf) => this._onReport(buf));
+    device.on('error', (err) => {
+      // 再起動の前後で読み書きが失敗するのは想定どおり。黙って畳む。
+      if (!this._closing && this.verbose) process.stderr.write(`HID: ${err}\n`);
+    });
   }
 
   _onReport(buf) {
@@ -111,7 +127,11 @@ class NodeHidLink {
         try {
           await this._serial(() => this._write(rep));
         } catch (e) {
-          if (!this._closing) process.stderr.write(`受信が途切れました: ${e}\n`);
+          // ★ 再起動の前後では必ずここへ来る (デバイスが消えている)。
+          //   騒がない。開き直すのは waitAndReconnect の仕事。
+          if (!this._closing && this.verbose) {
+            process.stderr.write(`受信が途切れました: ${e}\n`);
+          }
           return;
         }
       }
@@ -121,17 +141,29 @@ class NodeHidLink {
 
   async request(cmd, args, opts) {
     const { line, promise } = this.tracker.create(cmd, args, opts);
+    // ★ **ここで先に聞き手を付けておく。** 下の書き込みが失敗すると
+    //   request() はその例外で終わるが、tracker に積んだ promise は
+    //   宙に浮いたまま残り、あとで sweep() が reject する。聞き手が
+    //   いない reject は Node 22 の既定でプロセスごと落とす
+    //   (2026-09-21、再起動を待っている最中に実機で踏んだ)。
+    promise.catch(() => {});
     const bytes = new TextEncoder().encode(line);
-    await this._serial(() => {
-      for (let off = 0; off < bytes.length; off += MAX_PAYLOAD) {
-        const chunk = bytes.subarray(off, Math.min(off + MAX_PAYLOAD, bytes.length));
-        const rep = new Uint8Array(REPORT_SIZE);
-        rep[0] = CMD_TX;
-        rep[1] = chunk.length;
-        rep.set(chunk, HEADER_SIZE);
-        this._write(rep);
-      }
-    });
+    try {
+      await this._serial(() => {
+        for (let off = 0; off < bytes.length; off += MAX_PAYLOAD) {
+          const chunk = bytes.subarray(off, Math.min(off + MAX_PAYLOAD, bytes.length));
+          const rep = new Uint8Array(REPORT_SIZE);
+          rep[0] = CMD_TX;
+          rep[1] = chunk.length;
+          rep.set(chunk, HEADER_SIZE);
+          this._write(rep);
+        }
+      });
+    } catch (e) {
+      // 書けなかった = このコマンドは届いていない。待たせない。
+      this.tracker.abortAll('送信に失敗しました');
+      throw e;
+    }
     return promise;
   }
 
@@ -155,20 +187,27 @@ class NodeHidLink {
     this.close();
     await sleep(1500);
     while (Date.now() < deadline) {
+      let probe = null;
       try {
-        const next = await openDevice();
-        if (next) {
-          this.device = next.device;
-          this._closing = false;
-          this._demux.reset();
-          this.device.on('data', (buf) => this._onReport(buf));
-          this._sweep = setInterval(() => this.tracker.sweep(), 200);
-          this._txChain = Promise.resolve();
-          this._pollLoop = this._poll();
-          return true;
-        }
+        probe = await openDevice();
       } catch (e) { /* まだ現れていない */ }
-      await sleep(500);
+      if (probe) {
+        // ★ 開けただけでは足りない。列挙の途中を掴むと、開けたのに
+        //   読み書きが失敗する時間帯がある。1 往復できて初めて「戻った」。
+        this._closing = false;
+        this._demux.reset();
+        this._txChain = Promise.resolve();
+        this._attach(probe.device);
+        this._sweep = setInterval(() => this.tracker.sweep(), 200);
+        this._pollLoop = this._poll();
+        try {
+          await this.request('hello', null, { timeoutMs: 2000 });
+          return true;
+        } catch (e) {
+          this.close();       // まだ答えない。畳んで次の周回に賭ける
+        }
+      }
+      await sleep(400);
     }
     return false;
   }
@@ -177,7 +216,19 @@ class NodeHidLink {
     this._closing = true;
     if (this._sweep) clearInterval(this._sweep);
     this._sweep = null;
-    try { this.device.close(); } catch (e) { /* 無視 */ }
+    const device = this.device;
+    if (device) {
+      // ★ 'data' は外すが、**'error' は外さずに「何もしない聞き手」へ
+      //   差し替える**。閉じたあとにも遅れて飛んでくることがあり、
+      //   聞き手が 1 人もいない EventEmitter の 'error' は
+      //   プロセスごと落とすため。
+      try { device.removeAllListeners('data'); } catch (e) { /* 無視 */ }
+      try {
+        device.removeAllListeners('error');
+        device.on('error', () => {});
+      } catch (e) { /* 無視 */ }
+      try { device.close(); } catch (e) { /* 無視 */ }
+    }
   }
 }
 
@@ -202,7 +253,10 @@ async function openDevice() {
       `usagePage 0x${USAGE_PAGE.toString(16)} / usage 0x${USAGE.toString(16)})。` +
       'USB に刺さっているか、像が full プロファイルかを確かめてください。');
   }
-  return { device: new hid.HID(found[0].path), info: found[0] };
+  const device = new hid.HID(found[0].path);
+  // ★ _attach するまでの隙間でも 'error' で落ちないように、先に 1 つ置く。
+  device.on('error', () => {});
+  return { device, info: found[0] };
 }
 
 function parseArgs(argv) {

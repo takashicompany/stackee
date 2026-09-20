@@ -20,6 +20,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 
 import { NodeHidLink } from '../firmware/tools/ota.mjs';
 import { OTA, embeddedSha, sha256Hex, runOta } from '../docs/js/ota.js';
@@ -41,9 +42,9 @@ function makeImage(size) {
  * node-hid の HID と同じ口 (on / write / close) を持つ偽のデバイス。
  * 中身は stackee_conhid.c + stackee_otacore.c の約束どおり。
  */
-class FakeHid {
+class FakeHid extends EventEmitter {
   constructor() {
-    this.handlers = { data: [], error: [] };
+    super();
     this.closed = false;
     this.writes = 0;
     /** ホスト → デバイスの JSON 行を組み立てる (0x1E … \n) */
@@ -62,14 +63,15 @@ class FakeHid {
     this.writeLag = 8192;
   }
 
-  on(kind, cb) { (this.handlers[kind] || []).push(cb); }
+  // ★ node-hid の HID は EventEmitter。**聞き手のいない 'error' は
+  //   プロセスごと落とす**ので、そこまで真似る。
   close() { this.closed = true; }
 
   _emit(report) {
     // 実機と同じで、返事は次のターンに来る。
     setImmediate(() => {
       if (this.closed) return;
-      for (const cb of this.handlers.data) cb(Buffer.from(report));
+      this.emit('data', Buffer.from(report));
     });
   }
 
@@ -309,6 +311,52 @@ test('Node の転送層: 転送で失敗したら ota.abort を撃ってから�
   try {
     await assert.rejects(runOta(link, img, { commit: false, maxResyncs: 2 }));
     assert.equal(dev.ota.aborts, 1, 'ota.abort を撃っていない');
+  } finally {
+    link.close();
+  }
+});
+
+test("Node の転送層: デバイスの 'error' で落ちない", async () => {
+  const dev = new FakeHid();
+  const link = new NodeHidLink(dev);
+  try {
+    // ★ 聞き手が付いていなければ、この 1 行でプロセスごと落ちる。
+    //   再起動を待っている間に必ず飛んでくるので、ここは譲れない。
+    assert.doesNotThrow(() => dev.emit('error', new Error('hid_read_timeout')));
+    const info = await link.request('app.info', null, { timeoutMs: 5000 });
+    assert.equal(info.ok, 1, "'error' のあとも話せること");
+  } finally {
+    link.close();
+  }
+  // 閉じたあとに遅れて飛んでくる 'error' でも落ちない。
+  assert.doesNotThrow(() => dev.emit('error', new Error('late')));
+});
+
+test("Node の転送層: close() は 'data' だけ外し、'error' は残す", () => {
+  const dev = new FakeHid();
+  const link = new NodeHidLink(dev);
+  assert.ok(dev.listenerCount('error') > 0);
+  assert.ok(dev.listenerCount('data') > 0);
+  link.close();
+  // ★ 'error' の聞き手を 0 にしてはいけない。閉じたあとに遅れて飛んでくる
+  //   'error' でプロセスごと落ちる。
+  assert.ok(dev.listenerCount('error') > 0, "close() が 'error' の聞き手を消した");
+  assert.equal(dev.listenerCount('data'), 0);
+  assert.equal(dev.closed, true);
+});
+
+test('Node の転送層: 書けなかった要求は宙に浮かせない', async () => {
+  const dev = new FakeHid();
+  const link = new NodeHidLink(dev);
+  dev.write = () => { throw new Error('IOHIDDeviceSetReport failed'); };
+  try {
+    // ★ ここで投げるだけでなく、tracker に積んだ promise にも聞き手が
+    //   付いていること。付いていないと、200 ms 後の sweep() の reject が
+    //   「unhandled rejection」になってプロセスごと落ちる。
+    await assert.rejects(link.request('app.info', null, { timeoutMs: 300 }));
+    assert.equal(link.tracker.pendingCount, 0, '要求が宙に浮いている');
+    // sweep が回るだけの時間を置いて、落ちないことを確かめる。
+    await new Promise((r) => setTimeout(r, 500));
   } finally {
     link.close();
   }

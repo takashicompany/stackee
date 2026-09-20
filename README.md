@@ -414,7 +414,13 @@ USB HID でつないだ場合も、**この行そのものは 1 バイトも変�
 cd firmware/tools && npm install                     # 初回だけ (node-hid)
 node firmware/tools/ota.mjs --info                   # いま載っている版
 node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin --no-commit
+node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin   # 切り替えまで
 ```
+
+**実測 (2026-09-21、実機)**: 1,391,824 B を **54〜58 秒 (23.3〜25.0 KB/s)**、
+送り直し 0 回。転送中も入力タスクは 1 ms 周期で回り続け、止まるのは
+フラッシュ 1 セクタを消すあいだの約 10 ms だけ。再起動で USB の面が無いのは
+約 1.2 秒。詳しくは `firmware/RESULTS.md` の「アプリ内 OTA」の節。
 
 ---
 
