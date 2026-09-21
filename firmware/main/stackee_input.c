@@ -30,6 +30,9 @@ static const char *TAG = "input";
 // STK_MIC_KEY を押しているか。入力タスクが書き、ui タスクが読む。
 static _Atomic bool s_mic_held;
 
+// key.inject を「待たずに」始めた。終わったら入力タスクが待機へ戻す。
+static bool s_inject_async;
+
 #define INPUT_TASK_STACK 6144
 #define INPUT_TASK_PRIO  (configMAX_PRIORITIES - 2)  // 最高優先度 (IDLE より上)
 #define INPUT_TASK_CPU   1
@@ -169,8 +172,11 @@ static void inject_step(void) {
             }
             // 押下レポートが出てから hold_ms 数える。出ないまま 500 ms
             // 過ぎたら諦めて離す (押しっぱなしにしない)。
+            // ★ 諦めるのは **レポートが出ていないときだけ**。2026-09-21 まで
+            //   押下が出ていても 500 ms で離していたので、hold_ms が 500 を
+            //   超えると黙って短くなっていた (1500 ms が約 600 ms になった)。
             int64_t since = esp_timer_get_time() - s_inject_t0;
-            bool timeout = since > 500000;
+            bool timeout = (s_inject_press_at == 0) && since > 500000;
             bool held_enough = s_inject_press_at != 0 &&
                                (esp_timer_get_time() - s_inject_press_at) >=
                                    (int64_t)s_inject_hold_ms * 1000;
@@ -199,6 +205,12 @@ static void inject_step(void) {
                 s_inject_result.sent_ble = stats.sent_ble - s_inject_ble_before;
                 s_inject_result.ok = s_inject_result.press_us != 0;
                 s_inject_state = INJECT_DONE;
+                // ★ 待たずに始めたものは、誰も結果を取りに来ない。
+                //   ここで待機へ戻さないと次の注入ができない。
+                if (s_inject_async) {
+                    s_inject_async = false;
+                    s_inject_state = INJECT_IDLE;
+                }
             }
             break;
         }
@@ -207,20 +219,41 @@ static void inject_step(void) {
     }
 }
 
-bool stackee_input_inject(uint16_t keycode, uint32_t hold_ms,
-                          stackee_inject_result_t *out) {
-    if (out == NULL) {
-        return false;
-    }
+// 押し始める (どちらの口もここを通る)。
+// ★ 上限は 3000 ms。表情 (聞き取り中は 250 ms 送りの 3 コマ) を外から
+//   見るには 1 秒では足りない。普段の遅延測定は 20〜30 ms のまま。
+static bool inject_begin(uint16_t keycode, uint32_t hold_ms) {
     if (s_inject_state != INJECT_IDLE) {
         return false;       // まだ前のが終わっていない
     }
-    if (hold_ms == 0 || hold_ms > 1000) {
+    if (hold_ms == 0 || hold_ms > 3000) {
         hold_ms = 30;
     }
     s_inject_keycode = keycode;
     s_inject_hold_ms = hold_ms;
     s_inject_state = INJECT_REQUESTED;
+    return true;
+}
+
+bool stackee_input_inject_begin(uint16_t keycode, uint32_t hold_ms) {
+    if (!inject_begin(keycode, hold_ms)) {
+        return false;
+    }
+    s_inject_async = true;      // 終わったら入力タスクが待機へ戻す
+    return true;
+}
+
+bool stackee_input_inject(uint16_t keycode, uint32_t hold_ms,
+                          stackee_inject_result_t *out) {
+    if (out == NULL) {
+        return false;
+    }
+    if (!inject_begin(keycode, hold_ms)) {
+        return false;
+    }
+    if (hold_ms == 0 || hold_ms > 3000) {
+        hold_ms = 30;           // inject_begin と同じ丸め (待ち時間の計算用)
+    }
 
     // 入力タスクが進めるのを待つ。押下 500ms + 保持 + 解放 500ms + 余裕。
     for (int i = 0; i < (int)(hold_ms + 1200); i++) {

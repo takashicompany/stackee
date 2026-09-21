@@ -56,6 +56,11 @@ bool stackee_input_inject(uint16_t keycode, uint32_t hold_ms,
     snprintf(out->dest, sizeof(out->dest), "BLE");
     return true;
 }
+// `{"wait":false}` の代役 (押し始めてすぐ返る道)。
+bool stackee_input_inject_begin(uint16_t keycode, uint32_t hold_ms){
+    (void)keycode; (void)hold_ms;
+    return true;
+}
 static stackee_assets_info_t s_ai = {.mounted=true,.manifest_ok=true,.version=1,.size=240,.faces=32};
 const stackee_assets_info_t *stackee_assets_info(void){return &s_ai;}
 // 段階 3 の口。ここでも見たいのは文字列の組み立てだけなので固定値を返す。
@@ -191,6 +196,9 @@ int main(void) {
     reply_key_inject(13, "{\"id\":13,\"cmd\":\"key.inject\",\"kc\":\"LANG1\",\"hold_ms\":50}");
     emit();
     reply_key_inject(14, "{\"id\":14,\"cmd\":\"key.inject\",\"kc\":\"NOPE\"}");
+    // `"wait":false` — 押し始めてすぐ返る道 (遅延は返らない)。
+    reply_key_inject(15, "{\"id\":15,\"cmd\":\"key.inject\",\"kc\":32264,"
+                         "\"hold_ms\":1500,\"wait\":false}");
     // ★ 文字列の取り出し。stackee_console_client.py は ensure_ascii=True で
     //   送るので、日本語の SSID は \uXXXX で来る。パスワードに `"` が入る
     //   こともある。枠の外へ出すのでホスト側では「ログ」として読める。

@@ -614,6 +614,8 @@ static void reply_log_tail(long id, const char *request) {
 // `{"cmd":"key.inject"}`                       既定 (F24 を 30 ms)
 // `{"cmd":"key.inject","kc":"F13","hold_ms":50}`
 // `{"cmd":"key.inject","kc":115}`              数値でも指定できる
+// `{"cmd":"key.inject","kc":32264,"hold_ms":1500,"wait":false}`
+//                                              押し始めてすぐ返る (最大 3000 ms)
 //
 // ★ 既定を F24 にしてあるのは、**ホスト側で何も起きないキー**だから。
 //   検証のたびにエディタへ文字が入ったりしない。
@@ -663,6 +665,22 @@ static void reply_key_inject(long id, const char *request) {
     const char *at = value_of(request, "hold_ms");
     if (at != NULL) {
         hold_ms = strtol(at, NULL, 10);
+    }
+
+    // ★ `"wait":false` … 押し始めて **すぐ返る**。押している最中に
+    //   `ui.status` や `lcd.crc` を読みたいとき (STK_MIC_KEY の表情の確認)
+    //   に使う。遅延は返らないので、遅延を測るときは既定のまま。
+    if (!stackee_console_bool(request, "wait", true)) {
+        bool started = stackee_input_inject_begin((uint16_t)keycode,
+                                                  (uint32_t)hold_ms);
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "{\"id\":%ld,\"ok\":%s,\"started\":%s,\"kc\":%u,"
+                 "\"hold_ms\":%ld,\"wait\":false}",
+                 id, started ? "1" : "0", started ? "true" : "false",
+                 keycode, hold_ms);
+        send_frame(buf);
+        return;
     }
 
     stackee_inject_result_t result;

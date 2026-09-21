@@ -86,9 +86,9 @@ class ConsoleOutputTest(unittest.TestCase):
         self.assertEqual(frame['password'], 'a"b\\c')
 
     def test_every_reply_is_a_readable_frame(self):
-        # hello / status / log.tail / key.inject x3 / 文字列の取り出し /
-        # unsupported / badjson / status(目録が読めない) の 10 個。
-        self.assertEqual(len(self.frames), 24)
+        # hello / status / log.tail / key.inject x4 / 文字列の取り出し /
+        # unsupported / badjson / status(目録が読めない) の 11 個。
+        self.assertEqual(len(self.frames), 25)
         self.assertEqual(self.logs, '', '枠の外に漏れている')
 
     def test_hello_matches_the_current_protocol(self):
@@ -168,6 +168,23 @@ class ConsoleOutputTest(unittest.TestCase):
         out = self.frames[4]
         self.assertEqual(out['kc'], 0x90)        # LANG1 (JIS)
         self.assertEqual(out['hold_ms'], 50)
+
+    def test_key_inject_can_start_without_waiting(self):
+        """`"wait":false` は押し始めてすぐ返る (遅延は返らない)。
+
+        ★ これが無いと、押している最中に `ui.status` や `lcd.crc` を
+          読めない (コンソールのタスクが hold_ms のあいだ止まるため)。
+          STK_MIC_KEY の表情を実機で確かめるのに要る。
+        """
+        frame = [f for f in self.frames if f.get('id') == 15][0]
+        self.assertEqual(frame['ok'], 1)
+        self.assertIs(frame['started'], True)
+        self.assertIs(frame['wait'], False)
+        self.assertEqual(frame['kc'], 0x7E08)       # STK_MIC_KEY
+        self.assertEqual(frame['hold_ms'], 1500)
+        # 遅延は返さない (測るなら既定の待つほうを使う)。
+        self.assertNotIn('press_ms', frame)
+        self.assertNotIn('release_ms', frame)
 
     def test_key_inject_refuses_an_unknown_name(self):
         self.assertEqual(self.frames[5],

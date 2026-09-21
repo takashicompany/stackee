@@ -471,7 +471,7 @@ factory = 0x410000」と思い込み、ビルドの最後に誤った書き込�
 ```
 python3 firmware/tools/test_keyseq_host.py     # 打鍵列テスト (33 件)
 python3 firmware/tools/test_gen_keymap.py      # 配列生成 (21 件)
-python3 firmware/tools/test_console_host.py    # コンソールの組み立て (25 件)
+python3 firmware/tools/test_console_host.py    # コンソールの組み立て (26 件)
 python3 firmware/tools/test_tools.py           # 道具・HID 記述子・ROM・nvs・USB 復帰 (67 件)
 python3 firmware/tools/test_hid_dest_host.py   # 送信先の選び方 (7 件)
 python3 firmware/tools/test_hid_report_map.py  # 記述子を esp_hid のパーサに通す (5 件)
@@ -489,7 +489,7 @@ python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **447 件**。どれも実機に触らない。
+全部で **448 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
