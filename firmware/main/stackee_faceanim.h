@@ -64,7 +64,7 @@ typedef struct {
 typedef struct {
     bool speaking;              // stackee_halfduplex の再生中
     bool talk_recording;        // 録音中
-    // ★ PC 側のプッシュトゥトーク (STK_MIC_KEY = F13) を押している。
+    // ★ PC 側のプッシュトゥトーク (MIC(kc)。既定は MIC(KC_F13)) を押している。
     //   本体は録音していないが、**人は喋っている**ので同じ顔にする。
     //   新しい状態は作らない (listening をそのまま使う)。
     bool mic_held;

@@ -9,6 +9,7 @@
 #include "host.h"
 #include "keyboard.h"
 #include "quantum.h"
+#include "stackee_keymap_migrate.h"
 #include "stackee_report_queue.h"
 
 host_driver_t *stackee_qmk_host_driver(void);
@@ -20,6 +21,9 @@ void stackee_qmk_init(void) {
     host_set_driver(stackee_qmk_host_driver());
     // keyboard_init() の中で matrix_init / eeconfig_init / via_init が走る。
     keyboard_init();
+    // ★ そのあと。保存済みの配列 (VIA で変えたもの) に、既定を変えたぶんを
+    //   当てる。ここより前だと dynamic_keymap がまだ用意できていない。
+    stackee_keymap_migrate();
 }
 
 void stackee_qmk_task(void) {

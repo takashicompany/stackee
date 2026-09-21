@@ -116,9 +116,9 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 「SAFE_RANGE 以降」と書いているが、VIA / Remap に名前を出すには
 `QK_KB_0` 側でなければならないので、そちらに合わせてある。
 `process_record_kb()` が受け止めて **`false` を返す** (= HID には出さない)。
-★ **例外が 1 つだけ: `STK_MIC_KEY`。** PC 側のプッシュトゥトークに使っている
-キーなので、**`KC_F13` を普通のキーとしてホストへ送る** (`register_code` /
-`unregister_code`)。足したのは「押している間だけ顔を聞き取り中にする」ことだけ。
+★ **例外が 1 つだけ: `MIC(kc)`。** 中のキーを**普通のキーとしてホストへ送る**
+(`register_code` / `unregister_code`)。足したのは「押している間だけ顔を
+聞き取り中にする」ことだけ。
 
 | 並び | C の名前 | KMK | 中身が入る段階 |
 |---|---|---|---|
@@ -130,13 +130,39 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 | 5 | `STK_CAMERA` | (未使用) | 4 |
 | 6 | `STK_TOUCH_SCROLL` | `KC.TOUCH_SCROLL` | 4 (タッチパッド) |
 | 7〜 | `STK_MT_n` | (上の §3) | 済 |
-| 8 | `STK_MIC_KEY` | (KMK 側は `KC.F13` のまま) | 済 (F13 を送りつつ顔を変える) |
+| 8〜19 | `MIC_F13`〜`MIC_F24` | (KMK 側は `KC.F13` のまま) | 済 (`MIC(kc)` の名前付きの入口) |
+
+### `MIC(kc)` — 顔を変える包み
+
+`LT(layer, kc)` / `MT(mod, kc)` と同じ発想で、**中の基本キーコードを 8 bit
+そのまま持つ**連続領域。押している間だけ顔が `listening` になり、中のキーは
+素のキーとまったく同じレポートで出る。
+
+```
+MIC(kc) = 0x7F00 | (kc & 0xFF)        kc は 0x04..0xFF (修飾なしの基本キー)
+MIC(KC_F13) = 0x7F68
+```
+
+★ **置き場は `QK_USER` (0x7E40..0x7FFF) の上半分。** `QK_KB` は
+0x7E00..0x7E3F の **64 個しかなく**、VIA の `customKeycodes` はその並び順で
+番号が決まるので、256 個の連続領域はそこに入らない。そこで:
+
+* **VIA / Remap の `Custom` タブ** … `MIC_F13`〜`MIC_F24` の 12 個を
+  `customKeycodes` の末尾 (0x7E08..0x7E13) に置く。本体が `MIC(F13..F24)` に
+  読み替える。
+* **それ以外のキー** … Remap の「Any」に `0x7F00 | kc` を 16 進で入れる
+  (例: `MIC(KC_A)` = `0x7F04`)。
 
 ★ **新しい独自キーは `STK_MT_n` の "うしろ" に足す。** VIA の
 `customKeycodes` は並び順がそのままキーコードの番号になり、その番号は
 **VIA で変えた配列として NVS に保存されている**。途中に足すとうしろが
 1 つずつずれて、保存済みの配列の意味が黙って変わる。
 `tools/gen_keymap.py` の `TRAILING_CUSTOM_KEYS` がその置き場。
+
+★ **既定配列を変えたら「移行」を足す。** VIA で配列を変えた本体は
+保存済みの配列で動くので、**新しい既定は黙って無視される**
+(2026-09-21 に実機で踏んだ。README §10-1)。
+`main/qmk_port/stackee_keymap_migrate.c` の表に 1 段足すこと。
 
 `KC.RESET` だけは独自キーにしていない。QMK の `QK_BOOT` をそのまま使い、
 行き先を **ROM の USB ダウンロードモード** にしてある

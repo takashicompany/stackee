@@ -5,8 +5,7 @@
 //    出さない** — ホスト側から見て存在しないキーである、というのが
 //    KMK 版と同じ振る舞い。中身 (録音・音量・BLE) は段階 3 / 4。
 //
-//    ★ **例外が 1 つだけ: STK_MIC_KEY。** これは PC 側のプッシュトゥトークに
-//      使っているキー (F13) で、**F13 は今までどおりホストへ送る**。
+//    ★ **例外が 1 つだけ: MIC(kc)。** 中のキーは**そのままホストへ送る**。
 //      足したのは「押している間だけ本体の顔を聞き取り中にする」ことだけ。
 //      ホストから見た振る舞いを変えないのが肝なので、送るのは
 //      register_code/unregister_code — 普通のキーとまったく同じ道。
@@ -28,9 +27,14 @@
 
 #define STACKEE_EXT_MT_MAX 8
 
-// STK_MIC_KEY がホストへ送るキー。元の既定配列と同じ F13
-// (ユーザーが PC 側のプッシュトゥトークに使っている)。
-#define STACKEE_MIC_KEY_CODE KC_F13
+// VIA の名前付きの入口 (MIC_F13..MIC_F24) を MIC(kc) に直す。
+// 入口でなければそのまま返す。
+static uint16_t mic_resolve(uint16_t keycode) {
+    if (keycode >= STACKEE_MIC_ALIAS_FIRST && keycode <= STACKEE_MIC_ALIAS_LAST) {
+        return MIC(STACKEE_MIC_ALIAS_KC0 + (keycode - STACKEE_MIC_ALIAS_FIRST));
+    }
+    return keycode;
+}
 
 typedef struct {
     bool     pending;       // 押されたが tap/hold が決まっていない
@@ -77,7 +81,8 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
     // ここより先へ進むキー (= 普通のキー) が押されたら、待機中の
     // 修飾つき HoldTap を割り込みとして扱う。
     if (record->event.pressed &&
-        !(keycode >= STACKEE_KEYCODE_FIRST && keycode <= STACKEE_KEYCODE_LAST)) {
+        !(keycode >= STACKEE_KEYCODE_FIRST && keycode <= STACKEE_KEYCODE_LAST) &&
+        !(keycode >= STACKEE_MIC_FIRST && keycode <= STACKEE_MIC_LAST)) {
         ext_mt_interrupt();
     }
 
@@ -103,13 +108,16 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
         return false;
     }
 
-    // ★ STK_MIC_KEY — 顔を変えつつ、F13 は普通のキーとして送る。
-    if (keycode == STK_MIC_KEY) {
+    // ★ MIC(kc) — 顔を変えつつ、中のキーは普通のキーとして送る。
+    //   VIA の名前付きの入口 (MIC_F13..) もここで同じ形に直す。
+    uint16_t mic = mic_resolve(keycode);
+    if (mic >= STACKEE_MIC_FIRST && mic <= STACKEE_MIC_LAST) {
+        uint8_t inner = STACKEE_MIC_INNER(mic);
         if (record->event.pressed) {
             s_custom_presses++;
-            register_code(STACKEE_MIC_KEY_CODE);
+            register_code(inner);
         } else {
-            unregister_code(STACKEE_MIC_KEY_CODE);
+            unregister_code(inner);
         }
         stackee_qmk_custom_key(STACKEE_KEY_MIC, record->event.pressed);
         return false;   // 送るのはこちらで済ませた

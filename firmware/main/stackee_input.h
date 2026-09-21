@@ -24,7 +24,7 @@ typedef struct {
 
 void stackee_input_stats(stackee_input_stats_t *out);
 
-// STK_MIC_KEY (PC 側のプッシュトゥトークに使っている F13) を押しているか。
+// MIC(kc) のキー (既定は右下の MIC(KC_F13)) を押しているか。
 // ★ 画面 (ui タスク) が毎周読む。読むだけ / 書くのは入力タスクだけの
 //   atomic な印 1 つなので、打鍵の道には何も足さない。
 bool stackee_input_mic_held(void);
@@ -58,6 +58,6 @@ bool stackee_input_inject(uint16_t keycode, uint32_t hold_ms,
 // 同じものを **待たずに** 始める。始められたら true。
 // ★ 押している最中の本体を外から覗くための口。上のものはコンソールの
 //   タスクを hold_ms のあいだ止めてしまうので、その間 `ui.status` や
-//   `lcd.crc` を読めない (STK_MIC_KEY の表情を確かめるのに要る)。
+//   `lcd.crc` を読めない (MIC(kc) の表情を確かめるのに要る)。
 //   結果 (遅延など) は返らない。遅延を測るときは上のものを使うこと。
 bool stackee_input_inject_begin(uint16_t keycode, uint32_t hold_ms);

@@ -17,7 +17,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
         /* row 0 */ { LT(4, KC_Q)           , KC_W                  , KC_E                  , LT(3, KC_R)           , KC_T                  , KC_Y                  , KC_U                  , KC_I                  , KC_O                  , KC_P },
         /* row 1 */ { KC_A                  , KC_S                  , KC_D                  , KC_F                  , KC_G                  , KC_H                  , KC_J                  , LT(3, KC_K)           , KC_L                  , KC_ENTER },
         /* row 2 */ { MT(MOD_LSFT, KC_Z)    , MT(MOD_LGUI, KC_X)    , KC_C                  , KC_V                  , KC_B                  , KC_N                  , KC_M                  , KC_COMMA              , MT(MOD_LCTL, KC_DOT)  , KC_BACKSPACE },
-        /* row 3 */ { STK_VOLDN             , STK_VOLUP             , KC_LEFT_GUI           , MT(MOD_LALT, KC_LANGUAGE_2), MT(MOD_LSFT, KC_TAB)  , LT(1, KC_LANGUAGE_1)  , LT(1, KC_LANGUAGE_1)  , KC_RIGHT_GUI          , KC_NO                 , STK_MIC_KEY },
+        /* row 3 */ { STK_VOLDN             , STK_VOLUP             , KC_LEFT_GUI           , MT(MOD_LALT, KC_LANGUAGE_2), MT(MOD_LSFT, KC_TAB)  , LT(1, KC_LANGUAGE_1)  , LT(1, KC_LANGUAGE_1)  , KC_RIGHT_GUI          , KC_NO                 , MIC(KC_F13) },
         /* row 4 */ { KC_NO                 , KC_NO                 , KC_NO                 , KC_NO                 , STK_TOUCH_SCROLL      , STK_TALK              , LT(2, KC_SPACE)       , KC_NO                 , KC_NO                 , KC_NO },
     },
     // ---- レイヤー 1: 記号 (JIS) ----

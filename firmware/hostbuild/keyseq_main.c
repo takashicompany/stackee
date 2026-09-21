@@ -26,6 +26,8 @@
 //   MOUSE <...>                               マウス
 //   RAW <hex...>                              Raw HID の応答
 //   CUSTOM <名前> <1|0>                       独自キー (HID には出ない)
+//   KC <層> <行> <列> 0xXXXX                  getkc の答え
+//   MIGLEVEL <番号> / MIGRATE changed=N level=M  既定配列の移行
 //   BOOTLOADER / RESET                        QK_BOOT の行き先
 //
 // ★ ここで通っても実機で動く保証にはならない。見ているのは
@@ -39,6 +41,8 @@
 #include "quantum.h"
 #include "dynamic_keymap.h"
 #include "raw_hid.h"
+#include "eeconfig.h"
+#include "stackee_keymap_migrate.h"
 #include "stackee_report_queue.h"
 
 // ---------------------------------------------------------------------------
@@ -196,6 +200,31 @@ int main(void) {
             // VIA と同じ道 (dynamic keymap) で差し替える。実機で VIA から
             // 割り当てたのと同じ状態を作るため。
             dynamic_keymap_set_keycode(0, (uint8_t)row, (uint8_t)col, kc);
+        } else if (strcmp(cmd, "getkc") == 0) {
+            int layer = atoi(strtok(NULL, " \t\r\n"));
+            int row = atoi(strtok(NULL, " \t\r\n"));
+            int col = atoi(strtok(NULL, " \t\r\n"));
+            printf("KC %d %d %d 0x%04X\n", layer, row, col,
+                   dynamic_keymap_get_keycode((uint8_t)layer, (uint8_t)row,
+                                              (uint8_t)col));
+        } else if (strcmp(cmd, "setkc") == 0) {
+            int      layer = atoi(strtok(NULL, " \t\r\n"));
+            int      row = atoi(strtok(NULL, " \t\r\n"));
+            int      col = atoi(strtok(NULL, " \t\r\n"));
+            uint16_t kc = (uint16_t)strtoul(strtok(NULL, " \t\r\n"), NULL, 0);
+            dynamic_keymap_set_keycode((uint8_t)layer, (uint8_t)row,
+                                       (uint8_t)col, kc);
+        } else if (strcmp(cmd, "miglevel") == 0) {
+            char *arg = strtok(NULL, " \t\r\n");
+            if (arg != NULL) {
+                eeconfig_update_kb((uint32_t)strtoul(arg, NULL, 0));
+            }
+            printf("MIGLEVEL %lu\n",
+                   (unsigned long)stackee_keymap_migration_level());
+        } else if (strcmp(cmd, "migrate") == 0) {
+            int changed = stackee_keymap_migrate();
+            printf("MIGRATE changed=%d level=%lu\n", changed,
+                   (unsigned long)stackee_keymap_migration_level());
         } else if (strcmp(cmd, "mark") == 0) {
             char *rest = strtok(NULL, "\r\n");
             printf("MARK %s\n", rest ? rest : "");

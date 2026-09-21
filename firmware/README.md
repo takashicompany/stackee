@@ -469,8 +469,8 @@ factory = 0x410000」と思い込み、ビルドの最後に誤った書き込�
 ## 4. 実機に触らない確認
 
 ```
-python3 firmware/tools/test_keyseq_host.py     # 打鍵列テスト (33 件)
-python3 firmware/tools/test_gen_keymap.py      # 配列生成 (21 件)
+python3 firmware/tools/test_keyseq_host.py     # 打鍵列テスト・既定配列の移行 (44 件)
+python3 firmware/tools/test_gen_keymap.py      # 配列生成 (22 件)
 python3 firmware/tools/test_console_host.py    # コンソールの組み立て (26 件)
 python3 firmware/tools/test_tools.py           # 道具・HID 記述子・ROM・nvs・USB 復帰 (67 件)
 python3 firmware/tools/test_hid_dest_host.py   # 送信先の選び方 (7 件)
@@ -489,7 +489,7 @@ python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **448 件**。どれも実機に触らない。
+全部で **460 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -513,8 +513,11 @@ python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 * `prefer_hold` のキーで他キー割り込み / `prefer_hold` なしのキーで割り込まない
 * 同じキーコードで設定が違う 2 つのキー (レイヤー 0 の 36 と 37) の区別
 * JIS の LANG1 / LANG2 が 0x90 / 0x91 で出ること
-* 独自キーが HID に 1 バイトも漏れないこと。**ただし `STK_MIC_KEY` だけは
-  `KC_F13` を送る** — 素の F13 を押して離したのと 1 バイトも違わないこと
+* 独自キーが HID に 1 バイトも漏れないこと。**ただし `MIC(kc)` だけは
+  中のキーを送る** — 素のキーを押して離したのと 1 バイトも違わないこと
+  (F13 のほか A / W / Space / → でも確かめる)
+* 既定配列の**移行** — 旧い既定なら差し替え、ユーザーが変えていれば触らず、
+  二度目は何もしないこと
 * FIFO 溢れで押下中を全解放すること
 * VIA で配列を書き換えたら実際に出る文字が変わり、NVS への書き戻しが
   1 回にまとまること
@@ -722,8 +725,12 @@ python3 firmware/kmk/tools/stackee_console_client.py status
 そのままキーコードの番号 (`0x7E00` から) になり、**VIA で変えた配列として
 NVS に保存されている**。途中に足すとうしろが 1 つずつずれ、保存済みの配列の
 意味が黙って変わる。置き場は `tools/gen_keymap.py` の
-`TRAILING_CUSTOM_KEYS` (2026-09-21 の `STK_MIC_KEY` がそれ。
+`TRAILING_CUSTOM_KEYS` (2026-09-21 の `MIC_F13`〜`MIC_F24` がそれ。
 `STK_MT_0` = `0x7E07` は動かしていない)。
+
+★ **既定配列を変えたら「移行」を足す。** 書き換えた本体は保存済みの配列で
+動くので、**新しい既定は黙って無視される**。
+`main/qmk_port/stackee_keymap_migrate.c` の表に 1 段足すこと (§10-1)。
 
 ### 配列を変えたら
 
@@ -966,7 +973,7 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 |---|---|---|---|
 | 1 | `speaking` | `speaking` | 返答の再生中 (audio) |
 | 2 | `talk_recording` | `listening` | STK_TALK を押している (本体が録音中) |
-| 3 | **`mic_held`** | **`listening`** | **STK_MIC_KEY (PC 側のプッシュトゥトーク) を押している (2026-09-21)** |
+| 3 | **`mic_held`** | **`listening`** | **`MIC(kc)` のキー (PC 側のプッシュトゥトーク) を押している (2026-09-21)** |
 | 4 | `talk_busy` | `thinking` | 送信・返答待ち・受信 |
 | 5 | `camera_active` (と撮影後 1500 ms) | `camera` | カメラ |
 | 6 | 起動から 2 秒以内 | `awake` | — |
@@ -979,6 +986,56 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 毎周読むだけ。**打鍵の道には何も足していない。**
 
 `ui.status` に `mic_held` が出る。
+
+#### `MIC(kc)` — 任意のキーを包む
+
+`LT(layer, kc)` / `MT(mod, kc)` と同じ発想。**中の基本キーコードを 8 bit
+そのまま持つ**ので、どのキーでも包める。
+
+```
+MIC(kc) = 0x7F00 | (kc & 0xFF)        kc は 0x04..0xFF (修飾なしの基本キー)
+MIC(KC_F13) = 0x7F68                  既定配列の右下 (レイヤー 0 / row 3 / col 9)
+```
+
+押下で中のキーを `register_code`、離しで `unregister_code` — **ホストから
+見た振る舞いは素のキーとまったく同じ**。押している間だけ `mic_held` が立つ。
+
+| 使い方 | どうするか |
+|---|---|
+| VIA / Remap の `Custom` タブ | **`MIC_F13`〜`MIC_F24`** の 12 個が並ぶ。よく使う F キーはここから選べる |
+| それ以外のキー | Remap の **「Any」** に `0x7F00 \| kc` を 16 進で入れる (例: `MIC(KC_A)` = `0x7F04`) |
+
+★ **なぜ 2 通りあるのか。** VIA の `customKeycodes` は並び順がそのまま
+キーコードの番号 (`QK_KB_0` = 0x7E00 から) になり、`QK_KB` は
+**0x7E00..0x7E3F の 64 個しかない**。「MIC + 8 bit」の 256 個の連続領域は
+そこに入らないので、領域は `QK_USER` (0x7E40..0x7FFF) の上半分に置き、
+VIA からは 12 個の名前付きの入口を通す (本体が `MIC(kc)` に読み替える)。
+
+#### ★ 既定配列を変えても、保存済みの配列は変わらない (2026-09-21 に実機で踏んだ)
+
+`MIC(KC_F13)` にした像を入れても**顔がまったく変わらなかった**。VIA の
+読み出し (`0x04`) で見たら、保存済みの配列は
+**`layer 0 / row 3 / col 9` = `0x0068` (素の `KC_F13`)** のままだった。
+
+**VIA / Remap で配列を 1 度でも書き換えた本体は、以後 EEPROM (NVS) に
+保存された配列で動く。** 像を新しくしても `main/keymaps/default_keymap.c`
+は見に行かない。**新しい既定は黙って無視される。**
+
+そこで「移行」を足した (`main/qmk_port/stackee_keymap_migrate.c`)。
+
+* EEPROM の **キーボード用の 4 バイト** (`eeconfig_read_kb` /
+  `eeconfig_update_kb`。VIA はここを触らない) に移行番号を持つ。
+* 起動時 (`keyboard_init()` のあと) に、**未適用の移行を古いほうから順に**
+  当てる。当て終わったら番号を進める。二度と当たらない。
+* 移行は「**旧い既定のままなら差し替える。ユーザーが変えていたら触らない**」
+  で書く。保存済みの配列はユーザーのものなので、知らない値を上書きしない。
+
+| 移行 | 中身 |
+|---|---|
+| 1 (2026-09-21) | レイヤー 0 / row 3 / col 9 が `KC_F13` (旧い既定) か `0x7E08` (同じ日に一度だけ存在した `STK_MIC_KEY`) なら `MIC(KC_F13)` にする |
+
+★ **既定配列を変えたら、ここに 1 段足すこと。** 足さないと、VIA を使った
+ことのある本体にだけ新しい既定が届かない、という見つけにくい形で壊れる。
 
 **実機での確認** (`cef8f0b`、full、2026-09-21)。`key.inject` で
 `STK_MIC_KEY` (`0x7E08`) を **1.5 秒押し**、100 ms ごとに `ui.status` と

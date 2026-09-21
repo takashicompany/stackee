@@ -27,7 +27,7 @@
 
 static const char *TAG = "input";
 
-// STK_MIC_KEY を押しているか。入力タスクが書き、ui タスクが読む。
+// MIC(kc) のキーを押しているか。入力タスクが書き、ui タスクが読む。
 static _Atomic bool s_mic_held;
 
 // key.inject を「待たずに」始めた。終わったら入力タスクが待機へ戻す。
@@ -66,8 +66,8 @@ void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed) {
         stackee_audio_talk_key(pressed);
         return;
     }
-    // ★ STK_MIC_KEY も押し離しの両方。印を 1 つ立てるだけで、
-    //   F13 の送出そのものは qmk_port/stackee_holdtap.c が済ませている。
+    // ★ MIC(kc) も押し離しの両方。印を 1 つ立てるだけで、
+    //   中のキーの送出そのものは qmk_port/stackee_holdtap.c が済ませている。
     //   顔を変えるのは ui タスク (ここでは画面に触らない)。
     if (action == STACKEE_KEY_MIC) {
         atomic_store(&s_mic_held, pressed);

@@ -19,12 +19,47 @@ enum stackee_keycodes {
     STK_CAMERA           = QK_KB_0 + 5,
     STK_TOUCH_SCROLL     = QK_KB_0 + 6,
     STK_MT_0             = QK_KB_0 + 7,
-    STK_MIC_KEY          = QK_KB_0 + 8,
+    MIC_F13              = QK_KB_0 + 8,
+    MIC_F14              = QK_KB_0 + 9,
+    MIC_F15              = QK_KB_0 + 10,
+    MIC_F16              = QK_KB_0 + 11,
+    MIC_F17              = QK_KB_0 + 12,
+    MIC_F18              = QK_KB_0 + 13,
+    MIC_F19              = QK_KB_0 + 14,
+    MIC_F20              = QK_KB_0 + 15,
+    MIC_F21              = QK_KB_0 + 16,
+    MIC_F22              = QK_KB_0 + 17,
+    MIC_F23              = QK_KB_0 + 18,
+    MIC_F24              = QK_KB_0 + 19,
 };
 
 #define STACKEE_KEYCODE_FIRST QK_KB_0
-#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 8)
+#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 19)
 #define STK_MT_BASE           (QK_KB_0 + 7)
+
+// ---------------------------------------------------------------
+// MIC(kc) — 押している間だけ顔を「聞き取り中」にする包み
+// ---------------------------------------------------------------
+// QMK の LT(layer, kc) / MT(mod, kc) と同じ発想で、**中のキーを
+// 8 bit そのまま**持つ連続領域。押下で中のキーを register_code、
+// 離しで unregister_code — ホストから見た振る舞いは素のキーと同じ。
+//
+// ★ 置き場は QK_USER (0x7E40..0x7FFF) の上半分。QK_KB は 0x7E00..
+//   0x7E3F の 64 個しかなく、256 個の連続領域が入らないため。
+//   VIA の Custom タブには上の MIC_F13..MIC_F24 が並び、本体が
+//   それを MIC(F13..F24) に読み替える。Remap の「Any」なら
+//   0x7F00 | kc を直に書ける。
+#define STACKEE_MIC_BASE      0x7F00u
+#define STACKEE_MIC_KC_MIN    0x04u      // KC_A。これ未満は包まない
+#define STACKEE_MIC_FIRST     (STACKEE_MIC_BASE | STACKEE_MIC_KC_MIN)
+#define STACKEE_MIC_LAST      (STACKEE_MIC_BASE | 0xFFu)
+#define MIC(kc)               (STACKEE_MIC_BASE | ((kc) & 0xFFu))
+#define STACKEE_MIC_INNER(code) ((uint8_t)((code) & 0xFFu))
+
+// VIA の名前付きの入口 (MIC_F13..MIC_F24) → MIC(F13..F24)。
+#define STACKEE_MIC_ALIAS_FIRST (QK_KB_0 + 8)
+#define STACKEE_MIC_ALIAS_LAST  (QK_KB_0 + 19)
+#define STACKEE_MIC_ALIAS_KC0   0x68u    // KC_F13
 
 // 修飾つきタップの HoldTap (default_keymap.c が中身を持つ)。
 typedef struct {

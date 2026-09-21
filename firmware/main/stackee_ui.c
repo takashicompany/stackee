@@ -456,7 +456,7 @@ static void ui_task(void *unused) {
         stackee_face_inputs_t inputs = {
             .speaking = atomic_load(&ui.talk_speaking),
             .talk_recording = atomic_load(&ui.talk_recording),
-            // ★ PC 側のプッシュトゥトーク (STK_MIC_KEY)。入力タスクが立てた
+            // ★ PC 側のプッシュトゥトーク (MIC(kc))。入力タスクが立てた
             //   印を読むだけ (打鍵の道には何も足さない)。
             .mic_held = stackee_input_mic_held(),
             .talk_busy = atomic_load(&ui.talk_busy),

@@ -668,7 +668,7 @@ static void reply_key_inject(long id, const char *request) {
     }
 
     // ★ `"wait":false` … 押し始めて **すぐ返る**。押している最中に
-    //   `ui.status` や `lcd.crc` を読みたいとき (STK_MIC_KEY の表情の確認)
+    //   `ui.status` や `lcd.crc` を読みたいとき (MIC(kc) の表情の確認)
     //   に使う。遅延は返らないので、遅延を測るときは既定のまま。
     if (!stackee_console_bool(request, "wait", true)) {
         bool started = stackee_input_inject_begin((uint16_t)keycode,

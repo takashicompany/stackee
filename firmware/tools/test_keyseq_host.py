@@ -46,7 +46,8 @@ PORT_SOURCES = [
     'main/qmk_port/qmk_port_timer.c', 'main/qmk_port/qmk_port_matrix.c',
     'main/qmk_port/qmk_port_host.c', 'main/qmk_port/qmk_port_eeprom.c',
     'main/qmk_port/qmk_port_stubs.c', 'main/qmk_port/qmk_port_init.c',
-    'main/qmk_port/stackee_holdtap.c', 'main/stackee_report_queue.c',
+    'main/qmk_port/stackee_holdtap.c',
+    'main/qmk_port/stackee_keymap_migrate.c', 'main/stackee_report_queue.c',
     'hostbuild/keyseq_main.c',
 ]
 
@@ -149,6 +150,14 @@ STK_TALK = 'TALK'
 STK_VOLDN = 'VOLDN'
 STK_MIC = 'MIC_KEY'
 KC_F13 = 0x68
+KC_A = 0x04
+# MIC(kc) = 0x7F00 | kc (main/qmk_port/stackee_keycodes.h)。
+MIC_BASE = 0x7F00
+MIC_ALIAS_F13 = 0x7E08          # VIA の名前付きの入口 (MIC_F13)
+
+
+def MIC(kc):
+    return MIC_BASE | (kc & 0xFF)
 
 
 def tap(pos, at, hold_ms=40):
@@ -309,11 +318,12 @@ class CustomKeyTest(unittest.TestCase):
                                'CUSTOM %s 0' % STK_VOLDN])
 
     def test_the_mic_key_still_sends_f13(self):
-        """★ STK_MIC_KEY だけは独自キーでも **HID に出る**。
+        """★ MIC(kc) だけは独自キーでも **HID に出る**。
 
-        PC 側のプッシュトゥトークに使っているキーなので、ホストから見た
-        振る舞いは今までの KC_F13 とまったく同じでないといけない。
-        足したのは「押している間だけ顔を聞き取り中にする」ことだけ。
+        既定は右下の MIC(KC_F13)。PC 側のプッシュトゥトークに使っている
+        キーなので、ホストから見た振る舞いは素の F13 とまったく同じで
+        ないといけない。足したのは「押している間だけ顔を聞き取り中に
+        する」ことだけ。
         """
         lines = run('t 100\nmark mic\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         out = after(lines, 'mic')
@@ -328,6 +338,127 @@ class CustomKeyTest(unittest.TestCase):
             run('t 100\nmark mic\n' + tap(POS_MIC, 100, 50) + 't 400\n'), 'mic')
             if l.startswith('KB ')]
         self.assertEqual(mic, [kb(0, KC_F13), NONE])
+
+    def test_mic_can_wrap_any_basic_key(self):
+        """MIC(kc) は中のキーを 8 bit そのまま持つ (F13 だけではない)。"""
+        for kc in (KC_A, KC_W, 0x2C, 0x4F):      # A / W / Space / Right
+            lines = run('kc 3 9 0x%04X\n' % MIC(kc)
+                        + 't 100\nmark m\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+            out = after(lines, 'm')
+            self.assertEqual(out, ['CUSTOM %s 1' % STK_MIC,
+                                   kb(0, kc),
+                                   'CUSTOM %s 0' % STK_MIC,
+                                   NONE], hex(kc))
+
+    def test_the_via_alias_is_the_same_as_mic_f13(self):
+        """VIA の名前付きの入口 (0x7E08..0x7E13) は MIC(F13..F24) になる。"""
+        for index in (0, 3, 11):                 # F13 / F16 / F24
+            kc = KC_F13 + index
+            lines = run('kc 3 9 0x%04X\n' % (MIC_ALIAS_F13 + index)
+                        + 't 100\nmark a\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+            out = after(lines, 'a')
+            self.assertEqual(out, ['CUSTOM %s 1' % STK_MIC,
+                                   kb(0, kc),
+                                   'CUSTOM %s 0' % STK_MIC,
+                                   NONE], hex(kc))
+
+    def test_mic_does_not_overlap_the_other_custom_keys(self):
+        # 0x7E00..0x7E07 は今までの独自キーのまま (MIC に食われていない)。
+        lines = run('kc 3 9 0x7E00\n'         # STK_TALK
+                    + 't 100\nmark t\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        out = after(lines, 't')
+        self.assertEqual(out, ['CUSTOM %s 1' % STK_TALK,
+                               'CUSTOM %s 0' % STK_TALK])
+        self.assertFalse([l for l in out if l.startswith('KB ')])
+
+    def test_a_keycode_below_the_mic_range_is_not_wrapped(self):
+        # 0x7F00..0x7F03 (kc < 0x04) は包まない = 何も起きない。
+        for code in (0x7F00, 0x7F03):
+            lines = run('kc 3 9 0x%04X\n' % code
+                        + 't 100\nmark x\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+            self.assertEqual(after(lines, 'x'), [], hex(code))
+
+
+class KeymapMigrationTest(unittest.TestCase):
+    """既定配列を変えたときの移行 (main/qmk_port/stackee_keymap_migrate.c)。
+
+    ★ **なぜ要るのか。** VIA で配列を 1 度でも書き換えた本体は、以後
+      保存済みの配列で動く。像を新しくしても `default_keymap.c` は
+      見に行かないので、**新しい既定は黙って無視される**。
+      2026-09-21 に実機で踏んだ (右下が KC_F13 のままで顔が変わらなかった)。
+    """
+
+    ROW, COL = 3, 9
+
+    def kc_at(self, script):
+        """台本を流して、最後の getkc が返した値。"""
+        lines = run(script + 'getkc 0 %d %d\n' % (self.ROW, self.COL))
+        got = [l for l in lines if l.startswith('KC ')]
+        return int(got[-1].split()[-1], 16)
+
+    def migrate(self, script):
+        lines = run(script + 'migrate\ngetkc 0 %d %d\n' % (self.ROW, self.COL))
+        row = [l for l in lines if l.startswith('MIGRATE ')][-1].split()
+        changed = int(row[1].split('=')[1])
+        level = int(row[2].split('=')[1])
+        kc = int([l for l in lines if l.startswith('KC ')][-1].split()[-1], 16)
+        return changed, level, kc
+
+    def test_a_fresh_eeprom_already_has_the_new_default(self):
+        # 保存済みの配列が無ければ、既定 (default_keymap.c) がそのまま入る。
+        self.assertEqual(self.kc_at(''), MIC(KC_F13))
+        # 移行は「当てるものが無い」で番号だけ進む。
+        changed, level, kc = self.migrate('')
+        self.assertEqual(changed, 0)
+        self.assertEqual(level, 1)
+        self.assertEqual(kc, MIC(KC_F13))
+
+    def test_the_old_default_is_replaced(self):
+        # ユーザーの本体と同じ状態: 保存済みの配列が素の KC_F13。
+        changed, level, kc = self.migrate('miglevel 0\nsetkc 0 3 9 0x0068\n')
+        self.assertEqual(changed, 1)
+        self.assertEqual(level, 1)
+        self.assertEqual(kc, MIC(KC_F13))
+
+    def test_the_short_lived_custom_key_is_replaced_too(self):
+        # 同じ日に一度だけ存在した STK_MIC_KEY (0x7E08) も 1 つの形にそろえる。
+        changed, _level, kc = self.migrate(
+            'miglevel 0\nsetkc 0 3 9 0x%04X\n' % MIC_ALIAS_F13)
+        self.assertEqual(changed, 1)
+        self.assertEqual(kc, MIC(KC_F13))
+
+    def test_a_key_the_user_changed_is_left_alone(self):
+        # ユーザーが別のキーにしていたら触らない (保存済みの配列は本人のもの)。
+        for code in (KC_A, 0x7E00, MIC(KC_A)):
+            changed, level, kc = self.migrate(
+                'miglevel 0\nsetkc 0 3 9 0x%04X\n' % code)
+            self.assertEqual(changed, 0, hex(code))
+            self.assertEqual(level, 1, hex(code))
+            self.assertEqual(kc, code, hex(code))
+
+    def test_it_only_runs_once(self):
+        # 2 度目は何もしない。当て直すと、そのあとユーザーが戻した配列を
+        # また書き換えてしまう。
+        lines = run('miglevel 0\nsetkc 0 3 9 0x0068\n'
+                    'migrate\nsetkc 0 3 9 0x0068\nmigrate\n'
+                    'getkc 0 3 9\n')
+        rows = [l.split() for l in lines if l.startswith('MIGRATE ')]
+        self.assertEqual(rows[0][1], 'changed=1')
+        self.assertEqual(rows[1][1], 'changed=0')
+        self.assertEqual(int([l for l in lines if l.startswith('KC ')][-1]
+                             .split()[-1], 16), KC_F13)
+
+    def test_a_level_from_the_future_does_nothing(self):
+        # 新しい像で当てたあと古い像で起きても、既定を巻き戻さない。
+        changed, _level, kc = self.migrate('miglevel 9\nsetkc 0 3 9 0x0068\n')
+        self.assertEqual(changed, 0)
+        self.assertEqual(kc, KC_F13)
+
+    def test_the_level_lives_outside_the_via_keymap(self):
+        # 番号は EEPROM の「キーボード用 4 バイト」。VIA はここを触らない。
+        lines = run('miglevel 0\nmigrate\nmiglevel\n')
+        self.assertEqual([l for l in lines if l.startswith('MIGLEVEL ')][-1],
+                         'MIGLEVEL 1')
 
 
 class ExtendedModTapTest(unittest.TestCase):

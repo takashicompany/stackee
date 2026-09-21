@@ -103,7 +103,7 @@ typedef enum {
     STACKEE_KEY_BLE_REFRESH,
     STACKEE_KEY_CAMERA,
     STACKEE_KEY_TOUCH_SCROLL,
-    // ★ STK_MIC_KEY だけは「独自キーなのに HID へも出る」。PC 側の
+    // ★ MIC(kc) だけは「独自キーなのに HID へも出る」。PC 側の
     //   プッシュトゥトーク (F13) を押している間、本体の顔も「聞き取り中」に
     //   したい、というだけのキー。キーそのものの役目は変えない。
     STACKEE_KEY_MIC,

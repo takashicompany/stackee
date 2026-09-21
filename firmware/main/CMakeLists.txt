@@ -65,6 +65,7 @@ idf_component_register(
         "qmk_port/qmk_port_stubs.c"
         "qmk_port/qmk_port_init.c"
         "qmk_port/stackee_holdtap.c"
+        "qmk_port/stackee_keymap_migrate.c"
         # --- QMK quantum (third_party、無改変) --------------------------
         # keymaps/default_keymap.c はここに並べない。QMK の作法どおり
         # keymap_introspection.c が KEYMAP_C として include する。

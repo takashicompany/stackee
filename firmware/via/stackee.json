@@ -112,9 +112,64 @@
       "shortName": "MT0"
     },
     {
-      "name": "STK_MIC_KEY",
-      "title": "押している間だけ「聞き取り中」の顔にする (キー自体は F13 を送る)",
-      "shortName": "Mic"
+      "name": "MIC_F13",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F13 を送る)",
+      "shortName": "Mic13"
+    },
+    {
+      "name": "MIC_F14",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F14 を送る)",
+      "shortName": "Mic14"
+    },
+    {
+      "name": "MIC_F15",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F15 を送る)",
+      "shortName": "Mic15"
+    },
+    {
+      "name": "MIC_F16",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F16 を送る)",
+      "shortName": "Mic16"
+    },
+    {
+      "name": "MIC_F17",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F17 を送る)",
+      "shortName": "Mic17"
+    },
+    {
+      "name": "MIC_F18",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F18 を送る)",
+      "shortName": "Mic18"
+    },
+    {
+      "name": "MIC_F19",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F19 を送る)",
+      "shortName": "Mic19"
+    },
+    {
+      "name": "MIC_F20",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F20 を送る)",
+      "shortName": "Mic20"
+    },
+    {
+      "name": "MIC_F21",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F21 を送る)",
+      "shortName": "Mic21"
+    },
+    {
+      "name": "MIC_F22",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F22 を送る)",
+      "shortName": "Mic22"
+    },
+    {
+      "name": "MIC_F23",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F23 を送る)",
+      "shortName": "Mic23"
+    },
+    {
+      "name": "MIC_F24",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F24 を送る)",
+      "shortName": "Mic24"
     }
   ]
 }
