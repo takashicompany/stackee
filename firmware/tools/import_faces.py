@@ -2,6 +2,9 @@
 
 **実機に触らない。音も鳴らさない。** 一次回答の音声 (manifest の `acks`) は
 いま出力先にある manifest から読み直して持ち越すだけで、作り直さない。
+★ ただし `acks[].lines` (字幕の帯に出す行) は毎回 `text` から**引き直す**。
+  規則はサーバと同じ (`tools/ack_lines.py`。突き合わせは
+  `tools/test_subtitle_host.py` の `AckLinesTest`)。
 
   python3 firmware/tools/import_faces.py            # 既定の元絵から作り直す
   python3 firmware/tools/import_faces.py --check    # 書かずに一致だけ見る
@@ -20,6 +23,9 @@ import sys
 from pathlib import Path
 import zlib
 from PIL import Image, ImageChops
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ack_lines                                   # noqa: E402
 
 SIZE = 240
 CASES = ('awake', 'idle', 'listening', 'thinking', 'speaking', 'camera')
@@ -60,6 +66,14 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     previous = args.output / 'manifest.json'
     acks = json.loads(previous.read_text()).get('acks', []) if previous.exists() else []
+    # 一次回答の字幕。本体は帯に 3 行しか出せないが、**行は全部持たせる**
+    # (切るのは本体の仕事。素材側で情報を捨てない)。
+    for ack in acks:
+        text = ack.get('text')
+        if text:
+            ack['lines'] = ack_lines.subtitle_lines(text)
+        else:
+            ack.pop('lines', None)
     manifest = {'v': 1, 'size': SIZE, 'cases': {}, 'faces': [], 'acks': acks}
     sheet = bytearray()
     frames = []
@@ -107,7 +121,7 @@ def main():
             changes.extend(bounds or (0, 0, 0, 0))
     (args.output / 'changes.bin').write_bytes(zlib.compress(changes, 9))
     (args.output / 'manifest.json').write_text(json.dumps(manifest, separators=(',', ':')) + '\n')
-    print('顔 %d 枚 / 一次回答 %d 本 (音声は作り直していない)'
+    print('顔 %d 枚 / 一次回答 %d 本 (音声は作り直していない。字幕の行は引き直した)'
           % (len(manifest['faces']), len(manifest['acks'])))
     if not args.check:
         print('できたバイト数:',

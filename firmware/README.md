@@ -472,19 +472,19 @@ python3 firmware/tools/test_hid_dest_host.py   # 送信先の選び方 (7 件)
 python3 firmware/tools/test_hid_report_map.py  # 記述子を esp_hid のパーサに通す (5 件)
 python3 firmware/tools/hid_desc_check.py       # 記述子の構成を目で見る
 python3 firmware/tools/test_faceanim_host.py   # 顔の状態機械 (16 件)
-python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (26 件)
+python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (27 件)
 python3 firmware/tools/test_cfg_host.py        # 段階 3: 設定・登録簿・音量・素材 + 4 KB の JSON (48 件)
 python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 (57 件)
 python3 firmware/tools/test_wifi_host.py       # 段階 3: Wi-Fi の状態機械 (21 件)
 python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
-python3 firmware/tools/test_subtitle_host.py   # 字幕: フォントと帯の描画 (27 件)
+python3 firmware/tools/test_subtitle_host.py   # 字幕: フォント・帯・一次回答の行 (33 件)
 python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 (40 件、§25)
 python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **431 件**。どれも実機に触らない。
+全部で **438 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -918,7 +918,7 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 
 | | |
 |---|---|
-| 画面 | 240x320 (MADCTL `0xA8`)。背景は白 |
+| 画面 | 240x320 (MADCTL `0xA8`)。背景は白。ただし字幕の帯 (y=250..319) は**いつでも黒** |
 | 上段 | 高さ **28px** の黒帯。`[音量][NN%]` … `[Wi-Fi][BLE/USB][電池][NN%]` |
 | 顔 | 240x240 を **上 29 px / 下 11 px 切り詰めた 240x200** を **x=0 / y=50** に (y=50..249)。空いた 40 px は字幕 3 行へ。29/11 は 32 コマ全部の余白の最小値で**1 画素も落ちない** (§23-8) |
 | 顔の素材 | `faces.bin` (zlib / 4bpp / 32 枚の縦長シート)。**素材は 240x240 のまま。** 起動時に PSRAM へ 900 KB 展開し、その場で 240x200 (750 KB) へ詰め直す |
@@ -938,7 +938,7 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 ### 10-2. 実機に触らない確認
 
 ```
-python3 firmware/tools/test_render_host.py     # 描画と期待値 (26 件)
+python3 firmware/tools/test_render_host.py     # 描画と期待値 (27 件)
 python3 firmware/tools/test_faceanim_host.py   # 状態機械の時刻 (16 件)
 python3 firmware/tools/render_expected.py      # 期待値の CRC を見る
 ```
@@ -2333,7 +2333,7 @@ firmware/tools/install_assets.sh --only font16.bin
 
 ### 23-4. 実機に触らない確認
 
-`tools/test_subtitle_host.py` (27 件) が、**本体の実体そのもの**
+`tools/test_subtitle_host.py` (33 件) が、**本体の実体そのもの**
 (`main/stackee_font16.c` / `stackee_draw.c` / `stackee_crc32.c`) を Mac 用に
 ASan + UBSan つきでビルドし、本物の `assets/font16.bin` を通して描いた帯の
 CRC32 を `tools/subtitle_expected.py` の期待値と突き合わせる
@@ -2346,6 +2346,9 @@ done の JSON に混ざってきた本文 (別 GET を飛ばす / 壊れてい�
 どちらも無ければ字幕なしで鳴る / 受け皿が 16 KB になっていること) を見る。
 `tools/test_cfg_host.py` の `JsonBigTest` (7 件) が、4 KB 級の JSON 文字列と
 `\t` `\n` の逃がしを **返答文の 256 バイトの道とは別の道**で読めることを見る。
+`AckLinesTest` (6 件) が、一次回答の行 (`assets/manifest.json` の
+`acks[].lines`) を**本物のサーバを import して** 5 文すべてで突き合わせる
+(§23-9)。
 
 ### 23-5. 実機での確認 (読むだけ)
 
@@ -2650,6 +2653,83 @@ API は `stackee_ui_set_subtitle(const char *utf8)` のまま。中身が
 頁 5 → 3 行 'ぺ3\nぺ4\nぺ5'       crc 3174104647
 ```
 
+
+### 23-9. 一次回答にも字幕を出す / 帯はいつでも黒 (2026-09-21)
+
+ユーザーの決定 2 つ。**本体側だけ。サーバ・操作盤・顔の絵は触っていない。**
+
+#### (a) 帯はいつでも黒
+
+字幕が無いときも `y=250..319` は黒のまま、文字だけ消える。
+「消すときは白」(画面の地の色に戻す) をやめた。**起動直後の 1 枚目から黒。**
+
+* `main/stackee_draw.c` の `stackee_draw_subtitle` が空でも `STACKEE_SUB_BG`
+  (0x000000) で塗る。
+* `stackee_ui_start` が最初の 1 枚を出すときに `paint_subtitle("")` を挟む。
+* Mac 側 (`render_expected.py` / `subtitle_expected.py`) とホストビルド
+  (`hostbuild/render_main.c`) も同じにしてあるので、**全面の CRC32
+  (`lcd.crc` の `all`) が帯まで含めて一致する**。顔とバーの CRC は領域が
+  重ならないので 1 ビットも変わらない。
+
+#### (b) 一次回答 (ack) の再生中も字幕を出す
+
+一次回答 (`ack_01..05.pcmz`) は**サーバを通らない** — 録音を送っている間、
+素材に入っている音声をその場で鳴らしている。だから返答のように
+`<start_ms>\t<text>` が降ってこない。そこで **素材を作るときに行へ割って**
+`assets/manifest.json` の `acks[].lines` に入れておく。
+
+```
+"acks":[{"file":"ack_01.pcmz","samples":53077,...,
+         "text":"わかったのだ。少し待っていてほしいのだ。",
+         "lines":["わかったのだ。","少し待っていてほしいのだ。"]}, ...]
+```
+
+| ファイル | 文 | 行 |
+|---|---|---|
+| `ack_01.pcmz` | わかったのだ。少し待っていてほしいのだ。 | 「わかったのだ。」 / 「少し待っていてほしいのだ。」 |
+| `ack_02.pcmz` | 了解なのだ。ちょっと考えるのだ。 | 「了解なのだ。」 / 「ちょっと考えるのだ。」 |
+| `ack_03.pcmz` | 聞こえたのだ。今から確認するのだ。 | 「聞こえたのだ。」 / 「今から確認するのだ。」 |
+| `ack_04.pcmz` | 任せてほしいのだ。少し待っていてね。 | 「任せてほしいのだ。」 / 「少し待っていてね。」 |
+| `ack_05.pcmz` | うん、考えてみるのだ。 | 「うん、」 / 「考えてみるのだ。」 |
+
+**割り方はサーバの規則そのもの。** `tools/ack_lines.py` が
+`public/server/stackee_server.py` の `page_width` / `opens_badly` /
+`split_columns` / `clause_spans` / `subtitle_pages` の写しで、
+`tools/import_faces.py` が manifest を書くときに `text` から引き直す。
+写しなのでずれうる — `tools/test_subtitle_host.py` の `AckLinesTest` が
+**本物のサーバを import して** 5 文すべてで突き合わせる (ずれたら落ちる)。
+**サーバのコードは 1 行も変えていない。**
+
+★ **行は全部 manifest に持たせ、切るのは本体の仕事。** 帯は 3 行なので、
+本体 (`main/stackee_audio.c` の `ack_lines()`) は**先頭 3 行だけ**を使う。
+いまの 5 文はどれも 2 行なので切られないが、文を差し替えて 4 行以上に
+なったときは 4 行目以降が出ない (素材側では捨てない)。
+
+**本体の歩き方**
+
+* 起動時に `manifest.json` の `acks[].lines` を読み、改行で繋いだ 1 本の
+  文字列にして **PSRAM** へ置く (内蔵 RAM は増やさない。増えたのは
+  ポインタ 5 本ぶんだけ)。
+* 一次回答を鳴らし始めるとき (`ops_ack_begin`) にその文字列を
+  `stackee_ui_set_subtitle()` へ渡す。
+* 鳴り終わったとき (`play_step` の終わり) に消す。**そのあと返答の字幕が
+  来る流れは今までどおり** — 返答の帯は会話の状態機械が持っていて、
+  一次回答のぶんには触らない (`play_sub` が立っているときだけ消す)。
+* `audio.play i=N` (検査用) でも同じ字幕が出る。番号を指定できるので、
+  帯の CRC32 を `subtitle_expected.py` の期待値と突き合わせられる。
+* **`lines` が無い旧い manifest でも落ちない。** 一次回答の字幕が出ない
+  だけで、音も会話も画面も止まらない。
+
+`audio.status` に 3 つ増えた: `ack` (鳴らしている一次回答の番号。ちがえば
+`-1`)、`ack_sub` (その字幕を帯に出しているか)、`ack_lines` (字幕を持って
+いる一次回答の本数)。
+
+★ **manifest.json は FAT に送り直す必要がある。** 像を書いても素材は
+変わらない。
+
+```
+firmware/tools/install_assets.sh --only manifest.json
+```
 
 ## 24. 会話が「通信に失敗しました」で 7 秒で終わる — 内蔵 RAM の枯渇 (2026-09-20)
 

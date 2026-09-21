@@ -175,6 +175,8 @@ int main(int argc, char **argv) {
     stackee_draw_bar(&canvas, stackee_selftest_bar(bar_index), icons, &font);
     stackee_draw_face(&canvas, faces, FACE_SIZE, FACE_ROWS, 0, FACE_X, FACE_Y,
                       0, 0, FACE_SIZE, FACE_ROWS);
+    // ★ 帯は起動直後から黒 (字幕が無くても白に戻さない)。全面の CRC に入る。
+    stackee_draw_subtitle(&canvas, NULL, "");
 
     printf("count %d\n", count);
     printf("face_geom %d %d %d %d %d\n", FACE_Y, STACKEE_FACE_SIZE,

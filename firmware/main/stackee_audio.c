@@ -42,6 +42,9 @@ typedef enum { MODE_OFF = 0, MODE_MIC, MODE_SPK } audio_mode_t;
 typedef struct {
     int16_t *pcm;
     int      samples;
+    // 帯に出す行 (改行区切り、最大 STACKEE_TALK_SUB_LINES 行)。PSRAM。
+    // manifest の acks[].lines が無い旧素材では NULL = 字幕なし。
+    char    *lines;
 } ack_t;
 
 static struct {
@@ -67,6 +70,8 @@ static struct {
     int      play_pos;
     bool     play_active;
     bool     play_is_ack;
+    int      play_ack;          // 鳴らしている一次回答の番号 (-1 = ちがう)
+    bool     play_sub;          // その字幕を帯に出した (終わったら消す)
     bool     play_failed;
     int64_t  play_started_us;
     uint32_t play_ms;
@@ -343,6 +348,7 @@ static bool play_begin(const int16_t *pcm, int samples, bool is_ack) {
     a.play_samples = samples;
     a.play_pos = 0;
     a.play_is_ack = is_ack;
+    a.play_ack = -1;
     a.play_failed = false;
     a.play_started_us = esp_timer_get_time();
     a.play_ms = 0;
@@ -430,11 +436,105 @@ static void play_step(void) {
     a.play_done_samples = (uint32_t)a.play_samples;
     a.play_active = false;
     a.play_pcm = NULL;
+    // ★ 一次回答の字幕はここで消す。返答の字幕は会話の状態機械が持っている
+    //   ので触らない (play_sub は一次回答を出したときだけ立つ)。
+    if (a.play_sub) {
+        stackee_ui_set_subtitle(NULL);
+        a.play_sub = false;
+    }
+    a.play_ack = -1;
 }
 
 // ---------------------------------------------------------------------------
 // 一次回答 (ack_01..05.pcmz)
 // ---------------------------------------------------------------------------
+// manifest の 1 つの ack から `"lines":["…","…"]` を取り、帯へ渡せる形
+// (改行区切り、最大 STACKEE_TALK_SUB_LINES 行) にして **PSRAM** に置く。
+//
+// ★ 行の割り方はサーバと同じ規則で **素材を作るときに済ませてある**
+//   (tools/ack_lines.py / import_faces.py)。本体は割らない。返答の字幕が
+//   サーバの割った行をそのまま出すのと同じ形にそろえてある。
+// ★ 帯は 3 行しか無いので **先頭 3 行だけ**使う。いまの 5 文はどれも 2 行
+//   なので切られない (README §23-9)。
+// ★ `lines` が無い旧い manifest では NULL を返す = 一次回答の字幕は出ない。
+//   会話も音も止まらない。
+static char *ack_lines(const char *obj) {
+    const char *array = NULL;
+    size_t array_len = 0;
+    if (!stackee_json_raw(obj, "lines", &array, &array_len) || array[0] != '[') {
+        return NULL;
+    }
+    char band[STACKEE_TALK_SUB_BAND_MAX];
+    size_t at = 0;
+    int used = 0;
+    const char *p = array + 1;
+    const char *limit = array + array_len;
+    while (p < limit && used < STACKEE_TALK_SUB_LINES) {
+        const char *quote = memchr(p, '"', (size_t)(limit - p));
+        if (quote == NULL) {
+            break;
+        }
+        const char *end = quote + 1;
+        while (end < limit && *end != '"') {
+            if (*end == '\\' && end + 1 < limit) {
+                end++;
+            }
+            end++;
+        }
+        if (end >= limit) {
+            break;
+        }
+        char text[STACKEE_TALK_SUB_TEXT_MAX];
+        size_t n = stackee_json_unescape(quote, (size_t)(end + 1 - quote),
+                                         text, sizeof(text));
+        p = end + 1;
+        if (n == 0) {
+            continue;                   // 空の行は置かない
+        }
+        size_t need = n + ((used > 0) ? 1u : 0u);
+        if (at + need + 1 > sizeof(band)) {
+            break;                      // 入らない行は置かない (途中で切らない)
+        }
+        if (used > 0) {
+            band[at++] = '\n';
+        }
+        memcpy(band + at, text, n);
+        at += n;
+        band[at] = '\0';
+        used++;
+    }
+    if (used == 0) {
+        return NULL;
+    }
+    char *out = heap_caps_malloc(at + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL) {
+        return NULL;                    // 字幕が出ないだけ。音は鳴る
+    }
+    memcpy(out, band, at + 1);
+    return out;
+}
+
+// 字幕を持っている一次回答の本数 (audio.status の "ack_lines")。
+static int ack_lines_ready(void);
+
+// 一次回答を 1 本鳴らし、その字幕を帯に出す。番号を返す (失敗は -1)。
+// ★ 消すのは play_step の終わり。会話の返答 (is_ack=false かつ
+//   ops_play_begin 経由) の字幕には触らない。
+static int start_ack(int index, bool is_ack) {
+    if (index < 0 || index >= a.ack_count) {
+        return -1;
+    }
+    if (!play_begin(a.ack[index].pcm, a.ack[index].samples, is_ack)) {
+        return -1;
+    }
+    a.play_ack = index;
+    if (a.ack[index].lines != NULL) {
+        stackee_ui_set_subtitle(a.ack[index].lines);
+        a.play_sub = true;
+    }
+    return index;
+}
+
 static void load_acks(void) {
     size_t len = 0;
     char *manifest = stackee_assets_read("manifest.json", &len, MALLOC_CAP_8BIT);
@@ -450,23 +550,29 @@ static void load_acks(void) {
         ESP_LOGW(TAG, "manifest.json に acks が無い");
         return;
     }
-    const char *at = array + 1;
-    const char *limit = array + array_len;
+    char *at = (char *)array + 1;
+    char *limit = (char *)array + array_len;
     while (at < limit && a.ack_count < STACKEE_AUDIO_ACK_MAX) {
-        const char *obj = memchr(at, '{', (size_t)(limit - at));
+        char *obj = memchr(at, '{', (size_t)(limit - at));
         if (obj == NULL) {
             break;
         }
-        const char *end = memchr(obj, '}', (size_t)(limit - obj));
+        char *end = memchr(obj, '}', (size_t)(limit - obj));
         if (end == NULL) {
             break;
         }
         at = end + 1;
+        // ★ この 1 つの物だけを見る。閉じ括弧を一時的に NUL にして、
+        //   鍵を探す範囲を物の中に閉じ込める (lines が無い物のとき、
+        //   次の物の lines を拾ってしまわないように)。
+        char saved = *end;
+        *end = '\0';
         char name[48];
         long samples = 0;
         if (!stackee_json_str(obj, "file", name, sizeof(name)) ||
             !stackee_json_int(obj, "samples", &samples) ||
             samples <= 0 || samples > 80000) {
+            *end = saved;
             continue;
         }
         size_t want = (size_t)samples * 2;
@@ -474,14 +580,29 @@ static void load_acks(void) {
                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (pcm == NULL) {
             ESP_LOGW(TAG, "%s を展開できない", name);
+            *end = saved;
             continue;
         }
         a.ack[a.ack_count].pcm = (int16_t *)pcm;
         a.ack[a.ack_count].samples = (int)samples;
+        a.ack[a.ack_count].lines = ack_lines(obj);
         a.ack_count++;
+        *end = saved;
     }
     free(manifest);
-    ESP_LOGI(TAG, "一次回答 %d 本", a.ack_count);
+    int with_lines = 0;
+    for (int i = 0; i < a.ack_count; i++) {
+        with_lines += (a.ack[i].lines != NULL);
+    }
+    ESP_LOGI(TAG, "一次回答 %d 本 (字幕つき %d 本)", a.ack_count, with_lines);
+}
+
+static int ack_lines_ready(void) {
+    int n = 0;
+    for (int i = 0; i < a.ack_count; i++) {
+        n += (a.ack[i].lines != NULL);
+    }
+    return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +679,7 @@ static bool ops_ack_begin(void) {
         return false;               // 現行と同じ: 音量 0 なら鳴らさない
     }
     int index = (int)(esp_random() % (uint32_t)a.ack_count);
-    return play_begin(a.ack[index].pcm, a.ack[index].samples, true);
+    return start_ack(index, true) >= 0;
 }
 
 static bool ops_ack_active(void) {
@@ -736,7 +857,7 @@ static void audio_task(void *unused) {
         }
         int want = atomic_exchange(&a.play_req, -1);
         if (want >= 0 && want < a.ack_count && !a.play_active) {
-            play_begin(a.ack[want].pcm, a.ack[want].samples, false);
+            start_ack(want, false);
         }
         play_step();
         if (talk_lock()) {
@@ -946,12 +1067,14 @@ static size_t audio_console(const char *cmd, const char *line, long id,
     if (strcmp(cmd, "audio.status") == 0) {
         return put(buf, cap, 0,
                    "{\"id\":%ld,\"ok\":1,\"mode\":%d,\"null\":%s,\"playing\":%s,"
-                   "\"is_ack\":%s,\"pos\":%d,\"samples\":%d,\"played\":%lu,"
+                   "\"is_ack\":%s,\"ack\":%d,\"ack_sub\":%s,\"ack_lines\":%d,"
+                   "\"pos\":%d,\"samples\":%d,\"played\":%lu,"
                    "\"play_ms\":%lu,\"failed\":%s,\"acks\":%d,\"volume\":%d,"
                    "\"records\":%lu,\"plays\":%lu,\"codec\":%s,\"amp\":%s}",
                    id, (int)a.mode, atomic_load(&a.null_out) ? "true" : "false",
                    a.play_active ? "true" : "false",
                    a.play_is_ack ? "true" : "false",
+                   a.play_ack, a.play_sub ? "true" : "false", ack_lines_ready(),
                    a.play_pos, a.play_samples, (unsigned long)a.play_done_samples,
                    (unsigned long)a.play_ms, a.play_failed ? "true" : "false",
                    a.ack_count, stackee_volume_percent(),
@@ -975,6 +1098,7 @@ esp_err_t stackee_audio_start(const char *post_path) {
     }
     atomic_store(&a.play_req, -1);
     atomic_store(&a.inject_req, -1);
+    a.play_ack = -1;
     a.talk_lock = xSemaphoreCreateMutex();
     if (a.talk_lock == NULL) {
         return ESP_ERR_NO_MEM;

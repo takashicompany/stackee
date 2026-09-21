@@ -35,6 +35,11 @@ WEB = _first_dir(BASE / 'docs' / 'js', OUTER / 'public' / 'docs' / 'js')
 KMK = _first_dir(OUTER / 'firmware' / 'kmk')
 KMK_TOOLS = _first_dir(KMK / 'tools') if KMK else None
 
+# サーバ (公開側の public/server)。字幕の行の割り方の**出どころ**なので、
+# ホストテストがここから import して firmware/tools/ack_lines.py と
+# 突き合わせる。**読むだけ。サーバのコードは変えない。**
+SERVER = _first_dir(BASE / 'server', OUTER / 'public' / 'server')
+
 # 素材。公開側だけで完結するよう firmware/assets を先に見て、
 # 無いものだけ非公開側の stackee_assets から拾う。
 ASSETS = FW / 'assets'

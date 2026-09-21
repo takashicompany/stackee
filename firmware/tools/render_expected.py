@@ -16,6 +16,7 @@
                 フレームバッファは素直な 240x320 (段階 0 で実機確認済み)
   ・CRC32       zlib.crc32 と同じ (多項式 0xEDB88320、初期値・最終 XOR とも
                 0xFFFFFFFF)。本体は main/stackee_crc32.c
+  ・帯          y=250..319 は**いつでも黒**。字幕が無くても白に戻さない
   ・顔          4bpp、画素 0 が上位ニブル、パレットは i*17 の等間隔グレー、
                 位置は x=0 / y=50。**上 29 行・下 11 行を捨てた 240x200** を置く
                 (元絵も faces.bin も変えない。空いた 40 px は字幕 3 行へ。
@@ -55,6 +56,11 @@ FACE_ROWS = FACE_SIZE - FACE_TRIM_TOP - FACE_TRIM_BOTTOM      # 200
 FACE_X = 0
 FACE_Y = 50                      # stackee_face.py: (height-size)//2 + 10
 SCREEN_BG = 0xFFFFFF
+# 字幕の帯 (main/stackee_draw.h)。★ **いつでも黒**。字幕が無くても白に
+# 戻さない (2026-09-21)。起動直後の 1 枚目から黒い。
+SUB_Y = 250
+SUB_HEIGHT = 70
+SUB_BG = 0x000000
 
 # main/stackee_selftest.c と同じ並び (0..4 は preview_status_bar.py の SCENARIOS)。
 BAR_SCENARIOS = [
@@ -254,6 +260,8 @@ class Renderer:
         fb.fill(0, 0, WIDTH, HEIGHT, SCREEN_BG)
         draw_bar(fb, self.icons, self.tiles, self.font, BAR_SCENARIOS[bar][1])
         draw_face(fb, self.faces, face, self.table)
+        # 帯は黒 (字幕なし)。全面の CRC に入る。
+        fb.fill(0, SUB_Y, WIDTH, SUB_HEIGHT, SUB_BG)
         return fb
 
     def expected(self):
@@ -275,6 +283,7 @@ class Renderer:
             'face_x': FACE_X, 'face_y': FACE_Y, 'face_size': FACE_SIZE,
             'face_trim_top': FACE_TRIM_TOP,
             'face_trim_bottom': FACE_TRIM_BOTTOM, 'face_rows': FACE_ROWS,
+            'sub_y': SUB_Y, 'sub_height': SUB_HEIGHT, 'sub_bg': SUB_BG,
             'face_lost': [row for row in self.face_lost
                           if row['top'] or row['bottom']],
             'bar_height': self.icons.BAR_AREA_HEIGHT,

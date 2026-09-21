@@ -13,10 +13,15 @@
      同じバイト列になること (生成が決定的であること) も見る。
   3. 桁数 (画素数) の計算。全角 16 px / 半角 8 px / 字形なしは 〓 の 16 px。
   4. 帯の幅 (15 桁 = 240 px) を超える字は描かず、途中で切らないこと。
+  5. 一次回答 (ack) の行 — `assets/manifest.json` の `acks[].lines` が、
+     **本物のサーバ** (`public/server/stackee_server.py`) が同じ文から作る
+     字幕の行と 5 文すべてで一致すること。サーバのコードは変えない。
 
   python3 firmware/tools/test_subtitle_host.py
   python3 -m pytest firmware/tools/test_subtitle_host.py
 """
+import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -27,9 +32,29 @@ from pathlib import Path
 IDF = Path(__file__).resolve().parents[1]
 FONT16 = IDF / 'assets/font16.bin'
 SHINONOME = IDF / 'assets/src/fonts/shinonome'
+MANIFEST = IDF / 'assets/manifest.json'
 sys.path.insert(0, str(IDF / 'tools'))
+import ack_lines                                   # noqa: E402
 import gen_font16                                  # noqa: E402
+import stackee_tree as tree                        # noqa: E402
 import subtitle_expected as sub                    # noqa: E402
+
+
+def load_server():
+    """本物のサーバを import する (読むだけ)。読めなければ None。"""
+    if tree.SERVER is None:
+        return None
+    path = tree.SERVER / 'stackee_server.py'
+    if not path.is_file():
+        return None
+    sys.path.insert(0, str(tree.SERVER))
+    spec = importlib.util.spec_from_file_location('stackee_server', path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    return module
 
 SOURCES = ['stackee_font16.c', 'stackee_draw.c', 'stackee_icons.c',
            'stackee_bdf.c', 'stackee_font8x8.c', 'stackee_crc32.c']
@@ -84,12 +109,15 @@ class BandTest(unittest.TestCase):
                              '%s: 帯の CRC が違う' % case['name'])
             self.assertEqual(int(row[2]), case['px'], case['name'])
 
-    def test_the_empty_band_is_the_screen_background(self):
-        # 空 = 帯を消す。黒い帯を残さない (白 240x30)。
-        white = sub.rgb565_bytes(0xFFFFFF) * sub.WIDTH * sub.SUB_HEIGHT
-        self.assertEqual(sub.render(self.font, '').crc(), zlib.crc32(white))
+    def test_the_empty_band_is_black(self):
+        """★ 帯はいつでも黒 (2026-09-21)。字幕が無くても白に戻さない。"""
+        black = sub.rgb565_bytes(0x000000) * sub.WIDTH * sub.SUB_HEIGHT
+        self.assertEqual(sub.render(self.font, '').crc(), zlib.crc32(black))
         row = run('band \n').split()
-        self.assertEqual(int(row[1]), zlib.crc32(white))
+        self.assertEqual(int(row[1]), zlib.crc32(black))
+        self.assertEqual(int(row[2]), 0)        # 文字は無い
+        # 字形が 1 つでもあれば、空の帯とは違う絵になる。
+        self.assertNotEqual(sub.render(self.font, 'あ').crc(), zlib.crc32(black))
 
     def test_a_drawn_band_is_not_the_empty_one(self):
         crcs = {c['name']: c['crc'] for c in self.expected['cases']}
@@ -287,6 +315,91 @@ class IndexTest(unittest.TestCase):
             [sys.executable, str(IDF / 'tools/gen_font16.py'), '--check'],
             capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
+class AckLinesTest(unittest.TestCase):
+    """一次回答の字幕の行 — サーバと同じ割り方か。
+
+    ★ 返答の字幕はサーバが割った行をそのまま出す。一次回答はサーバを
+      通らないので、**素材を作るときに同じ規則で割って** manifest の
+      `acks[].lines` に入れてある。ここが合っていないと、一次回答の字幕
+      だけ行の切れ目の作法が違う画面になる。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.acks = json.loads(MANIFEST.read_text())['acks']
+        cls.server = load_server()
+        cls.font = gen_font16.load(FONT16)
+
+    def test_every_ack_has_lines(self):
+        self.assertEqual(len(self.acks), 5)
+        for ack in self.acks:
+            self.assertIn('lines', ack, ack['file'])
+            self.assertTrue(ack['lines'], ack['file'])
+            self.assertEqual(''.join(ack['lines']).replace(' ', ''),
+                             ack['text'].replace(' ', ''), ack['file'])
+
+    def test_the_lines_match_the_real_server(self):
+        if self.server is None:
+            self.skipTest('public/server/stackee_server.py を import できない')
+        for ack in self.acks:
+            want = [page for _offset, page in
+                    self.server.subtitle_pages(ack['text'])]
+            self.assertEqual(ack['lines'], want, ack['file'])
+
+    def test_our_copy_of_the_rule_matches_the_server(self):
+        """tools/ack_lines.py がサーバの写しとしてずれていないか。"""
+        if self.server is None:
+            self.skipTest('public/server/stackee_server.py を import できない')
+        self.assertEqual(ack_lines.COLUMNS, self.server.SUBTITLE_COLUMNS)
+        self.assertEqual(ack_lines.NO_PAGE_START, self.server.NO_PAGE_START)
+        probes = [ack['text'] for ack in self.acks] + [
+            'あいうえおかきくけこさしすせそたちつてと',
+            'ABC 123 and some English words mixed in here too.',
+            'これは、とても長い一文で、十五桁を超えるので複数行に分かれるはずなのだ。',
+            'うん。',
+            '',
+        ]
+        for text in probes:
+            self.assertEqual(ack_lines.subtitle_lines(text),
+                             [page for _o, page in
+                              self.server.subtitle_pages(text)], text)
+            self.assertEqual(ack_lines.page_width(text),
+                             self.server.page_width(text), text)
+
+    def test_no_line_is_wider_than_the_band(self):
+        for ack in self.acks:
+            for line in ack['lines']:
+                self.assertLessEqual(ack_lines.page_width(line), sub.SUB_COLS,
+                                     line)
+                # 実際に帯へ描いたときの画素数でも確かめる (字形は font16)。
+                self.assertLessEqual(sub.text_px(self.font, line),
+                                     sub.SUB_WIDTH, line)
+
+    def test_no_line_opens_with_punctuation(self):
+        for ack in self.acks:
+            for line in ack['lines']:
+                self.assertNotIn(line[0], ack_lines.NO_PAGE_START, line)
+
+    def test_the_band_only_shows_the_first_three(self):
+        """帯は 3 行。4 行以上あれば本体は先頭 3 行だけ出す。
+
+        ★ いまの 5 文はどれも 2 行なので切られない。ここは「切るときの
+          決まり」を固定するためのもの (本体は main/stackee_audio.c の
+          ack_lines())。
+        """
+        for ack in self.acks:
+            self.assertLessEqual(len(ack['lines']), sub.SUB_LINES, ack['file'])
+        long_text = ('ひとつめの文なのだ。ふたつめの文なのだ。'
+                     'みっつめの文なのだ。よっつめの文なのだ。')
+        lines = ack_lines.subtitle_lines(long_text)
+        self.assertEqual(len(lines), 4)
+        band = '\n'.join(lines[:sub.SUB_LINES])
+        self.assertEqual(band.count('\n'), 2)
+        # 4 行目は帯に出ない = 3 行だけの絵と同じ。
+        self.assertEqual(sub.render(self.font, band).crc(),
+                         sub.render(self.font, '\n'.join(lines)).crc())
 
 
 class BrokenFontTest(unittest.TestCase):

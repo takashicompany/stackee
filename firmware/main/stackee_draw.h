@@ -107,7 +107,9 @@ void stackee_draw_bar(const stackee_canvas_t *c, const stackee_bar_state_t *st,
                       const uint8_t *icons, const stackee_bdf_font_t *font);
 
 // 字幕の帯 (y=250..319) を丸ごと描き直す。
-//   utf8 が NULL か空      … 帯を消す (画面の地の色で塗る)
+// ★ 帯は **いつでも黒**。字幕が無いときも黒いまま文字だけ消える
+//   (2026-09-21 にユーザーの決定で「消すときは白」をやめた)。起動直後から黒。
+//   utf8 が NULL か空      … 文字を消す (黒で塗るだけ)
 //   それ以外               … 黒地に白文字。**改行 (\n) で区切って最大 3 行**。
 //                            1 行で 240 px を超える字は描かない (途中で切らない)
 //                            4 行目以降は捨てる (頁めくりは呼び手の仕事)

@@ -263,13 +263,24 @@ class ExpectedUnitTest(unittest.TestCase):
         fb = self.renderer.framebuffer(face=0, bar=0)
         self.assertEqual(len(fb.buf), 240 * 320 * 2)
 
-    def test_background_is_white_outside_bar_and_face(self):
+    def test_the_gap_between_the_bar_and_the_face_is_white(self):
         fb = self.renderer.framebuffer(face=0, bar=0)
         white = expected_mod.rgb565_bytes(0xFFFFFF)
-        # 顔は y=50..249。帯を出していなければ下も白。
-        for y in (28, 49, 250, 319):
+        for y in (28, 49):
             row = bytes(fb.buf[y * 480:(y + 1) * 480])
             self.assertEqual(row, white * 240, '行 %d は白のはず' % y)
+
+    def test_the_band_is_black_even_without_a_subtitle(self):
+        """★ 帯はいつでも黒 (2026-09-21)。起動直後の 1 枚目から黒い。"""
+        fb = self.renderer.framebuffer(face=0, bar=0)
+        black = expected_mod.rgb565_bytes(0x000000)
+        for y in (expected_mod.SUB_Y, 319):
+            row = bytes(fb.buf[y * 480:(y + 1) * 480])
+            self.assertEqual(row, black * 240, '行 %d は黒のはず' % y)
+        # 顔の最後の行 (y=249) は帯に食われていない。
+        self.assertEqual(expected_mod.SUB_Y,
+                         expected_mod.FACE_Y + expected_mod.FACE_ROWS)
+        self.assertNotEqual(bytes(fb.buf[249 * 480:250 * 480]), black * 240)
 
     def test_face_sits_at_y50_and_ends_at_y249(self):
         # 顔 0 の 1 行目 (= 元絵の 29 行目) が y=50 に入っている (x=0、幅 240)。

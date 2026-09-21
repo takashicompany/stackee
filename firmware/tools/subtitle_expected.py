@@ -13,8 +13,8 @@ tools/check_phase2.py で突き合わせる (顔の CRC 検査と同じ方式)�
                 幅は画面と同じ 240 px
   ・行の区切り  改行 (\n)。4 行目以降は捨てる (頁めくりは呼び手の仕事)
   ・1 行の桁数  15 桁 (全角 16 px / 半角 8 px)。はみ出す字は**描かない**
-  ・色          文字があれば黒地 (0x000000) に白文字 (0xFFFFFF)、
-                空なら画面の地の色 (0xFFFFFF) で塗って帯を消す
+  ・色          **いつでも黒地** (0x000000) に白文字 (0xFFFFFF)。字幕が
+                無くても白に戻さない (2026-09-21。起動直後から黒)
   ・縦位置      i 行目の字形の上端 = 250 + 2 + i*22 + 3
   ・字形が無い字  〓 (U+3013) で代替する
   ・画素の並び  RGB565 / 2 バイト / 上位バイトが先 / 1 行 480 バイト
@@ -90,10 +90,8 @@ class Band:
 
 def render(font, text):
     """main/stackee_draw.c の stackee_draw_subtitle と同じ手順。"""
-    if not text:
-        return Band(SCREEN_BG)              # 帯を消す = 地の色に戻す
-    band = Band(SUB_BG)
-    if font is None:
+    band = Band(SUB_BG)                     # ★ 帯はいつでも黒
+    if not text or font is None:
         return band
     limit = min(WIDTH, SUB_WIDTH)
     for i, line in enumerate(text.split('\n')[:SUB_LINES]):

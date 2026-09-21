@@ -891,10 +891,10 @@ esp_err_t stackee_ui_start(void) {
     if (ui.lock == NULL || ui.sub_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    // 起動直後は帯を出していない (y=250..319 は地の色のまま)。
+    // 起動直後は字幕の文字が無い (帯そのものは黒。下で塗る)。
     ui.sub_want[0] = '\0';
     ui.sub_shown[0] = '\0';
-    ui.sub_shown_valid = true;
+    ui.sub_shown_valid = false;
     ui.canvas.fb = stackee_lcd_framebuffer();
     ui.canvas.stride = STACKEE_LCD_WIDTH * 2;
     ui.canvas.width = STACKEE_LCD_WIDTH;
@@ -924,6 +924,8 @@ esp_err_t stackee_ui_start(void) {
         // 素材が無いなら状態機械を止める (差分表を引けないので描けない)。
         ui.view.frozen = true;
     }
+    // ★ 帯は起動直後から黒 (字幕が無くても白に戻さない)。1 枚目から出す。
+    paint_subtitle("");
     stackee_lcd_flush();
 
     atomic_store(&ui.ready, true);

@@ -258,10 +258,9 @@ int stackee_draw_subtitle_px(const stackee_font16_t *font, const char *utf8) {
 void stackee_draw_subtitle(const stackee_canvas_t *c,
                            const stackee_font16_t *font, const char *utf8) {
     bool empty = (utf8 == NULL || utf8[0] == '\0');
-    // 空なら「帯を消す」= 画面の地の色に戻す (黒い帯を残さない)。
+    // ★ 帯はいつでも黒。空でも地の色に戻さない (文字だけ消える)。
     stackee_draw_fill(c, 0, STACKEE_SUB_Y, c->width, STACKEE_SUB_HEIGHT,
-                      stackee_draw_rgb565(empty ? STACKEE_SCREEN_BG
-                                                : STACKEE_SUB_BG));
+                      stackee_draw_rgb565(STACKEE_SUB_BG));
     if (empty || !stackee_font16_ready(font)) {
         return;
     }
