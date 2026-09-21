@@ -170,6 +170,66 @@
       "name": "MIC_F24",
       "title": "押している間だけ「聞き取り中」の顔にする (キーは F24 を送る)",
       "shortName": "Mic24"
+    },
+    {
+      "name": "MIC_F1",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F1 を送る)",
+      "shortName": "Mic1"
+    },
+    {
+      "name": "MIC_F2",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F2 を送る)",
+      "shortName": "Mic2"
+    },
+    {
+      "name": "MIC_F3",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F3 を送る)",
+      "shortName": "Mic3"
+    },
+    {
+      "name": "MIC_F4",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F4 を送る)",
+      "shortName": "Mic4"
+    },
+    {
+      "name": "MIC_F5",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F5 を送る)",
+      "shortName": "Mic5"
+    },
+    {
+      "name": "MIC_F6",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F6 を送る)",
+      "shortName": "Mic6"
+    },
+    {
+      "name": "MIC_F7",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F7 を送る)",
+      "shortName": "Mic7"
+    },
+    {
+      "name": "MIC_F8",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F8 を送る)",
+      "shortName": "Mic8"
+    },
+    {
+      "name": "MIC_F9",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F9 を送る)",
+      "shortName": "Mic9"
+    },
+    {
+      "name": "MIC_F10",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F10 を送る)",
+      "shortName": "Mic10"
+    },
+    {
+      "name": "MIC_F11",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F11 を送る)",
+      "shortName": "Mic11"
+    },
+    {
+      "name": "MIC_F12",
+      "title": "押している間だけ「聞き取り中」の顔にする (キーは F12 を送る)",
+      "shortName": "Mic12"
     }
   ]
 }

@@ -27,11 +27,17 @@
 
 #define STACKEE_EXT_MT_MAX 8
 
-// VIA の名前付きの入口 (MIC_F13..MIC_F24) を MIC(kc) に直す。
-// 入口でなければそのまま返す。
+// VIA の名前付きの入口 (MIC_F13..MIC_F24 / MIC_F1..MIC_F12) を MIC(kc) に
+// 直す。入口でなければそのまま返す。
+//
+// ★ 表は生成物 (stackee_keycodes.h)。並びは via/stackee.json の
+//   customKeycodes と同じ順で、**うしろにしか足さない** — 番号は
+//   保存済みの配列に入っているため。
 static uint16_t mic_resolve(uint16_t keycode) {
+    static const uint8_t inner[STACKEE_MIC_ALIAS_COUNT] =
+        STACKEE_MIC_ALIAS_KEYCODES;
     if (keycode >= STACKEE_MIC_ALIAS_FIRST && keycode <= STACKEE_MIC_ALIAS_LAST) {
-        return MIC(STACKEE_MIC_ALIAS_KC0 + (keycode - STACKEE_MIC_ALIAS_FIRST));
+        return MIC(inner[keycode - STACKEE_MIC_ALIAS_FIRST]);
     }
     return keycode;
 }

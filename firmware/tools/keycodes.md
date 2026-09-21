@@ -131,6 +131,7 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 | 6 | `STK_TOUCH_SCROLL` | `KC.TOUCH_SCROLL` | 4 (タッチパッド) |
 | 7〜 | `STK_MT_n` | (上の §3) | 済 |
 | 8〜19 | `MIC_F13`〜`MIC_F24` | (KMK 側は `KC.F13` のまま) | 済 (`MIC(kc)` の名前付きの入口) |
+| 20〜31 | `MIC_F1`〜`MIC_F12` | — | 済 (同上。2026-09-21 にうしろへ追加) |
 
 ### `MIC(kc)` — 顔を変える包み
 
@@ -147,9 +148,10 @@ MIC(KC_F13) = 0x7F68
 0x7E00..0x7E3F の **64 個しかなく**、VIA の `customKeycodes` はその並び順で
 番号が決まるので、256 個の連続領域はそこに入らない。そこで:
 
-* **VIA / Remap の `Custom` タブ** … `MIC_F13`〜`MIC_F24` の 12 個を
-  `customKeycodes` の末尾 (0x7E08..0x7E13) に置く。本体が `MIC(F13..F24)` に
-  読み替える。
+* **VIA / Remap の `Custom` タブ** … `MIC_F13`〜`MIC_F24` (0x7E08..0x7E13) と
+  `MIC_F1`〜`MIC_F12` (0x7E14..0x7E1F) の 24 個を `customKeycodes` の末尾に
+  置く。本体が `MIC(kc)` に読み替える。**足すのはいつもうしろ** —
+  番号は保存済みの配列に入っている。
 * **それ以外のキー** … Remap の「Any」に `0x7F00 | kc` を 16 進で入れる
   (例: `MIC(KC_A)` = `0x7F04`)。
 

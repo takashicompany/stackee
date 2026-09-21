@@ -180,7 +180,9 @@ class ViaDefinitionTest(unittest.TestCase):
         names = [c['name'] for c in self.via['customKeycodes']]
         self.assertEqual(names.index('STK_MT_0'), 7)      # 0x7E07 のまま
         self.assertEqual(names.index('MIC_F13'), 8)       # 0x7E08 からうしろへ
-        self.assertEqual(names[-1], 'MIC_F24')            # 0x7E13
+        self.assertEqual(names.index('MIC_F24'), 19)      # 0x7E13
+        self.assertEqual(names.index('MIC_F1'), 20)       # 0x7E14 (あとで足した)
+        self.assertEqual(names[-1], 'MIC_F12')            # 0x7E1F
         # ヘッダの enum と VIA の並びが 1 つずつ同じか。
         for index, name in enumerate(names):
             self.assertIn('%-20s = QK_KB_0 + %d,' % (name, index), self.header)
@@ -189,13 +191,17 @@ class ViaDefinitionTest(unittest.TestCase):
         # VIA の Custom タブは QK_KB (0x7E00..0x7E3F) の 64 個しか持てない。
         self.assertLessEqual(len(names), 64)
 
-    def test_the_mic_entries_cover_f13_to_f24(self):
+    def test_the_mic_entries_cover_f1_to_f24(self):
+        """F13..F24 が先、F1..F12 がそのうしろ (番号を動かさないため)。"""
         names = [c['name'] for c in self.via['customKeycodes']]
         mic = [n for n in names if n.startswith('MIC_F')]
-        self.assertEqual(mic, ['MIC_F%d' % n for n in range(13, 25)])
+        self.assertEqual(mic, ['MIC_F%d' % n for n in
+                               list(range(13, 25)) + list(range(1, 13))])
         for entry in self.via['customKeycodes']:
             if entry['name'].startswith('MIC_F'):
                 self.assertIn(entry['name'][4:], entry['title'])
+                self.assertEqual(entry['shortName'],
+                                 'Mic' + entry['name'][5:])
 
     def test_the_mic_range_does_not_touch_the_other_custom_keys(self):
         """MIC(kc) は QK_USER 側。QK_KB の独自キーと重ならない。"""
@@ -205,9 +211,17 @@ class ViaDefinitionTest(unittest.TestCase):
         # 0x7F00..0x7FFF は QK_USER (0x7E40..0x7FFF) の中、QK_KB の外。
         self.assertGreater(gen_keymap.MIC_BASE, 0x7E3F)
         self.assertLessEqual(gen_keymap.MIC_BASE | 0xFF, 0x7FFF)
-        # 名前付きの入口は F13..F24 の 12 個ぶん。
-        self.assertEqual(len(gen_keymap.MIC_ALIAS_KEYCODES), 12)
-        self.assertEqual(gen_keymap.MIC_ALIAS_KEYCODES[0], 0x68)
+        # 名前付きの入口は F13..F24 + F1..F12 の 24 個ぶん。
+        self.assertEqual(len(gen_keymap.MIC_ALIAS_KEYCODES), 24)
+        self.assertEqual(list(gen_keymap.MIC_ALIAS_KEYCODES),
+                         [0x68 + i for i in range(12)] +
+                         [0x3A + i for i in range(12)])
+        # ヘッダの表と同じ並びか (本体はこれを引いて読み替える)。
+        self.assertIn('    { %s }'
+                      % ', '.join('0x%02Xu' % kc
+                                  for kc in gen_keymap.MIC_ALIAS_KEYCODES),
+                      self.header)
+        self.assertIn('#define STACKEE_MIC_ALIAS_COUNT 24', self.header)
 
     def test_matrix_is_five_by_ten(self):
         self.assertEqual(self.via['matrix'], {'rows': 5, 'cols': 10})

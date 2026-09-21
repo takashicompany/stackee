@@ -101,16 +101,24 @@ N_FIXED_CUSTOM = len(CUSTOM_KEYS)
 #   VIA で変えた配列として **NVS に保存されている**。途中に足すとうしろが
 #   1 つずつずれ、保存済みの配列の意味が黙って変わる。だから新しい独自キーは
 #   いちばんうしろに足す (STK_MT_0 = 0x7E07 は動かない)。
-# いまの中身は `MIC(kc)` の名前付きの入口 12 個 (F13〜F24)。VIA / Remap の
-# `Custom` タブから選べるのはここに並べたものだけなので、よく使う 12 個を
-# 名前で出しておく。**それ以外のキーは Remap の「Any」に 16 進で
-# `0x7F00 | kc` を入れれば使える** (README §10-1)。
-TRAILING_CUSTOM_KEYS = tuple(
-    ('MIC_F%d' % n, None,
-     '押している間だけ「聞き取り中」の顔にする (キーは F%d を送る)' % n,
-     'Mic%d' % n)
-    for n in range(13, 25)
-)
+# いまの中身は `MIC(kc)` の名前付きの入口 24 個 (F13〜F24 のあとに F1〜F12)。
+# VIA / Remap の `Custom` タブから選べるのはここに並べたものだけなので、
+# よく使う F キーを名前で出しておく。**それ以外のキーは Remap の「Any」に
+# 16 進で `0x7F00 | kc` を入れれば使える** (README §10-1)。
+#
+# ★ 並びは **F13〜F24 が先**。あとから足した F1〜F12 をうしろに置くため
+#   (2026-09-21)。VIA の番号は並び順で決まり、保存済みの配列に入っている。
+#   途中に足すと、保存済みの `MIC_F13` (0x7E08) が別のキーに化ける。
+_MIC_ALIAS_F = tuple(range(13, 25)) + tuple(range(1, 13))
+
+
+def _mic_alias_entry(n):
+    return ('MIC_F%d' % n, None,
+            '押している間だけ「聞き取り中」の顔にする (キーは F%d を送る)' % n,
+            'Mic%d' % n)
+
+
+TRAILING_CUSTOM_KEYS = tuple(_mic_alias_entry(n) for n in _MIC_ALIAS_F)
 
 # MIC(kc) の本体側の符号 (main/qmk_port/stackee_holdtap.c)。
 #
@@ -120,7 +128,10 @@ TRAILING_CUSTOM_KEYS = tuple(
 #   置く。VIA からは上の 12 個の名前付きの入口を通って届く (本体が
 #   MIC(kc) に読み替える)。Remap の「Any」なら MIC(kc) を直に書ける。
 MIC_BASE = 0x7F00
-MIC_ALIAS_KEYCODES = tuple(0x68 + i for i in range(12))      # F13..F24
+# 入口の並びに合わせた基本キーコード。F1..F12 = 0x3A..0x45、
+# F13..F24 = 0x68..0x73 (QMK の keycodes.h)。
+MIC_ALIAS_KEYCODES = tuple(
+    (0x68 + (n - 13)) if n >= 13 else (0x3A + (n - 1)) for n in _MIC_ALIAS_F)
 
 # 既定配列の差し替え。KMK 側 (firmware/kmk/keymap.py) を触らずに、
 # **この木だけ**で位置と独自キーを結びつける。
@@ -686,8 +697,8 @@ def render_keycodes_h(ext_mods):
         '//',
         '// ★ 置き場は QK_USER (0x7E40..0x7FFF) の上半分。QK_KB は 0x7E00..',
         '//   0x7E3F の 64 個しかなく、256 個の連続領域が入らないため。',
-        '//   VIA の Custom タブには上の MIC_F13..MIC_F24 が並び、本体が',
-        '//   それを MIC(F13..F24) に読み替える。Remap の「Any」なら',
+        '//   VIA の Custom タブには上の MIC_F13..MIC_F24 / MIC_F1..MIC_F12 が',
+        '//   並び、本体がそれを MIC(kc) に読み替える。Remap の「Any」なら',
         '//   0x7F00 | kc を直に書ける。',
         '#define STACKEE_MIC_BASE      0x7F00u',
         '#define STACKEE_MIC_KC_MIN    0x04u      // KC_A。これ未満は包まない',
@@ -696,10 +707,14 @@ def render_keycodes_h(ext_mods):
         '#define MIC(kc)               (STACKEE_MIC_BASE | ((kc) & 0xFFu))',
         '#define STACKEE_MIC_INNER(code) ((uint8_t)((code) & 0xFFu))',
         '',
-        '// VIA の名前付きの入口 (MIC_F13..MIC_F24) → MIC(F13..F24)。',
+        '// VIA の名前付きの入口 (MIC_F13..MIC_F24、そのうしろに MIC_F1..MIC_F12)。',
+        '// 並びは customKeycodes と同じ順。うしろにしか足さない。',
         '#define STACKEE_MIC_ALIAS_FIRST %s' % ('(QK_KB_0 + %d)' % trailing_base),
         '#define STACKEE_MIC_ALIAS_LAST  %s' % ('(QK_KB_0 + %d)' % last),
-        '#define STACKEE_MIC_ALIAS_KC0   0x%02Xu    // KC_F13' % MIC_ALIAS_KEYCODES[0],
+        '#define STACKEE_MIC_ALIAS_COUNT %d' % len(TRAILING_CUSTOM_KEYS),
+        '// 入口 i が送る基本キーコード (i = keycode - STACKEE_MIC_ALIAS_FIRST)。',
+        '#define STACKEE_MIC_ALIAS_KEYCODES \\',
+        '    { %s }' % ', '.join('0x%02Xu' % kc for kc in MIC_ALIAS_KEYCODES),
         '',
         '// 修飾つきタップの HoldTap (default_keymap.c が中身を持つ)。',
         'typedef struct {',

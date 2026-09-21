@@ -31,10 +31,22 @@ enum stackee_keycodes {
     MIC_F22              = QK_KB_0 + 17,
     MIC_F23              = QK_KB_0 + 18,
     MIC_F24              = QK_KB_0 + 19,
+    MIC_F1               = QK_KB_0 + 20,
+    MIC_F2               = QK_KB_0 + 21,
+    MIC_F3               = QK_KB_0 + 22,
+    MIC_F4               = QK_KB_0 + 23,
+    MIC_F5               = QK_KB_0 + 24,
+    MIC_F6               = QK_KB_0 + 25,
+    MIC_F7               = QK_KB_0 + 26,
+    MIC_F8               = QK_KB_0 + 27,
+    MIC_F9               = QK_KB_0 + 28,
+    MIC_F10              = QK_KB_0 + 29,
+    MIC_F11              = QK_KB_0 + 30,
+    MIC_F12              = QK_KB_0 + 31,
 };
 
 #define STACKEE_KEYCODE_FIRST QK_KB_0
-#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 19)
+#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 31)
 #define STK_MT_BASE           (QK_KB_0 + 7)
 
 // ---------------------------------------------------------------
@@ -46,8 +58,8 @@ enum stackee_keycodes {
 //
 // ★ 置き場は QK_USER (0x7E40..0x7FFF) の上半分。QK_KB は 0x7E00..
 //   0x7E3F の 64 個しかなく、256 個の連続領域が入らないため。
-//   VIA の Custom タブには上の MIC_F13..MIC_F24 が並び、本体が
-//   それを MIC(F13..F24) に読み替える。Remap の「Any」なら
+//   VIA の Custom タブには上の MIC_F13..MIC_F24 / MIC_F1..MIC_F12 が
+//   並び、本体がそれを MIC(kc) に読み替える。Remap の「Any」なら
 //   0x7F00 | kc を直に書ける。
 #define STACKEE_MIC_BASE      0x7F00u
 #define STACKEE_MIC_KC_MIN    0x04u      // KC_A。これ未満は包まない
@@ -56,10 +68,14 @@ enum stackee_keycodes {
 #define MIC(kc)               (STACKEE_MIC_BASE | ((kc) & 0xFFu))
 #define STACKEE_MIC_INNER(code) ((uint8_t)((code) & 0xFFu))
 
-// VIA の名前付きの入口 (MIC_F13..MIC_F24) → MIC(F13..F24)。
+// VIA の名前付きの入口 (MIC_F13..MIC_F24、そのうしろに MIC_F1..MIC_F12)。
+// 並びは customKeycodes と同じ順。うしろにしか足さない。
 #define STACKEE_MIC_ALIAS_FIRST (QK_KB_0 + 8)
-#define STACKEE_MIC_ALIAS_LAST  (QK_KB_0 + 19)
-#define STACKEE_MIC_ALIAS_KC0   0x68u    // KC_F13
+#define STACKEE_MIC_ALIAS_LAST  (QK_KB_0 + 31)
+#define STACKEE_MIC_ALIAS_COUNT 24
+// 入口 i が送る基本キーコード (i = keycode - STACKEE_MIC_ALIAS_FIRST)。
+#define STACKEE_MIC_ALIAS_KEYCODES \
+    { 0x68u, 0x69u, 0x6Au, 0x6Bu, 0x6Cu, 0x6Du, 0x6Eu, 0x6Fu, 0x70u, 0x71u, 0x72u, 0x73u, 0x3Au, 0x3Bu, 0x3Cu, 0x3Du, 0x3Eu, 0x3Fu, 0x40u, 0x41u, 0x42u, 0x43u, 0x44u, 0x45u }
 
 // 修飾つきタップの HoldTap (default_keymap.c が中身を持つ)。
 typedef struct {

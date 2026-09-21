@@ -154,6 +154,11 @@ KC_A = 0x04
 # MIC(kc) = 0x7F00 | kc (main/qmk_port/stackee_keycodes.h)。
 MIC_BASE = 0x7F00
 MIC_ALIAS_F13 = 0x7E08          # VIA の名前付きの入口 (MIC_F13)
+MIC_ALIAS_F1 = 0x7E14           # そのうしろに足した MIC_F1
+# 入口の並び (via/stackee.json の customKeycodes と同じ順)。
+# F13..F24 = 0x68..0x73、F1..F12 = 0x3A..0x45。
+MIC_ALIAS_INNER = ([0x68 + i for i in range(12)] +
+                   [0x3A + i for i in range(12)])
 
 
 def MIC(kc):
@@ -350,17 +355,47 @@ class CustomKeyTest(unittest.TestCase):
                                    'CUSTOM %s 0' % STK_MIC,
                                    NONE], hex(kc))
 
-    def test_the_via_alias_is_the_same_as_mic_f13(self):
-        """VIA の名前付きの入口 (0x7E08..0x7E13) は MIC(F13..F24) になる。"""
-        for index in (0, 3, 11):                 # F13 / F16 / F24
-            kc = KC_F13 + index
-            lines = run('kc 3 9 0x%04X\n' % (MIC_ALIAS_F13 + index)
+    def test_every_via_alias_resolves_to_its_key(self):
+        """名前付きの入口 24 個 (F13..F24 → F1..F12) が全部読み替わるか。
+
+        ★ 並びは customKeycodes と同じ順。**うしろにしか足さない** —
+          番号は保存済みの配列に入っているので、途中に足すと
+          保存済みの MIC_F13 (0x7E08) が別のキーに化ける。
+        """
+        self.assertEqual(len(MIC_ALIAS_INNER), 24)
+        for index, kc in enumerate(MIC_ALIAS_INNER):
+            code = MIC_ALIAS_F13 + index
+            lines = run('kc 3 9 0x%04X\n' % code
                         + 't 100\nmark a\n' + tap(POS_MIC, 100, 50) + 't 400\n')
             out = after(lines, 'a')
             self.assertEqual(out, ['CUSTOM %s 1' % STK_MIC,
                                    kb(0, kc),
                                    'CUSTOM %s 0' % STK_MIC,
-                                   NONE], hex(kc))
+                                   NONE],
+                             '入口 0x%04X → MIC(0x%02X)' % (code, kc))
+
+    def test_the_existing_alias_numbers_did_not_move(self):
+        # F1..F12 を足しても、先にあった F13..F24 の番号は動かない。
+        self.assertEqual(MIC_ALIAS_F13, 0x7E08)
+        self.assertEqual(MIC_ALIAS_INNER[0], KC_F13)          # 0x7E08 = MIC(F13)
+        self.assertEqual(MIC_ALIAS_INNER[11], KC_F13 + 11)    # 0x7E13 = MIC(F24)
+        self.assertEqual(MIC_ALIAS_F1, MIC_ALIAS_F13 + 12)    # 0x7E14
+        self.assertEqual(MIC_ALIAS_INNER[12], 0x3A)           # 0x7E14 = MIC(F1)
+        self.assertEqual(MIC_ALIAS_INNER[23], 0x45)           # 0x7E1F = MIC(F12)
+
+    def test_a_plain_f_key_is_not_wrapped(self):
+        # 素の F1 は顔を変えない (包んでいないので独自キーですらない)。
+        lines = run('kc 3 9 0x003A\n'
+                    + 't 100\nmark p\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        out = after(lines, 'p')
+        self.assertEqual(out, [kb(0, 0x3A), NONE])
+        self.assertFalse([l for l in out if l.startswith('CUSTOM ')])
+
+    def test_the_slot_after_the_last_alias_is_not_wrapped(self):
+        # 入口の 1 つうしろ (0x7E20) はまだ何でもない。
+        lines = run('kc 3 9 0x%04X\n' % (MIC_ALIAS_F13 + len(MIC_ALIAS_INNER))
+                    + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        self.assertEqual(after(lines, 'z'), [])
 
     def test_mic_does_not_overlap_the_other_custom_keys(self):
         # 0x7E00..0x7E07 は今までの独自キーのまま (MIC に食われていない)。

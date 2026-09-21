@@ -469,7 +469,7 @@ factory = 0x410000」と思い込み、ビルドの最後に誤った書き込�
 ## 4. 実機に触らない確認
 
 ```
-python3 firmware/tools/test_keyseq_host.py     # 打鍵列テスト・既定配列の移行 (44 件)
+python3 firmware/tools/test_keyseq_host.py     # 打鍵列テスト・既定配列の移行 (47 件)
 python3 firmware/tools/test_gen_keymap.py      # 配列生成 (22 件)
 python3 firmware/tools/test_console_host.py    # コンソールの組み立て (26 件)
 python3 firmware/tools/test_tools.py           # 道具・HID 記述子・ROM・nvs・USB 復帰 (67 件)
@@ -489,7 +489,7 @@ python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **460 件**。どれも実機に触らない。
+全部で **463 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -725,8 +725,8 @@ python3 firmware/kmk/tools/stackee_console_client.py status
 そのままキーコードの番号 (`0x7E00` から) になり、**VIA で変えた配列として
 NVS に保存されている**。途中に足すとうしろが 1 つずつずれ、保存済みの配列の
 意味が黙って変わる。置き場は `tools/gen_keymap.py` の
-`TRAILING_CUSTOM_KEYS` (2026-09-21 の `MIC_F13`〜`MIC_F24` がそれ。
-`STK_MT_0` = `0x7E07` は動かしていない)。
+`TRAILING_CUSTOM_KEYS` (2026-09-21 の `MIC_F13`〜`MIC_F24`、そのあとに
+足した `MIC_F1`〜`MIC_F12` がそれ。`STK_MT_0` = `0x7E07` は動かしていない)。
 
 ★ **既定配列を変えたら「移行」を足す。** 書き換えた本体は保存済みの配列で
 動くので、**新しい既定は黙って無視される**。
@@ -1002,14 +1002,17 @@ MIC(KC_F13) = 0x7F68                  既定配列の右下 (レイヤー 0 / ro
 
 | 使い方 | どうするか |
 |---|---|
-| VIA / Remap の `Custom` タブ | **`MIC_F13`〜`MIC_F24`** の 12 個が並ぶ。よく使う F キーはここから選べる |
+| VIA / Remap の `Custom` タブ | **`MIC_F13`〜`MIC_F24`** と **`MIC_F1`〜`MIC_F12`** の 24 個が並ぶ (この順。うしろにしか足さない) |
 | それ以外のキー | Remap の **「Any」** に `0x7F00 \| kc` を 16 進で入れる (例: `MIC(KC_A)` = `0x7F04`) |
 
 ★ **なぜ 2 通りあるのか。** VIA の `customKeycodes` は並び順がそのまま
 キーコードの番号 (`QK_KB_0` = 0x7E00 から) になり、`QK_KB` は
 **0x7E00..0x7E3F の 64 個しかない**。「MIC + 8 bit」の 256 個の連続領域は
 そこに入らないので、領域は `QK_USER` (0x7E40..0x7FFF) の上半分に置き、
-VIA からは 12 個の名前付きの入口を通す (本体が `MIC(kc)` に読み替える)。
+VIA からは 24 個の名前付きの入口を通す (本体が `MIC(kc)` に読み替える)。
+入口の並びは **`MIC_F13`〜`MIC_F24`、そのうしろに `MIC_F1`〜`MIC_F12`**。
+F1〜F12 はあとから足したので (2026-09-21)、先にあった F13〜F24 の番号
+(0x7E08〜0x7E13) は動かしていない — **保存済みの配列がその番号で入っている**。
 
 #### ★ 既定配列を変えても、保存済みの配列は変わらない (2026-09-21 に実機で踏んだ)
 
