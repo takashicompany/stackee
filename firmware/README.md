@@ -484,13 +484,13 @@ python3 firmware/tools/test_wifi_host.py       # 段階 3: Wi-Fi の状態機械
 python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
 python3 firmware/tools/test_subtitle_host.py   # 字幕: フォント・帯・一次回答/案内の行 (38 件)
-python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 (40 件、§25)
+python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 + ブラウザ経路 (55 件、§25)
 python3 firmware/tools/test_micopen_host.py    # マイクの開け方の印 (8 件、§11-5)
 python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **502 件**。どれも実機に触らない。
+全部で **517 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -534,8 +534,61 @@ python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ### ★ 普段の更新は Raw HID の OTA を使う (2026-09-21〜)
 
 ```
-node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin
+node firmware/tools/ota_browser.mjs --image firmware/build-full/stackee.bin   # 人と同じ道
+node firmware/tools/ota.mjs         --image firmware/build-full/stackee.bin   # 中核 JS だけ
 ```
+
+**どちらも同じ `docs/js/ota.js` を通る。**違いは「ページを通るかどうか」。
+
+| | `ota_browser.mjs` | `ota.mjs` |
+|---|---|---|
+| 通る道 | **操作盤のページを本物の Chrome で開いてクリック** | 中核 JS を Node から呼ぶ |
+| 確かめられるもの | ボタンの有効・無効、ファイル選択、確認ダイアログ、進捗の出し方、再起動後の表示 — **人が見るもの全部** | 枠・credit・sha256 の照合 |
+| 要るもの | Playwright (`npm i -g playwright`) | `node-hid` |
+| 実測 (1,396,864 B) | 59.7 秒 / 22.8 KB/s | 58.7 秒 / 23.2 KB/s |
+
+★ **ヘッドレス。ウィンドウは出ないしフォーカスも奪わない。**
+`--page https://takashi.company/stackee/` で公開ページを相手にもできる
+(既定は手元の `docs/` を `http://127.0.0.1:8730/` で配って開く =
+**未 push のページをそのまま試せる**)。
+
+#### 機器選択ダイアログをどう越えるか
+
+WebHID の選択ダイアログ (`navigator.hid.requestDevice`) は**自動化できない**
+(`research/stackee/web_flash_2026-09-20.md` §3)。`ota_browser.mjs` は
+**使い捨てプロファイルに「この機器を許可した」と書いてから**開く。
+
+* Chrome は許可した機器をプロファイルの `Preferences` に残す
+  (`profile.content_settings.exceptions.hid_chooser_data`)。
+  **シリアル番号を持つ機器だけ**永続する形で、stackee は持っている
+  (`44B16F3EC808`)。だから同じ形を先に書いておけば、ページは
+  `navigator.hid.getDevices()` でそのまま拾う (ページ側はもともと
+  「許可済みならダイアログを出さずに開き直す」作りになっている)。
+* **root も管理ポリシーも要らない。**使い捨てなので後に何も残らない。
+
+★ **管理ポリシーの道は使わなかった (試して効かなかった)。**
+`WebHidAllowDevicesForUrls` を `defaults write com.google.chrome.for.testing …`
+(ユーザー領域) に書いても **`chrome://policy` に 1 つも出ない**
+(2026-09-22 に実測)。macOS で効かせるには
+`/Library/Managed Preferences/com.google.chrome.for.testing.plist` に置く
+必要があり、**root が要る**。要るときのコマンドは:
+
+```
+sudo defaults write /Library/Managed\ Preferences/com.google.chrome.for.testing \
+  WebHidAllowDevicesForUrls -array \
+  '<dict><key>devices</key><array><dict><key>vendor_id</key><integer>12346</integer><key>product_id</key><integer>33050</integer></dict></array><key>urls</key><array><string>https://takashi.company</string></array></dict>'
+sudo killall cfprefsd
+```
+
+★ Playwright の Chrome for Testing の bundle id は
+**`com.google.chrome.for.testing`** (`com.google.ChromeForTesting` ではない。
+実機で `Info.plist` を読んで確かめた)。
+
+★ **ヘッドレスの種類に注意。** Playwright の既定のヘッドレスは
+`chromium_headless_shell` で、これは機能を削った別物。`ota_browser.mjs` は
+`channel: 'chromium'` を渡して**「新しいヘッドレス」(中身は普通の Chrome)**
+を使う。実測では `navigator.hid` はどちらにも生えていて、**許可さえ書いて
+あればどちらでも機器を拾えた**が、揃っているほうを使う。
 
 本体が動いたまま、使っていないほうの区画へ書いて切り替える。**ROM の
 ダウンロードモードには入らない**ので、固まる経路が無い。書き込み中も
@@ -3428,7 +3481,7 @@ otadata は書き換わらない (`set_actual_ota_seq()` は otadata 区画が
 ### 25-11. 実機に触らない確認
 
 ```
-python3 firmware/tools/test_ota_host.py    # 段階 5: アプリ内 OTA (40 件)
+python3 firmware/tools/test_ota_host.py    # 段階 5: アプリ内 OTA + ブラウザ経路 (55 件)
 node --test 'test/**/*.mjs'                # 操作盤 (147 件。うち ota は 38 件)
 ```
 

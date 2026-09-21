@@ -3,11 +3,11 @@
     {
       "file": "stackee-full.bin",
       "profile": "full",
-      "version": "5639a53",
-      "size": 1391824,
-      "sha256": "3c4707fb1dd8ad63175d59f0ee6b479aa9741d93c493d2c482e897c3a2ceaf46",
-      "image_sha256": "f6ba59615656085122c443f44c782c73fdd70dfa9e95d5c5097391eaf51e02e0",
-      "date": "2026-09-20T22:48:11Z"
+      "version": "0fe6810",
+      "size": 1396864,
+      "sha256": "a76e1c04dbb44fccc76f64ed630a6500f4a27a141a1032b944734b8a2ff1860a",
+      "image_sha256": "6e1f7393982ee5d8520d5961852ca98edd9af263aab3aaffd775da86f95a8695",
+      "date": "2026-09-21T17:51:28Z"
     }
   ]
 }

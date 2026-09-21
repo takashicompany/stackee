@@ -1510,3 +1510,112 @@ CSM が normal になる時刻とぴたり合う。会話の「無音なら送�
 | **UAC が開いている間の押下** | 測定中は一度も開かなかった(`was_open` は 5 回とも false)。研究メモ §2.3 の「UAC が握っていると 140 ms が消える」は再現していない |
 | **本物のキーを指で押したとき** | `key.inject` と `audio.selftest` で測った |
 | **消費電力** | ES7210 の開け閉めの回数は変えていないので変わらないはずだが、測っていない |
+
+## 案内の字幕 / 書き込みをブラウザのページ経由で 2026-09-22
+
+像 `0fe6810`(full、1,396,864 B、ファイル全体 `a76e1c04…`、名札 `6e1f7393…`)。
+**この版の書き込みは `tools/ota_browser.mjs` だけで行った**(`ota.mjs` 不使用)。
+
+### ★ ヘッドレスのブラウザで、人と同じ手順で書けた
+
+| 段 | 結果 |
+|---|---|
+| ヘッドレスで WebHID が動くか | **動いた。**`channel: 'chromium'`(新しいヘッドレス)。`navigator.hid` は既定の `chromium_headless_shell` にも生えているが、機能の揃っているほうを使った |
+| 機器選択ダイアログ | **使い捨てプロファイルに許可を書いて越えた。**root も管理ポリシーも不要 |
+| 管理ポリシー `WebHidAllowDevicesForUrls` | **ユーザー領域では効かなかった。**`defaults write com.google.chrome.for.testing …` を書いて起動しても `chrome://policy` に 1 つも出ない。効かせるには `/Library/Managed Preferences/` = **root**。コマンドは README §5 に書いた (実行していない) |
+| bundle id | **`com.google.chrome.for.testing`**(`com.google.ChromeForTesting` ではない。`Info.plist` を読んで確認) |
+
+許可の書き方 (Chrome が許可を残すのと同じ形):
+
+```
+Preferences → profile.content_settings.exceptions.hid_chooser_data
+  "http://127.0.0.1:8730,*" → setting.chosen-objects[0] =
+     { name: "M5Stack Core S3", vendor-id: 12346, product-id: 33050,
+       serial-number: "44B16F3EC808" }
+```
+
+**シリアル番号を持つ機器だけ**この形で永続する。stackee は持っている。
+
+### 書き込みの実測(1,396,864 B)
+
+| 経路 | 転送 | 速さ | ボタンから完了まで | 全体 |
+|---|---:|---:|---:|---:|
+| **`ota_browser.mjs`**(ページ経由) | **59.7 秒** | **22.8 KB/s** | 69.3 秒 | 72.2 秒 |
+| `ota.mjs`(中核 JS 直) 参考 | 58.7 秒 | 23.2 KB/s | — | — |
+
+**差は約 1 秒 (2%)。** ページの進捗表示とブラウザの往復ぶん。
+
+ページから読んだ値:
+
+```
+[info]  いま ota_0 / 482ba08 / f332d509bd063e73…
+[pick]  stackee.bin / 1,396,864 B (1364.1 KB) / 名札 6e1f7393982ee5d8…
+[done]  書き込んで切り替えました (59.7 秒)。いまは 6e1f7393982ee5d8… で動いています。
+[after] いま ota_1 / 0fe6810 / 6e1f7393982ee5d8520d5961852ca98edd9af263aab3aaffd775da86f95a8695
+```
+
+`app.info`(Raw HID で読み直し)も一致: running/boot = **ota_1 / `0fe6810` /
+`6e1f7393…`**、next = ota_0 `482ba08`。
+
+★ ページ側は 1 行も変えていない。もともと「許可済みならダイアログを出さずに
+開き直す」作り (`navigator.hid.getDevices()`) だったので、許可を先に書くだけで
+ボタン 1 つで繋がった。
+
+### 案内の字幕 — 実機の帯 (CRC32)
+
+期待値: 黒 **2186780939** / 録音中の案内 **3405187874** / 考えています… **856996419**
+
+**(a) `key.inject` で STK_TALK を 1.5 秒押す(環境音だけ → 破棄)**
+
+```
+t=128   recording  guide=rec   crc=2186780939  黒 (まだ塗る前の 1 周)
+t=420   recording  guide=rec   crc=3405187874  案内: マイクに向かって/話しかけてください
+t=1822  idle       guide=none  crc=2186780939  黒 (無音で破棄 → 案内も消えた)
+→ dropped_silent=1 / turns=0
+```
+
+**(b) `talk.inject`(声あり。録音の道は通らないので録音中の案内は出ない)**
+
+```
+t=122    upload     guide=held   crc=3384805615  一次回答 1「了解なのだ。/ちょっと考えるのだ。」
+t=3174   upload     guide=think  crc= 856996419  案内: 考えています…   ← ack が鳴り終わってから
+t=28274  poll_wait  guide=think  crc= 856996419  (そのまま)
+t=35182  audio      guide=think  crc= 856996419  (そのまま)
+t=42993  playing    guide=held   crc=1629836441  返答の頁 0「了解なのだ。」
+t=44429  idle       guide=none   crc=2186780939  黒
+```
+
+**一次回答 → 考えています… → 返答の字幕 → 黒** の順に、CRC32 がすべて
+`subtitle_expected.py` の期待値と一致した(本文は推測ではなく CRC が合ったもの)。
+`guide` の値 (`held` → `think` → `held` → `none`) も、帯の持ち主が
+入れ替わっていることを示している。
+
+★ t=40160 に 1 本だけ `crc=None` の読みがあった。返答 PCM の受信中に
+`lcd.crc` の応答が取れなかったもので、帯の中身ではない。
+
+### check_phase2
+
+全項目 OK。**字幕の帯 15/15**(案内の 2 通りを足した)、32 表情 32/32、
+帯の描画そのもの 最悪 3551 us(合否 6000)、打鍵の遅延 平常 1.555 ms /
+描画中 1.465 ms / 字幕中 1.383 ms。
+
+### 配布版
+
+`tools/release_image.sh` で `docs/firmware/` をこの版 (`0fe6810`) に更新した。
+
+### ホストテスト
+
+**517 件**(前 487 件)。`test_talk_host` 73→83(案内の状態遷移)、
+`test_subtitle_host` 33→38(案内の文面・字形・帯に収まるか)、
+`test_ota_host` 40→55(`ota_browser.mjs` の引数・完了の読み取り・
+手元配信が根の外へ出ないこと・許可の形。**Playwright は使わない範囲**)。
+
+### 未検証のまま
+
+| 項目 | なぜ |
+|---|---|
+| **本物のキーを指で押したときの案内** | `key.inject` で確かめた |
+| **人が喋る往復での案内** | 音を鳴らさない約束のため。`talk.inject` は録音の道を通らないので、**録音中の案内 → ack** の繋ぎ目だけは実機で通していない(ホストテストでは見ている) |
+| **公開ページ (`--page https://…`) からの書き込み** | 手元配信で書いた。公開ページ相手は引数の道が同じだけで、実行していない |
+| **管理ポリシーの道** | root が要るので実行していない。コマンドだけ README に置いた |
+| **Windows / Linux での許可の書き方** | macOS でしか試していない (プロファイルの形は同じはず) |

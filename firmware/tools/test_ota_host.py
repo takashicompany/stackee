@@ -652,6 +652,146 @@ class CommitOnlyTest(unittest.TestCase):
         self.assertIn('out.commitOnly = true', src)
 
 
+class BrowserToolTest(unittest.TestCase):
+    """`tools/ota_browser.mjs` のうち **Playwright を使わない**ところ。
+
+    ★ ブラウザを起動するところは実機とブラウザが要るので、ここでは触らない。
+      見るのは引数の読み方・完了の文面の読み取り・手元配信の安全・
+      許可を書く形。どれも純粋な関数にしてある。
+    """
+
+    TOOL = os.path.join(HERE, 'ota_browser.mjs')
+
+    def setUp(self):
+        try:
+            subprocess.run(['node', '--version'], capture_output=True, check=True)
+        except Exception:
+            self.skipTest('node が無い')
+
+    def call(self, expr):
+        """道具から 1 つの式を評価して JSON で返す。"""
+        import json
+        src = ("import * as m from '%s';\n"
+               "console.log(JSON.stringify((() => { %s })()));\n"
+               % (self.TOOL, expr))
+        with tempfile.NamedTemporaryFile('w', suffix='.mjs', delete=False) as fh:
+            fh.write(src)
+            path = fh.name
+        out = subprocess.run(['node', path], capture_output=True, text=True)
+        os.unlink(path)
+        if out.returncode != 0:
+            return {'error': out.stderr}
+        return json.loads(out.stdout)
+
+    # ---- 引数 -----------------------------------------------------------
+    def test_the_defaults(self):
+        got = self.call("return m.parseArgs(['--image','a.bin']);")
+        self.assertEqual(got['image'], 'a.bin')
+        self.assertTrue(got['commit'])          # 既定は切り替えまで
+        self.assertEqual(got['page'], 'local')  # 既定は手元の docs/
+        self.assertEqual(got['port'], 8730)
+
+    def test_no_commit_and_page_and_port(self):
+        got = self.call("return m.parseArgs("
+                        "['--image','a.bin','--no-commit','--port','9001',"
+                        "'--page','https://takashi.company/stackee/']);")
+        self.assertFalse(got['commit'])
+        self.assertEqual(got['port'], 9001)
+        self.assertEqual(got['page'], 'https://takashi.company/stackee/')
+
+    def test_a_bare_path_is_the_image(self):
+        self.assertEqual(self.call("return m.parseArgs(['a.bin']);")['image'],
+                         'a.bin')
+
+    def test_an_unknown_argument_is_refused(self):
+        got = self.call("return m.parseArgs(['--image','a.bin','--nope']);")
+        self.assertIn('知らない引数', got.get('error', ''))
+
+    def test_a_silly_port_is_refused(self):
+        for port in ('0', '70000', 'abc'):
+            got = self.call("return m.parseArgs(['--image','a.bin','--port','%s']);"
+                            % port)
+            self.assertIn('--port', got.get('error', ''), port)
+
+    # ---- 開く URL -------------------------------------------------------
+    def test_local_serves_on_loopback(self):
+        self.assertEqual(self.call("return m.pageUrl({page:'local',port:8730});"),
+                         'http://127.0.0.1:8730/')
+
+    def test_a_public_url_is_used_as_is(self):
+        url = 'https://takashi.company/stackee/'
+        self.assertEqual(self.call("return m.pageUrl({page:'%s'});" % url), url)
+        # 許可を書く相手はオリジンだけ (パスは落とす)。
+        self.assertEqual(self.call("return m.originOf('%s');" % url),
+                         'https://takashi.company')
+
+    def test_something_that_is_not_a_url_is_refused(self):
+        got = self.call("return m.pageUrl({page:'./docs'});")
+        self.assertIn('--page', got.get('error', ''))
+
+    # ---- 完了の読み取り --------------------------------------------------
+    def test_a_committed_write_is_read_from_the_page(self):
+        text = '書き込んで切り替えました (59.7 秒)。いまは 6e1f7393982ee5d8… で動いています。'
+        got = self.call("return m.parseDone(%r);" % text)
+        self.assertTrue(got['committed'])
+        self.assertEqual(got['seconds'], 59.7)
+        self.assertEqual(got['sha16'], '6e1f7393982ee5d8')
+
+    def test_a_write_without_the_switch_is_read_too(self):
+        text = '書き込みました (58.9 秒)。**まだ切り替えていません。**'
+        got = self.call("return m.parseDone(%r);" % text)
+        self.assertFalse(got['committed'])
+        self.assertEqual(got['seconds'], 58.9)
+        self.assertIsNone(got['sha16'])
+
+    def test_anything_else_is_not_a_finish(self):
+        for text in ('', '書き込んでいます…', '書き込めませんでした: なんとか'):
+            self.assertIsNone(self.call("return m.parseDone(%r);" % text), text)
+
+    def test_the_wording_it_reads_is_the_wording_the_page_writes(self):
+        # ★ ページの文面を変えたらここが落ちる (読めなくなるのを見逃さない)。
+        js = os.path.join(WEB, 'ota.js')
+        if not os.path.exists(js):
+            self.skipTest('docs/js/ota.js が無い')
+        with open(js) as fh:
+            src = fh.read()
+        self.assertIn('書き込んで切り替えました', src)
+        self.assertIn('まだ切り替えていません', src)
+
+    # ---- 手元配信 --------------------------------------------------------
+    def test_it_only_serves_under_the_root(self):
+        for bad in ('/../../etc/passwd', '/a/../../../etc/passwd'):
+            self.assertIsNone(self.call("return m.resolveUnder('/srv', %r);" % bad),
+                              bad)
+        self.assertEqual(self.call("return m.resolveUnder('/srv', '/js/ota.js');"),
+                         '/srv/js/ota.js')
+        self.assertEqual(self.call("return m.resolveUnder('/srv', '/');"),
+                         '/srv/index.html')
+
+    def test_the_javascript_is_served_as_javascript(self):
+        # 型を間違えるとモジュールとして読めない (ページが動かない)。
+        self.assertTrue(self.call("return m.contentType('a.js');")
+                        .startswith('text/javascript'))
+        self.assertEqual(self.call("return m.contentType('a.bin');"),
+                         'application/octet-stream')
+
+    # ---- 機器の許可 ------------------------------------------------------
+    def test_the_grant_has_the_shape_chrome_stores(self):
+        got = self.call("return m.hidGrantPreferences('http://127.0.0.1:8730',"
+                        "{name:'M5Stack Core S3',vendorId:0x303A,"
+                        "productId:0x811A,serial:'44B16F3EC808'});")
+        entry = (got['profile']['content_settings']['exceptions']
+                 ['hid_chooser_data']['http://127.0.0.1:8730,*'])
+        objs = entry['setting']['chosen-objects']
+        self.assertEqual(len(objs), 1)
+        # ★ 鍵の名前は Chrome のもの (hid_chooser_context.cc)。変えると
+        #   許可として読まれず、選択ダイアログが出て自動化が止まる。
+        self.assertEqual(objs[0]['vendor-id'], 0x303A)
+        self.assertEqual(objs[0]['product-id'], 0x811A)
+        self.assertEqual(objs[0]['serial-number'], '44B16F3EC808')
+        self.assertIn('name', objs[0])
+
+
 OLD_SHA = 'f6' + '0' * 62
 
 
