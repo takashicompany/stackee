@@ -1037,24 +1037,32 @@ VIA からは 12 個の名前付きの入口を通す (本体が `MIC(kc)` に�
 ★ **既定配列を変えたら、ここに 1 段足すこと。** 足さないと、VIA を使った
 ことのある本体にだけ新しい既定が届かない、という見つけにくい形で壊れる。
 
-**実機での確認** (`cef8f0b`、full、2026-09-21)。`key.inject` で
-`STK_MIC_KEY` (`0x7E08`) を **1.5 秒押し**、100 ms ごとに `ui.status` と
+**実機での確認** (`15e9e69`、full、2026-09-21)。`key.inject` で
+`MIC(KC_F13)` (`0x7F68`) を **1.5 秒押し**、100 ms ごとに `ui.status` と
 `lcd.crc y=50 h=200` を読んだ。顔の CRC32 は `render_expected.py` の
 期待値と突き合わせてある (下の「顔」は推測ではなく **CRC が合ったコマ**)。
 
 ```
 押す前                                   state=idle  mic_held=False
 t[ms]  state      grp frm cur  mic    crc32        顔 (CRC で特定)
-103    listening  0   2   7    True    267893468   12 listening/a_02
-286    listening  0   2   12   True    267893468   12 listening/a_02
-484    listening  0   0   10   True   1899617587   10 listening/a_00
-669    listening  0   1   11   True   3856223340   11 listening/a_01
-849    listening  0   2   11   True    267893468   12 listening/a_02
-1029   listening  0   2   12   True    267893468   12 listening/a_02
-1212   listening  0   0   10   True   1899617587   10 listening/a_00
-1395   listening  0   1   11   True   3856223340   11 listening/a_01
-1766   idle       0   0   2    False  4242216851    2 idle/a_00
+109    listening  0   2   9    True    267893468   12 listening/a_02
+329    listening  0   2   12   True   1899617587   10 listening/a_00
+520    listening  0   0   10   True   1899617587   10 listening/a_00
+710    listening  0   1   11   True   3856223340   11 listening/a_01
+917    listening  0   2   12   True    267893468   12 listening/a_02
+1132   listening  0   0   12   True   1899617587   10 listening/a_00
+1499   listening  0   1   11   True   3856223340   11 listening/a_01
+1684   idle       3   0   5    False  1128958265    5 idle/d_00
 ```
+
+包むキーを変えても同じ (`key.inject` で 0.6 秒押し、`ui.status` を読む):
+
+| 投げたもの | `mic_held` | 表情 |
+|---|---|---|
+| `MIC(KC_F14)` = `0x7F69` | **True** | `listening` |
+| `MIC(KC_F24)` = `0x7F73` | **True** | `listening` |
+| VIA の入口 `MIC_F14` = `0x7E09` | **True** | `listening` (本体が `MIC(F14)` に読み替えた) |
+| 素の `F14` = `0x0069` | False | `idle` (包んでいないので顔は変わらない) |
 
 聞き取り中の 3 コマ (`listening/a_00` `a_01` `a_02` = 顔 10/11/12) が
 **250 ms ごとに順送り**で出て、離すと `idle` に戻っている。
