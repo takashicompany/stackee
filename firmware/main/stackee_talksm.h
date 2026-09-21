@@ -244,6 +244,8 @@ typedef struct {
     // 短押し / 無音で捨てた回数と、最後の録音の測り値 (talk.status に出る)。
     uint32_t dropped_short, dropped_silent;
     uint32_t last_rec_ms, last_rms_max;
+    int      last_rms_at;       // 最大だった窓の番号 (-1 = 測れなかった)
+    uint32_t last_rms_mean;     // 窓ごとの RMS の平均
     // 切り捨ての閾値 (0 = その条件を見ない)。
     uint32_t min_ms, voice_rms;
 } stackee_talk_t;
@@ -280,6 +282,13 @@ void stackee_talk_set_gate(stackee_talk_t *t, uint32_t min_ms,
 //   そのぶんを含めて数える。端数の窓 (最後の 20 ms 未満) は数えない
 //   — 短すぎる窓は RMS が跳ねやすく、判定が甘くなるため。
 uint32_t stackee_talk_voice_rms(const int16_t *pcm, int count);
+
+// 同じものに「どの窓が最大だったか」と「窓の平均」を添えて返す。
+// ★ 閾値を決めるための物差し。最大だけ見ていると、マイクを開けた直後の
+//   跳ね (立ち上がりの過渡) と、ずっと鳴っている環境音の区別がつかない。
+//   max_window / mean_rms は NULL を渡してよい。
+uint32_t stackee_talk_voice_rms_stats(const int16_t *pcm, int count,
+                                      int *max_window, uint32_t *mean_rms);
 
 // STK_TALK の押し離し。実際の仕事は次の step() で起きる。
 void stackee_talk_set_pressed(stackee_talk_t *t, bool pressed);

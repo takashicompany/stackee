@@ -103,6 +103,8 @@ static struct {
     // 20 ms の窓ごとの RMS の最大値。会話の「無音で捨てる」の閾値を
     // 決める材料 (stackee_talk_voice_rms と同じ測り方)。
     uint32_t selftest_rms_max;
+    int      selftest_rms_at;       // 最大だった窓の番号 (-1 = 測れなかった)
+    uint32_t selftest_rms_mean;     // 窓ごとの RMS の平均
     int      selftest_peak;
     uint32_t selftest_ms;
     char     selftest_err[64];
@@ -804,6 +806,8 @@ static void run_selftest(void) {
     a.selftest_samples = 0;
     a.selftest_rms = 0;
     a.selftest_rms_max = 0;
+    a.selftest_rms_at = -1;
+    a.selftest_rms_mean = 0;
     a.selftest_peak = 0;
     if (enter_mic() != ESP_OK) {
         snprintf(a.selftest_err, sizeof(a.selftest_err), "マイクを開けない");
@@ -819,6 +823,9 @@ static void run_selftest(void) {
     uint64_t win_square = 0;
     uint32_t win_count = 0;
     uint32_t win_best = 0;
+    int      win_best_at = -1;
+    int      win_index = 0;
+    uint64_t win_sum = 0;
     while ((esp_timer_get_time() - t0) < RECORD_MAX_MS * 1000) {
         size_t got = 0;
         esp_err_t err = i2s_channel_read(a.rx, chunk, sizeof(chunk), &got,
@@ -843,7 +850,10 @@ static void run_selftest(void) {
                 }
                 if (root > win_best) {
                     win_best = root;
+                    win_best_at = win_index;
                 }
+                win_sum += root;
+                win_index++;
                 win_square = 0;
                 win_count = 0;
             }
@@ -851,6 +861,8 @@ static void run_selftest(void) {
         count += (uint32_t)n;
     }
     a.selftest_rms_max = win_best;
+    a.selftest_rms_at = win_best_at;
+    a.selftest_rms_mean = win_index ? (uint32_t)(win_sum / (uint64_t)win_index) : 0;
     a.selftest_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
     a.selftest_samples = count;
     a.selftest_peak = peak;
@@ -959,6 +971,7 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     "\"sub_src\":\"%s\","
                     "\"dropped_short\":%lu,\"dropped_silent\":%lu,"
                     "\"rec_ms\":%lu,\"rms_max\":%lu,"
+                    "\"rms_at\":%d,\"rms_mean\":%lu,"
                     "\"min_ms\":%lu,\"voice_rms\":%lu",
                     id, stackee_talk_state_names[t->state], t->polls,
                     (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
@@ -978,6 +991,7 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     (unsigned long)t->dropped_silent,
                     (unsigned long)t->last_rec_ms,
                     (unsigned long)t->last_rms_max,
+                    t->last_rms_at, (unsigned long)t->last_rms_mean,
                     (unsigned long)t->min_ms, (unsigned long)t->voice_rms);
     at = put(buf, cap, at, ",\"reply\":\"");
     at = put_json_str(buf, cap, at, t->reply);
@@ -1070,11 +1084,13 @@ static size_t audio_console(const char *cmd, const char *line, long id,
         }
         return put(buf, cap, 0,
                    "{\"id\":%ld,\"ok\":%s,\"samples\":%lu,\"ms\":%lu,\"rms\":%lu,"
-                   "\"rms_max\":%lu,\"peak\":%d,\"rate\":%d,\"error\":\"%s\"}",
+                   "\"rms_max\":%lu,\"rms_at\":%d,\"rms_mean\":%lu,"
+                   "\"peak\":%d,\"rate\":%d,\"error\":\"%s\"}",
                    id, a.selftest_err[0] ? "0" : "1",
                    (unsigned long)a.selftest_samples, (unsigned long)a.selftest_ms,
                    (unsigned long)a.selftest_rms,
-                   (unsigned long)a.selftest_rms_max, a.selftest_peak,
+                   (unsigned long)a.selftest_rms_max, a.selftest_rms_at,
+                   (unsigned long)a.selftest_rms_mean, a.selftest_peak,
                    STACKEE_AUDIO_RATE, a.selftest_err);
     }
     if (strcmp(cmd, "audio.play") == 0) {
