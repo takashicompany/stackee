@@ -324,6 +324,8 @@ void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
     t->page_shown = -1;
     t->state = STACKEE_TALK_IDLE;
     t->since = ops->now_ms();
+    t->min_ms = STACKEE_TALK_MIN_MS_DEFAULT;
+    t->voice_rms = STACKEE_TALK_VOICE_RMS_DEFAULT;
 }
 
 void stackee_talk_set_pressed(stackee_talk_t *t, bool pressed) {
@@ -360,6 +362,58 @@ static bool start_recording(stackee_talk_t *t) {
     return true;
 }
 
+// 20 ms の窓ごとの RMS の最大値。窓をまたぐ足し算はしない (窓は重ねない)。
+// ★ 掛け算は 1 サンプルあたり 1 回。16 kHz x 30 秒で 48 万回 = audio タスクの
+//   上で数 ms。1 往復に 1 度しか走らない。
+uint32_t stackee_talk_voice_rms(const int16_t *pcm, int count) {
+    if (pcm == NULL || count < STACKEE_TALK_RMS_WINDOW) {
+        return 0;               // 窓 1 つに満たない = 測りようがない
+    }
+    uint32_t best = 0;
+    int windows = count / STACKEE_TALK_RMS_WINDOW;
+    for (int w = 0; w < windows; w++) {
+        const int16_t *at = pcm + (size_t)w * STACKEE_TALK_RMS_WINDOW;
+        uint64_t square = 0;
+        for (int i = 0; i < STACKEE_TALK_RMS_WINDOW; i++) {
+            square += (uint64_t)((int32_t)at[i] * at[i]);
+        }
+        uint32_t mean = (uint32_t)(square / STACKEE_TALK_RMS_WINDOW);
+        // 整数平方根 (浮動小数を使わない)。
+        uint32_t root = 0;
+        while ((uint64_t)(root + 1) * (root + 1) <= mean) {
+            root++;
+        }
+        if (root > best) {
+            best = root;
+        }
+    }
+    return best;
+}
+
+void stackee_talk_set_gate(stackee_talk_t *t, uint32_t min_ms,
+                           uint32_t voice_rms) {
+    t->min_ms = min_ms;
+    t->voice_rms = voice_rms;
+}
+
+// 録音を捨てるか決める。捨てるなら理由を返す (NULL = 進んでよい)。
+// ★ ここで数えた長さと RMS は talk.status に出る (閾値を決める材料)。
+static const char *gate_recording(stackee_talk_t *t) {
+    t->last_rec_ms = (uint32_t)((int64_t)t->count * 1000 / STACKEE_TALK_RATE);
+    t->last_rms_max = stackee_talk_voice_rms(t->samples, t->count);
+    // サーバが 0.3 秒未満を断るので、設定によらずそこは必ず切る。
+    if (t->count < STACKEE_TALK_MIN_SAMPLES ||
+        (t->min_ms > 0 && t->last_rec_ms < t->min_ms)) {
+        t->dropped_short++;
+        return "短すぎ";
+    }
+    if (t->voice_rms > 0 && t->last_rms_max < t->voice_rms) {
+        t->dropped_silent++;
+        return "無音";
+    }
+    return NULL;
+}
+
 static void finish_recording(stackee_talk_t *t) {
     t->turn_started = now(t);
     t->turn_valid = true;
@@ -369,10 +423,18 @@ static void finish_recording(stackee_talk_t *t) {
     t->reply[0] = '\0';
     t->ops->record_end();
 
-    if (t->count < STACKEE_TALK_MIN_SAMPLES) {
+    // ★ 誤って触れただけなら**何も起こさない**。一次回答も鳴らさず、
+    //   送信もせず、「考え中」の顔にもならずに idle へ戻る。
+    const char *why = gate_recording(t);
+    if (why != NULL) {
+        logf_(t, "[talk] %sのため破棄 (len_ms=%lu, rms_max=%lu, "
+                 "min_ms=%lu, voice_rms=%lu)",
+              why, (unsigned long)t->last_rec_ms,
+              (unsigned long)t->last_rms_max,
+              (unsigned long)t->min_ms, (unsigned long)t->voice_rms);
         cleanup(t);
-        to(t, STACKEE_TALK_IDLE);
-        show(t, "録音が短いため送信しません");
+        to(t, STACKEE_TALK_IDLE);       // listening → idle (thinking を通らない)
+        show(t, "送信しませんでした");
         return;
     }
     t->ops->wav_header(t->samples, t->count);

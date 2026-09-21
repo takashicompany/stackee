@@ -10,6 +10,8 @@
 //   press / release   STK_TALK の押し離し
 //   inject <samples>  録音の代わりに PCM を注入する
 //   mic <n>           record_read が 1 回に返すサンプル数 (-1 で失敗)
+//   miclevel <n>      マイクが返す波の振幅 (0 = 無音。既定 4000)
+//   gate <min_ms> <rms>  短押し / 無音の切り捨ての閾値 (0 でその条件を見ない)
 //   net <0|1>         Wi-Fi が繋がっているか
 //   resp <status> <body>   次の HTTP 完了で返すもの。body が "PCM:<n>" なら
 //                          n サンプルぶんの生 PCM
@@ -114,13 +116,19 @@ static bool ops_record_begin(void) {
     return true;
 }
 
+// ★ 既定では**声がある**ことにしてある (振幅 4000 の矩形波)。無音を試す
+//   ときだけ `miclevel 0` を送る。ここを 0 にすると、短押し / 無音の
+//   切り捨て (stackee_talksm.c の gate_recording) に全部かかってしまう。
+static int g_mic_level = 4000;
+static int g_mic_phase;
+
 static int ops_record_read(int16_t *dst, int max) {
     if (g_mic_chunk < 0) {
         return -1;
     }
     int n = g_mic_chunk < max ? g_mic_chunk : max;
     for (int i = 0; i < n; i++) {
-        dst[i] = 0;
+        dst[i] = (int16_t)((g_mic_phase++ & 1) ? g_mic_level : -g_mic_level);
     }
     return n;
 }
@@ -325,6 +333,13 @@ int main(void) {
             printf("INJECT %d\n", stackee_talk_inject(&g_talk, pcm, n) ? 1 : 0);
         } else if (strcmp(line, "mic") == 0) {
             g_mic_chunk = arg ? atoi(arg) : 240;
+        } else if (strcmp(line, "miclevel") == 0) {
+            g_mic_level = arg ? atoi(arg) : 4000;
+        } else if (strcmp(line, "gate") == 0) {
+            char *second = arg ? strchr(arg, ' ') : NULL;
+            if (second) { *second++ = '\0'; }
+            stackee_talk_set_gate(&g_talk, arg ? (uint32_t)atol(arg) : 0,
+                                  second ? (uint32_t)atol(second) : 0);
         } else if (strcmp(line, "net") == 0) {
             g_net = arg && atoi(arg) != 0;
         } else if (strcmp(line, "ack") == 0) {
@@ -409,12 +424,20 @@ int main(void) {
         } else if (strcmp(line, "print") == 0) {
             printf("NOW %u STATE %s POLLS %d ALLOC %d RELEASE %d "
                    "PAGES %d PAGE %d DROPPED %d SUBBYTES %u SRC %s "
+                   "SHORT %lu SILENT %lu RECMS %lu RMSMAX %lu "
+                   "MINMS %lu VOICERMS %lu "
                    "REPLY %s ERROR %s\n",
                    (unsigned)g_now, stackee_talk_state_names[g_talk.state],
                    g_talk.polls, g_alloc_count, g_release_count,
                    g_talk.page_count, g_talk.page_shown, g_talk.sub_dropped,
                    (unsigned)g_talk.sub_bytes,
                    stackee_talk_sub_src_names[g_talk.sub_src],
+                   (unsigned long)g_talk.dropped_short,
+                   (unsigned long)g_talk.dropped_silent,
+                   (unsigned long)g_talk.last_rec_ms,
+                   (unsigned long)g_talk.last_rms_max,
+                   (unsigned long)g_talk.min_ms,
+                   (unsigned long)g_talk.voice_rms,
                    g_talk.reply, g_talk.error);
         } else {
             fprintf(stderr, "unknown command: %s\n", line);

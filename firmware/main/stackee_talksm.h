@@ -53,6 +53,29 @@
 // 1 周で I2S から吸い上げるサンプル数 (stackee_talk.py と同じ 240 = 15 ms)。
 #define STACKEE_TALK_CHUNK           240
 
+// ---- 短押し / 無音の切り捨て (2026-09-21) ----------------------------------
+// ★ **誤って触れただけでは何も起こさない。** キーに指がかすった、ポケットで
+//   押された、といったときに一次回答が鳴って送信まで走るのを止める。
+//   録音を終えた時点で 2 つとも満たしたときだけ、従来の流れ
+//   (一次回答 → 送信) へ進む。満たさなければ**静かに idle へ戻る**
+//   (音も出ない・送信もしない・「考え中」の顔にもならない)。
+//
+//   (a) 録音の長さ ≥ min_ms      … 録音の長さ = キーを押していた長さ
+//   (b) 声がある                 … 20 ms の窓ごとの RMS の**最大**が
+//                                  voice_rms 以上
+//
+// ★ 判定は**録音バッファ全体**を 1 度なめて行う。将来プリロール (録音の
+//   冒頭の取りこぼしを埋める先読み) を足しても、そのぶんを含めて数える。
+//   費用は 1 サンプルあたり掛け算 1 回で、走るのは audio タスクの上
+//   (打鍵の道には 1 命令も足さない)。
+#define STACKEE_TALK_RMS_WINDOW_MS   20
+#define STACKEE_TALK_RMS_WINDOW \
+    (STACKEE_TALK_RATE * STACKEE_TALK_RMS_WINDOW_MS / 1000)     // 320 サンプル
+// 既定。settings.toml の STACKEE_TALK_MIN_MS / STACKEE_TALK_VOICE_RMS で
+// 変えられる (README §11-1)。
+#define STACKEE_TALK_MIN_MS_DEFAULT     1000
+#define STACKEE_TALK_VOICE_RMS_DEFAULT  1500
+
 #define STACKEE_TALK_PATH_MAX        160
 #define STACKEE_TALK_TEXT_MAX        256
 
@@ -218,6 +241,11 @@ typedef struct {
     int      sub_dropped;       // 捨てた行の数 (不正 + 上限超え)
     int      sub_src;           // stackee_talk_sub_src_t
     uint32_t turns, errors, ignored, subs_ok, subs_failed;
+    // 短押し / 無音で捨てた回数と、最後の録音の測り値 (talk.status に出る)。
+    uint32_t dropped_short, dropped_silent;
+    uint32_t last_rec_ms, last_rms_max;
+    // 切り捨ての閾値 (0 = その条件を見ない)。
+    uint32_t min_ms, voice_rms;
 } stackee_talk_t;
 
 // 再生位置 [ms] に出すページの番号。無ければ -1。
@@ -241,6 +269,17 @@ int stackee_talk_parse_subtitles_json(stackee_talk_t *t, const char *at, size_t 
 
 void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
                        const char *post_path);
+
+// 短押し / 無音の切り捨ての閾値を差し替える (settings.toml から)。
+// 0 を渡すとその条件を見ない。呼ぶのは立ち上げのときだけ。
+void stackee_talk_set_gate(stackee_talk_t *t, uint32_t min_ms,
+                           uint32_t voice_rms);
+
+// 録音に声があるか測る: **20 ms の窓ごとの RMS の最大値**。
+// ★ 純粋な関数。バッファ全体をなめるので、プリロールを足しても
+//   そのぶんを含めて数える。端数の窓 (最後の 20 ms 未満) は数えない
+//   — 短すぎる窓は RMS が跳ねやすく、判定が甘くなるため。
+uint32_t stackee_talk_voice_rms(const int16_t *pcm, int count);
 
 // STK_TALK の押し離し。実際の仕事は次の step() で起きる。
 void stackee_talk_set_pressed(stackee_talk_t *t, bool pressed);

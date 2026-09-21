@@ -24,6 +24,7 @@
 #include "stackee_http.h"
 #include "stackee_input.h"
 #include "stackee_jsonlite.h"
+#include "stackee_settings.h"
 #include "stackee_talksm.h"
 #include "stackee_ui.h"
 #include "stackee_uac.h"
@@ -99,6 +100,9 @@ static struct {
     _Atomic int  selftest_req;      // 0 なし / 1 依頼 / 2 実行中 / 3 完了
     uint32_t selftest_samples;
     uint32_t selftest_rms;
+    // 20 ms の窓ごとの RMS の最大値。会話の「無音で捨てる」の閾値を
+    // 決める材料 (stackee_talk_voice_rms と同じ測り方)。
+    uint32_t selftest_rms_max;
     int      selftest_peak;
     uint32_t selftest_ms;
     char     selftest_err[64];
@@ -799,6 +803,7 @@ static void run_selftest(void) {
     a.selftest_err[0] = '\0';
     a.selftest_samples = 0;
     a.selftest_rms = 0;
+    a.selftest_rms_max = 0;
     a.selftest_peak = 0;
     if (enter_mic() != ESP_OK) {
         snprintf(a.selftest_err, sizeof(a.selftest_err), "マイクを開けない");
@@ -810,6 +815,10 @@ static void run_selftest(void) {
     uint64_t square = 0;
     uint32_t count = 0;
     int peak = 0;
+    // 窓 (20 ms) ごとの RMS の最大値。chunk をまたいで数え続ける。
+    uint64_t win_square = 0;
+    uint32_t win_count = 0;
+    uint32_t win_best = 0;
     while ((esp_timer_get_time() - t0) < RECORD_MAX_MS * 1000) {
         size_t got = 0;
         esp_err_t err = i2s_channel_read(a.rx, chunk, sizeof(chunk), &got,
@@ -825,9 +834,23 @@ static void run_selftest(void) {
             if (v < 0) { v = -v; }
             if (v > peak) { peak = v; }
             square += (uint64_t)((int64_t)chunk[i] * chunk[i]);
+            win_square += (uint64_t)((int32_t)chunk[i] * chunk[i]);
+            if (++win_count >= STACKEE_TALK_RMS_WINDOW) {
+                uint32_t mean = (uint32_t)(win_square / win_count);
+                uint32_t root = 0;
+                while ((uint64_t)(root + 1) * (root + 1) <= mean) {
+                    root++;
+                }
+                if (root > win_best) {
+                    win_best = root;
+                }
+                win_square = 0;
+                win_count = 0;
+            }
         }
         count += (uint32_t)n;
     }
+    a.selftest_rms_max = win_best;
     a.selftest_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
     a.selftest_samples = count;
     a.selftest_peak = peak;
@@ -933,7 +956,10 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     "\"last_ms\":%lu,\"last_bytes\":%u},\"null\":%s,"
                     "\"sub_pages\":%d,\"sub_page\":%d,\"sub_bytes\":%lu,"
                     "\"sub_dropped\":%d,\"subs_ok\":%lu,\"subs_failed\":%lu,"
-                    "\"sub_src\":\"%s\"",
+                    "\"sub_src\":\"%s\","
+                    "\"dropped_short\":%lu,\"dropped_silent\":%lu,"
+                    "\"rec_ms\":%lu,\"rms_max\":%lu,"
+                    "\"min_ms\":%lu,\"voice_rms\":%lu",
                     id, stackee_talk_state_names[t->state], t->polls,
                     (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
                     (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
@@ -947,7 +973,12 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     t->page_count, t->page_shown, (unsigned long)t->sub_bytes,
                     t->sub_dropped, (unsigned long)t->subs_ok,
                     (unsigned long)t->subs_failed,
-                    stackee_talk_sub_src_names[t->sub_src]);
+                    stackee_talk_sub_src_names[t->sub_src],
+                    (unsigned long)t->dropped_short,
+                    (unsigned long)t->dropped_silent,
+                    (unsigned long)t->last_rec_ms,
+                    (unsigned long)t->last_rms_max,
+                    (unsigned long)t->min_ms, (unsigned long)t->voice_rms);
     at = put(buf, cap, at, ",\"reply\":\"");
     at = put_json_str(buf, cap, at, t->reply);
     at = put(buf, cap, at, "\",\"error\":\"");
@@ -1039,10 +1070,11 @@ static size_t audio_console(const char *cmd, const char *line, long id,
         }
         return put(buf, cap, 0,
                    "{\"id\":%ld,\"ok\":%s,\"samples\":%lu,\"ms\":%lu,\"rms\":%lu,"
-                   "\"peak\":%d,\"rate\":%d,\"error\":\"%s\"}",
+                   "\"rms_max\":%lu,\"peak\":%d,\"rate\":%d,\"error\":\"%s\"}",
                    id, a.selftest_err[0] ? "0" : "1",
                    (unsigned long)a.selftest_samples, (unsigned long)a.selftest_ms,
-                   (unsigned long)a.selftest_rms, a.selftest_peak,
+                   (unsigned long)a.selftest_rms,
+                   (unsigned long)a.selftest_rms_max, a.selftest_peak,
                    STACKEE_AUDIO_RATE, a.selftest_err);
     }
     if (strcmp(cmd, "audio.play") == 0) {
@@ -1120,6 +1152,16 @@ esp_err_t stackee_audio_start(const char *post_path) {
     }
     load_acks();
     stackee_talk_init(a.talk, &TALK_OPS, post_path);
+    // ★ 短押し / 無音の切り捨ての閾値は settings.toml で変えられる。
+    //   無ければ既定 (stackee_talksm.h)。0 を書くとその条件を見なくなる。
+    stackee_talk_set_gate(
+        a.talk,
+        (uint32_t)stackee_settings_int("STACKEE_TALK_MIN_MS",
+                                       STACKEE_TALK_MIN_MS_DEFAULT),
+        (uint32_t)stackee_settings_int("STACKEE_TALK_VOICE_RMS",
+                                       STACKEE_TALK_VOICE_RMS_DEFAULT));
+    ESP_LOGI(TAG, "会話の切り捨て: 最短 %lu ms / 声の RMS %lu",
+             (unsigned long)a.talk->min_ms, (unsigned long)a.talk->voice_rms);
     a.ready = true;
     stackee_console_register(audio_console);
     // CPU0 / 高優先度 (ui = 3 より上、入力 = CPU1 とは別)。

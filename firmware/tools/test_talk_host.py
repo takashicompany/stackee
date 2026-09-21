@@ -58,7 +58,19 @@ def binary():
     return _BINARY
 
 
-def run(script):
+# ★ 短押し / 無音の切り捨て (2026-09-21) は既定で「1000 ms 以上 かつ
+#   20 ms 窓の RMS 最大 ≥ 1500」。この木の台本はどれも `mic 40` + `t 400` で
+#   **997 ms** しか録らないので、そのままだと全部「短すぎ」で捨てられる。
+#   台本が `gate` を書いていなければ、**切り捨てを入れる前と同じ規則**
+#   (300 ms の下限だけ・声は見ない) に戻してから流す。会話の状態機械を
+#   見ている検査の意味を変えないため。
+#   切り捨てそのもの (既定値を含む) は RecordGateTest が見る。
+LEGACY_GATE = 'gate 300 0\n'
+
+
+def run(script, legacy_gate=True):
+    if legacy_gate and 'gate ' not in script:
+        script = LEGACY_GATE + script
     out = subprocess.run([binary()], input=script, capture_output=True, text=True)
     if out.returncode != 0:
         raise AssertionError('実行に失敗:\n' + out.stderr)
@@ -88,14 +100,21 @@ def prints(text):
     """print 命令の行を全部 (途中の様子を見たいときに使う)。"""
     rows = re.findall(r'^NOW (\d+) STATE (\S+) POLLS (\d+) ALLOC (\d+) '
                       r'RELEASE (\d+) PAGES (-?\d+) PAGE (-?\d+) DROPPED (\d+) '
-                      r'SUBBYTES (\d+) SRC (\S+) REPLY (.*) ERROR (.*)$', text, re.M)
+                      r'SUBBYTES (\d+) SRC (\S+) '
+                      r'SHORT (\d+) SILENT (\d+) RECMS (\d+) RMSMAX (\d+) '
+                      r'MINMS (\d+) VOICERMS (\d+) '
+                      r'REPLY (.*) ERROR (.*)$', text, re.M)
     keys = ('now', 'state', 'polls', 'alloc', 'release', 'pages', 'page',
-            'dropped', 'sub_bytes', 'src', 'reply', 'error')
+            'dropped', 'sub_bytes', 'src',
+            'dropped_short', 'dropped_silent', 'rec_ms', 'rms_max',
+            'min_ms', 'voice_rms', 'reply', 'error')
     out = []
     for row in rows:
         item = dict(zip(keys, row))
         for k in ('now', 'polls', 'alloc', 'release', 'pages', 'page',
-                  'dropped', 'sub_bytes'):
+                  'dropped', 'sub_bytes',
+                  'dropped_short', 'dropped_silent', 'rec_ms', 'rms_max',
+                  'min_ms', 'voice_rms'):
             item[k] = int(item[k])
         out.append(item)
     return out
@@ -314,6 +333,7 @@ class LongPollTest(unittest.TestCase):
 class ShortRecordingTest(unittest.TestCase):
     def test_under_three_tenths_of_a_second_is_not_sent(self):
         out = run("""
+gate 300 0
 mic 40
 press
 t 100
@@ -322,9 +342,159 @@ t 100
 print
 """)
         self.assertEqual(http_calls(out), [])
-        self.assertIn('録音が短いため送信しません', out)
+        self.assertIn('短すぎのため破棄', out)
         self.assertEqual(last_print(out)['state'], 'idle')
         self.assertEqual(out.count('REC end'), 1)
+
+
+class RecordGateTest(unittest.TestCase):
+    """短押し / 無音は**何も起こさない** (2026-09-21)。
+
+    誤ってキーに触れただけで一次回答が鳴り、送信まで走るのを止める。
+    録音を終えた時点で 2 つとも満たしたときだけ先へ進む:
+
+      (a) 録音の長さ ≥ min_ms      (既定 1000 ms。録音の長さ = 押していた長さ)
+      (b) 20 ms 窓の RMS の最大 ≥ voice_rms (既定 1500)
+
+    ★ 満たさないときは **HTTP も一次回答も無し**。表情も listening から
+      直接 idle へ戻る (thinking を通らない)。
+    """
+
+    # ★ 偽のマイクは 1 周 (1 ms) に `mic` で指定したサンプル数を返すので、
+    #   台本の 1 ms が録音の約 2.5 ms になる (mic 40 のとき)。下の `ms` は
+    #   台本の時間で、録れる長さはその約 2.5 倍。合否は rec_ms で見る。
+    def turn(self, extra='', ms=1200, level=None, gate=None):
+        script = ''
+        if gate is not None:
+            script += 'gate %d %d\n' % gate
+        if level is not None:
+            script += 'miclevel %d\n' % level
+        script += ('ack 0\nrespdelay 10\nresp 202 %s\nresp 200 %s\n'
+                   'resp 200 PCM:48000\nmic 40\n' % (ACCEPT_BODY, DONE_BODY))
+        script += extra
+        script += 'press\nt %d\nrelease\nt %d\nprint\n' % (ms, ms + 3000)
+        # ★ ここは切り捨てそのものを見るので、legacy の緩い閾値を被せない。
+        return run(script, legacy_gate=False)
+
+    # ---- 既定の閾値 ------------------------------------------------------
+    def test_the_defaults_are_a_second_and_fifteen_hundred(self):
+        out = self.turn(ms=1200)
+        info = last_print(out)
+        # 既定は像に焼いてある値 (stackee_talksm.h)。
+        self.assertEqual(info['min_ms'], 1000)
+        self.assertEqual(info['voice_rms'], 1500)
+        self.assertEqual(info['state'], 'idle')
+        # 既定のまま声ありなら従来どおり進む。
+        self.assertTrue(http_calls(out))
+        self.assertEqual(info['dropped_short'], 0)
+        self.assertEqual(info['dropped_silent'], 0)
+
+    def test_a_short_press_does_nothing_at_all(self):
+        out = self.turn(ms=300)
+        info = last_print(out)
+        self.assertEqual(info['dropped_short'], 1)
+        self.assertEqual(info['dropped_silent'], 0)
+        self.assertEqual(info['state'], 'idle')
+        # ★ 送らない・一次回答を鳴らさない。
+        self.assertEqual(http_calls(out), [])
+        self.assertNotIn('ACK ', out)
+        self.assertIn('短すぎのため破棄', out)
+        # 表情は listening から直接 idle (thinking を通らない)。
+        self.assertEqual(state_names(out), ['idle', 'recording', 'idle'])
+
+    def test_a_long_press_with_no_voice_does_nothing_either(self):
+        out = self.turn(ms=1500, level=0)
+        info = last_print(out)
+        self.assertEqual(info['dropped_silent'], 1)
+        self.assertEqual(info['dropped_short'], 0)
+        self.assertGreaterEqual(info['rec_ms'], 1000)
+        self.assertEqual(info['rms_max'], 0)
+        self.assertEqual(http_calls(out), [])
+        self.assertNotIn('ACK ', out)
+        self.assertIn('無音のため破棄', out)
+        self.assertEqual(state_names(out), ['idle', 'recording', 'idle'])
+
+    def test_voice_just_over_the_line_goes_through(self):
+        out = self.turn(ms=1500, level=1500)      # ちょうど閾値
+        self.assertTrue(http_calls(out))
+        self.assertEqual(last_print(out)['dropped_silent'], 0)
+
+    def test_voice_just_under_the_line_is_dropped(self):
+        out = self.turn(ms=1500, level=1499)
+        self.assertEqual(http_calls(out), [])
+        self.assertEqual(last_print(out)['dropped_silent'], 1)
+
+    # ---- 設定で変えられる ------------------------------------------------
+    def test_the_thresholds_come_from_the_settings(self):
+        # 緩めれば通る。
+        out = self.turn(ms=400, level=100, gate=(300, 50))
+        self.assertTrue(http_calls(out))
+        # 締めれば落ちる (台本 1500 ms = 録音およそ 3.7 秒)。
+        out = self.turn(ms=1500, level=4000, gate=(9000, 1500))
+        self.assertEqual(http_calls(out), [])
+        info = last_print(out)
+        self.assertEqual(info['dropped_short'], 1)
+        self.assertLess(info['rec_ms'], 9000)
+        out = self.turn(ms=1500, level=4000, gate=(1000, 8000))
+        self.assertEqual(http_calls(out), [])
+        self.assertEqual(last_print(out)['dropped_silent'], 1)
+
+    def test_zero_turns_a_condition_off(self):
+        # voice_rms = 0 なら声を見ない (無音でも通る)。
+        out = self.turn(ms=1500, level=0, gate=(1000, 0))
+        self.assertTrue(http_calls(out))
+        # min_ms = 0 でも 0.3 秒の床 (サーバが断る長さ) は残る。
+        out = self.turn(ms=100, level=4000, gate=(0, 0))
+        self.assertEqual(http_calls(out), [])
+        self.assertEqual(last_print(out)['dropped_short'], 1)
+
+    # ---- 数え方 ----------------------------------------------------------
+    def test_the_counters_add_up(self):
+        script = ('ack 0\nrespdelay 10\nmic 40\nmiclevel 0\n'
+                  'press\nt 300\nrelease\nt 500\n'      # 短すぎ
+                  'press\nt 1500\nrelease\nt 500\n'     # 無音
+                  'print\n')
+        info = last_print(run(script, legacy_gate=False))
+        self.assertEqual(info['dropped_short'], 1)
+        self.assertEqual(info['dropped_silent'], 1)
+        self.assertEqual(info['state'], 'idle')
+
+    def test_inject_is_not_gated(self):
+        """talk.inject (決まった PCM を流す道) は切り捨てを通らない。"""
+        out = run('ack 0\nrespdelay 10\nresp 202 %s\nresp 200 %s\n'
+                  'resp 200 PCM:48000\nmic 40\ninject 16000\n'
+                  't 5000\nprint\n' % (ACCEPT_BODY, DONE_BODY),
+                  legacy_gate=False)
+        self.assertTrue(http_calls(out))
+        info = last_print(out)
+        self.assertEqual(info['dropped_short'], 0)
+        self.assertEqual(info['dropped_silent'], 0)
+
+
+class VoiceRmsTest(unittest.TestCase):
+    """RMS の測り方そのもの (stackee_talk_voice_rms)。"""
+
+    def rms(self, script):
+        info = last_print(run(script + 'print\n', legacy_gate=False))
+        return info['rms_max'], info['rec_ms']
+
+    def test_a_silent_recording_measures_zero(self):
+        rms, ms = self.rms('gate 0 0\nmic 40\nmiclevel 0\n'
+                           'press\nt 1000\nrelease\nt 100\n')
+        self.assertEqual(rms, 0)
+        self.assertGreater(ms, 900)
+
+    def test_a_square_wave_measures_its_amplitude(self):
+        for level in (100, 832, 1500, 8000):
+            rms, _ms = self.rms('gate 0 0\nmic 40\nmiclevel %d\n'
+                                'press\nt 1000\nrelease\nt 100\n' % level)
+            self.assertEqual(rms, level, '振幅 %d' % level)
+
+    def test_a_recording_shorter_than_one_window_measures_zero(self):
+        # 20 ms (320 サンプル) に満たなければ測りようがない。
+        rms, _ms = self.rms('gate 0 0\nmic 40\nmiclevel 4000\n'
+                            'press\nt 5\nrelease\nt 100\n')
+        self.assertEqual(rms, 0)
 
 
 class TimeoutTest(unittest.TestCase):
