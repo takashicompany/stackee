@@ -324,6 +324,9 @@ void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
     t->page_shown = -1;
     t->state = STACKEE_TALK_IDLE;
     t->since = ops->now_ms();
+    t->guide_rec = STACKEE_TALK_GUIDE_RECORDING;
+    t->guide_think = STACKEE_TALK_GUIDE_THINKING;
+    t->guide_shown = STACKEE_TALK_GUIDE_NONE;
     t->min_ms = STACKEE_TALK_MIN_MS_DEFAULT;
     t->voice_rms = STACKEE_TALK_VOICE_RMS_DEFAULT;
     t->voice_windows = STACKEE_TALK_VOICE_WINDOWS_DEFAULT;
@@ -696,7 +699,7 @@ static void step_http(stackee_talk_t *t) {
     }
 }
 
-void stackee_talk_step(stackee_talk_t *t) {
+static void talk_step_inner(stackee_talk_t *t) {
     bool rising = t->pressed && !t->was_pressed;
     t->was_pressed = t->pressed;
     // ★ 毎周知らせる。一次回答が鳴り終わるのは「状態が変わらない変化」なので、
@@ -842,6 +845,77 @@ void stackee_talk_step(stackee_talk_t *t) {
         default:
             return;
     }
+}
+
+// ---------------------------------------------------------------------------
+// 案内の字幕
+// ---------------------------------------------------------------------------
+// ★ **帯の持ち主は 1 人。** 一次回答 (ack) が鳴っている間は audio が、
+//   返答の字幕が出ている間は上の PLAYING が持っている。案内はそのどちらも
+//   いないときだけ出す。持ち主が居るときは **触らない** (消しもしない)。
+static int guide_want(const stackee_talk_t *t) {
+    if (t->state == STACKEE_TALK_IDLE) {
+        return STACKEE_TALK_GUIDE_NONE;
+    }
+    if (t->state == STACKEE_TALK_RECORDING) {
+        return STACKEE_TALK_GUIDE_REC;
+    }
+    // 一次回答が鳴っている / 返答の字幕が出ている → そちらが持ち主。
+    if (t->ops->ack_active != NULL && t->ops->ack_active()) {
+        return STACKEE_TALK_GUIDE_HELD;
+    }
+    if (t->page_shown >= 0) {
+        return STACKEE_TALK_GUIDE_HELD;
+    }
+    if (t->state == STACKEE_TALK_PLAYING) {
+        // ★ 字幕を持っているなら触らない。1 ページ目が出るまでの 1 周で
+        //   帯が黒くちらつかないように、**ページがあるかどうか**で見る
+        //   (page_shown はまだ -1 でも、次の周で出る)。
+        if (t->page_count > 0) {
+            return STACKEE_TALK_GUIDE_HELD;
+        }
+        // 返答を鳴らしているのに字幕が無い (旧サーバ / 取れなかった)。
+        // 「考えています…」はもう嘘なので、帯は空にする。
+        return STACKEE_TALK_GUIDE_NONE;
+    }
+    return STACKEE_TALK_GUIDE_THINK;
+}
+
+static void update_guide(stackee_talk_t *t) {
+    int want = guide_want(t);
+    if (want == t->guide_shown) {
+        return;
+    }
+    int had = t->guide_shown;
+    t->guide_shown = want;
+    switch (want) {
+        case STACKEE_TALK_GUIDE_REC:
+            subtitle(t, t->guide_rec);
+            break;
+        case STACKEE_TALK_GUIDE_THINK:
+            subtitle(t, t->guide_think);
+            break;
+        case STACKEE_TALK_GUIDE_HELD:
+            break;              // 持ち主が描く。こちらは何もしない
+        default:
+            // 自分が出していたものだけ消す。持ち主が居たなら向こうが消す。
+            if (had == STACKEE_TALK_GUIDE_REC ||
+                had == STACKEE_TALK_GUIDE_THINK) {
+                subtitle(t, NULL);
+            }
+            break;
+    }
+}
+
+void stackee_talk_set_guides(stackee_talk_t *t, const char *recording,
+                             const char *thinking) {
+    if (recording != NULL) { t->guide_rec = recording; }
+    if (thinking != NULL)  { t->guide_think = thinking; }
+}
+
+void stackee_talk_step(stackee_talk_t *t) {
+    talk_step_inner(t);
+    update_guide(t);
 }
 
 bool stackee_talk_busy(const stackee_talk_t *t) {

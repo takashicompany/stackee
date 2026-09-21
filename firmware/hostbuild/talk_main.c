@@ -445,7 +445,7 @@ int main(void) {
             printf("NOW %u STATE %s POLLS %d ALLOC %d RELEASE %d "
                    "PAGES %d PAGE %d DROPPED %d SUBBYTES %u SRC %s "
                    "SHORT %lu SILENT %lu RECMS %lu RMSMAX %lu "
-                   "RMS2ND %lu LOUD %lu "
+                   "RMS2ND %lu LOUD %lu GUIDE %d "
                    "MINMS %lu VOICERMS %lu "
                    "REPLY %s ERROR %s\n",
                    (unsigned)g_now, stackee_talk_state_names[g_talk.state],
@@ -458,7 +458,7 @@ int main(void) {
                    (unsigned long)g_talk.last_rec_ms,
                    (unsigned long)g_talk.last_rms_max,
                    (unsigned long)g_talk.last_rms_2nd,
-                   (unsigned long)g_talk.last_loud,
+                   (unsigned long)g_talk.last_loud, g_talk.guide_shown,
                    (unsigned long)g_talk.min_ms,
                    (unsigned long)g_talk.voice_rms,
                    g_talk.reply, g_talk.error);

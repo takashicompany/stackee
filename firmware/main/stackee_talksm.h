@@ -93,6 +93,31 @@
 #define STACKEE_TALK_PATH_MAX        160
 #define STACKEE_TALK_TEXT_MAX        256
 
+// ---- 案内の字幕 (2026-09-22) ----------------------------------------------
+// ★ 帯が黒いだけだと「いま何をすればいいか」が分からない。会話の状態を
+//   そのまま言葉にして出す。
+//
+//   録音中 (STK_TALK を押している間) … 「マイクに向かって話しかけてください」
+//   考え中 (送信〜返答待ち)          … 「考えています…」
+//
+// ★ 行の割り方はサーバと同じ規則 (1 行 15 桁、句読点で行を始めない)。
+//   tools/ack_lines.py に文を渡して割った結果をそのまま書いてある
+//   (ホストテストが突き合わせる)。
+// ★ **帯の持ち主は 1 人**。一次回答 (ack) の字幕が出ている間と、返答の字幕が
+//   出ている間は案内を出さない (鳴り終わってから / 来たら置き換わる)。
+// ★ **MIC(kc) の押下 (PC 側のプッシュトゥトーク) では出さない。** あれは
+//   顔だけを変えるもので、会話の状態機械を通らない。
+#define STACKEE_TALK_GUIDE_RECORDING "マイクに向かって\n話しかけてください"
+#define STACKEE_TALK_GUIDE_THINKING  "考えています…"
+
+// 案内の状態 (talk.status の "guide")。
+typedef enum {
+    STACKEE_TALK_GUIDE_NONE = 0,    // 帯に案内は出していない
+    STACKEE_TALK_GUIDE_REC,         // 録音中の案内を出している
+    STACKEE_TALK_GUIDE_THINK,       // 考え中の案内を出している
+    STACKEE_TALK_GUIDE_HELD,        // ほかの持ち主 (ack / 返答) がいる。触らない
+} stackee_talk_guide_t;
+
 // ---- 返答音声の字幕 (scratchpad/subtitle_design.md) ------------------------
 // ★ 同期はサーバが決める。本体は「再生位置 (ms) ≥ 開始時刻」の**最後の**
 //   ページを出すだけで、推定はしない。
@@ -269,6 +294,10 @@ typedef struct {
     uint32_t last_loud;         // voice_rms を越えた窓の数
     // 切り捨ての閾値 (0 = その条件を見ない)。
     uint32_t min_ms, voice_rms, voice_windows;
+
+    // 案内の字幕。文面は差し替えられるようにしておく (将来 settings から)。
+    const char *guide_rec, *guide_think;
+    int guide_shown;            // stackee_talk_guide_t
 } stackee_talk_t;
 
 // 再生位置 [ms] に出すページの番号。無ければ -1。
@@ -292,6 +321,10 @@ int stackee_talk_parse_subtitles_json(stackee_talk_t *t, const char *at, size_t 
 
 void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
                        const char *post_path);
+
+// 案内の文面を差し替える。NULL を渡したほうは既定のまま。
+void stackee_talk_set_guides(stackee_talk_t *t, const char *recording,
+                             const char *thinking);
 
 // 短押し / 無音の切り捨ての閾値を差し替える (settings.toml から)。
 // 0 を渡すとその条件を見ない。呼ぶのは立ち上げのときだけ。

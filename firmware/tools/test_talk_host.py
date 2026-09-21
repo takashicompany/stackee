@@ -17,6 +17,7 @@
 """
 import os
 import re
+from pathlib import Path
 import subprocess
 import tempfile
 import unittest
@@ -102,20 +103,20 @@ def prints(text):
                       r'RELEASE (\d+) PAGES (-?\d+) PAGE (-?\d+) DROPPED (\d+) '
                       r'SUBBYTES (\d+) SRC (\S+) '
                       r'SHORT (\d+) SILENT (\d+) RECMS (\d+) RMSMAX (\d+) '
-                      r'RMS2ND (\d+) LOUD (\d+) '
+                      r'RMS2ND (\d+) LOUD (\d+) GUIDE (\d+) '
                       r'MINMS (\d+) VOICERMS (\d+) '
                       r'REPLY (.*) ERROR (.*)$', text, re.M)
     keys = ('now', 'state', 'polls', 'alloc', 'release', 'pages', 'page',
             'dropped', 'sub_bytes', 'src',
             'dropped_short', 'dropped_silent', 'rec_ms', 'rms_max',
-            'rms_2nd', 'loud', 'min_ms', 'voice_rms', 'reply', 'error')
+            'rms_2nd', 'loud', 'guide', 'min_ms', 'voice_rms', 'reply', 'error')
     out = []
     for row in rows:
         item = dict(zip(keys, row))
         for k in ('now', 'polls', 'alloc', 'release', 'pages', 'page',
                   'dropped', 'sub_bytes',
                   'dropped_short', 'dropped_silent', 'rec_ms', 'rms_max',
-                  'rms_2nd', 'loud', 'min_ms', 'voice_rms'):
+                  'rms_2nd', 'loud', 'guide', 'min_ms', 'voice_rms'):
             item[k] = int(item[k])
         out.append(item)
     return out
@@ -128,6 +129,16 @@ def subtitles(text):
       `\n` (逆斜線 + n) 区切りで 1 行に出てくる。
     """
     return re.findall(r'^SUB (.*)$', text, re.M)
+
+
+# 案内の字幕 (2026-09-22)。会話の状態をそのまま言葉にして帯へ出す。
+GUIDE_REC = r'マイクに向かって\n話しかけてください'
+GUIDE_THINK = '考えています…'
+
+
+def reply_subs(text):
+    """SUB 行から**案内を除いた**もの (返答の字幕だけを見たいとき)。"""
+    return [s for s in subtitles(text) if s not in (GUIDE_REC, GUIDE_THINK)]
 
 
 def bands(text):
@@ -507,6 +518,114 @@ class RecordGateTest(unittest.TestCase):
         self.assertEqual(info['dropped_silent'], 0)
 
 
+class GuideTest(unittest.TestCase):
+    """案内の字幕 (2026-09-22)。会話の状態をそのまま言葉にして帯へ出す。
+
+      録音中 … 「マイクに向かって話しかけてください」(15 桁で 2 行)
+      考え中 … 「考えています…」
+
+    ★ **帯の持ち主は 1 人。** 一次回答 (ack) が鳴っている間と、返答の字幕が
+      出ている間は案内を出さない。持ち主が居るときは消しもしない。
+    """
+
+    SUBS = r'0\tこんにちは\n1000\tさようなら\n'
+
+    def turn(self, ack_ms=0, subs=None, ms=1200, level=None, gate=None):
+        script = ''
+        if gate is not None:
+            script += 'gate %s\n' % ' '.join(str(v) for v in gate)
+        if level is not None:
+            script += 'miclevel %d\n' % level
+        script += 'ack %d\nackms %d\nrespdelay 10\n' % (1 if ack_ms else 0,
+                                                          ack_ms)
+        script += 'resp 202 %s\nresp 200 %s\n' % (
+            ACCEPT_BODY, DONE_SUBS_BODY if subs is not None else DONE_BODY)
+        if subs is not None:
+            script += 'subs 200 %s\n' % subs
+        script += 'resp 200 PCM:48000\nmic 40\n'
+        script += 'press\nt %d\nrelease\nt %d\nprint\n' % (ms, ms + 6000)
+        return run(script, legacy_gate=False)
+
+    # ---- 録音中 ----------------------------------------------------------
+    def test_the_recording_guide_appears_while_the_key_is_held(self):
+        out = self.turn(subs=self.SUBS)
+        self.assertEqual(subtitles(out)[0], GUIDE_REC)
+        # 押している間に出る (録音が終わる前)。
+        lines = out.splitlines()
+        first = [i for i, s in enumerate(lines) if s.startswith('SUB ')][0]
+        rec_end = [i for i, s in enumerate(lines) if s == 'REC end'][0]
+        self.assertLess(first, rec_end)
+
+    def test_the_recording_guide_is_two_lines_of_fifteen_columns(self):
+        # サーバと同じ規則で割ってある (tools/ack_lines.py と突き合わせる)。
+        import ack_lines
+        self.assertEqual(GUIDE_REC.replace('\\n', '\n').split('\n'),
+                         ack_lines.subtitle_lines('マイクに向かって話しかけてください'))
+        for line in GUIDE_REC.replace('\\n', '\n').split('\n'):
+            self.assertLessEqual(ack_lines.page_width(line), 15)
+
+    # ---- 考え中 ----------------------------------------------------------
+    def test_the_thinking_guide_follows_the_recording_one(self):
+        out = self.turn(subs=self.SUBS)
+        subs = subtitles(out)
+        self.assertEqual(subs[0], GUIDE_REC)
+        self.assertEqual(subs[1], GUIDE_THINK)
+
+    def test_the_thinking_guide_waits_for_the_opener(self):
+        """★ 一次回答が鳴っている間は案内を出さない (鳴り終わってから)。"""
+        out = self.turn(ack_ms=800, subs=self.SUBS)
+        subs = subtitles(out)
+        # 録音中の案内のあと、ack が鳴っている間は 1 つも出ない。
+        self.assertEqual(subs[0], GUIDE_REC)
+        self.assertEqual(subs[1], GUIDE_THINK)
+        lines = out.splitlines()
+        ack_at = [i for i, s in enumerate(lines) if s.startswith('ACK ')][0]
+        think_at = [i for i, s in enumerate(lines)
+                    if s == 'SUB ' + GUIDE_THINK][0]
+        # 「考えています…」は ack が始まったあと。
+        self.assertGreater(think_at, ack_at)
+
+    def test_the_reply_subtitles_replace_the_thinking_guide(self):
+        out = self.turn(subs=self.SUBS)
+        subs = subtitles(out)
+        self.assertEqual(subs[:2], [GUIDE_REC, GUIDE_THINK])
+        # そのあとは返答の字幕。案内は出てこない。
+        self.assertEqual(subs[2:], [r'こんにちは', r'こんにちは\nさようなら', '-'])
+
+    def test_the_guide_is_gone_when_the_turn_ends(self):
+        out = self.turn(subs=self.SUBS)
+        self.assertEqual(subtitles(out)[-1], '-')
+        self.assertEqual(last_print(out)['guide'], 0)   # GUIDE_NONE
+
+    # ---- 破棄 ------------------------------------------------------------
+    def test_a_discarded_recording_clears_the_guide(self):
+        """短押し / 無音で捨てたら案内も消す (帯は黒のまま文字なし)。"""
+        out = self.turn(ms=300, subs=self.SUBS)         # 短すぎ
+        self.assertEqual(last_print(out)['dropped_short'], 1)
+        self.assertEqual(subtitles(out), [GUIDE_REC, '-'])
+        self.assertEqual(last_print(out)['guide'], 0)
+
+    def test_a_silent_recording_clears_the_guide_too(self):
+        out = self.turn(ms=1500, level=0, subs=self.SUBS)
+        self.assertEqual(last_print(out)['dropped_silent'], 1)
+        self.assertEqual(subtitles(out), [GUIDE_REC, '-'])
+
+    # ---- 字幕の無い返答 ---------------------------------------------------
+    def test_a_reply_without_subtitles_clears_the_guide_when_it_starts(self):
+        # 「考えています…」のまま鳴らし続けない。
+        out = self.turn()
+        subs = subtitles(out)
+        self.assertEqual(subs, [GUIDE_REC, GUIDE_THINK, '-'])
+
+    # ---- 文面 ------------------------------------------------------------
+    def test_the_wording_can_be_replaced(self):
+        # 将来 settings から変える余地 (いまは既定のまま使う)。
+        header = Path(IDF, 'main', 'stackee_talksm.h').read_text()
+        self.assertIn('stackee_talk_set_guides', header)
+        self.assertIn('#define STACKEE_TALK_GUIDE_RECORDING', header)
+        self.assertIn('#define STACKEE_TALK_GUIDE_THINKING', header)
+
+
 class VoiceRmsTest(unittest.TestCase):
     """RMS の測り方そのもの (stackee_talk_voice_rms)。"""
 
@@ -826,7 +945,7 @@ class InlineSubtitleTest(unittest.TestCase):
         self.assertEqual(mid['pages'], 3)
         self.assertEqual(mid['src'], 'inline')
         self.assertEqual(mid['dropped'], 0)
-        self.assertEqual(subtitles(out),
+        self.assertEqual(reply_subs(out),
                          [r'こんにちは',
                           r'こんにちは\nさようなら',
                           r'こんにちは\nさようなら\nまたね', '-'])
@@ -843,11 +962,11 @@ class InlineSubtitleTest(unittest.TestCase):
         out = self.turn(done_body(r'0\tタブ\tは本文に入らない\n'))
         # 2 つ目のタブから先も本文の一部。行は 1 つだけ採れる。
         self.assertEqual(prints(out)[0]['pages'], 1)
-        self.assertEqual(subtitles(out)[0], 'タブ\tは本文に入らない')
+        self.assertEqual(reply_subs(out)[0], 'タブ\tは本文に入らない')
 
     def test_other_escapes_survive(self):
         out = self.turn(done_body(r'0\t\"かぎ\" \\ と \/\n'))
-        self.assertEqual(subtitles(out)[0], '"かぎ" \\ と /')
+        self.assertEqual(reply_subs(out)[0], '"かぎ" \\ と /')
 
     def test_a_url_only_server_still_works(self):
         out = self.turn(done_body(None), subs_resp=self.INLINE)
@@ -862,7 +981,9 @@ class InlineSubtitleTest(unittest.TestCase):
     def test_neither_means_no_subtitles(self):
         out = self.turn(done_body(None, url=False))
         self.assertNotIn('subs', state_names(out))
-        self.assertEqual(subtitles(out), [])
+        # ★ 字幕は 1 つも出ない。出るのは「案内を消した」の 1 回だけ
+        #   (鳴らしているのに「考えています…」のままにしない)。
+        self.assertEqual(reply_subs(out), ['-'])
         mid = prints(out)[0]
         self.assertEqual(mid['pages'], 0)
         self.assertEqual(mid['src'], 'none')
@@ -909,7 +1030,7 @@ class InlineSubtitleTest(unittest.TestCase):
         mid = prints(out)[0]
         self.assertEqual(mid['pages'], 1)
         self.assertEqual(mid['dropped'], 1)
-        self.assertEqual(subtitles(out)[0], 'つぎ')
+        self.assertEqual(reply_subs(out)[0], 'つぎ')
 
     def test_a_four_kilobyte_body_is_read_whole(self):
         # 契約の上限に近い大きさ。48 ページ x 15 全角 (45 B)。
@@ -922,7 +1043,7 @@ class InlineSubtitleTest(unittest.TestCase):
         # 48 行 x (桁数 + TAB + 45 B + 改行) = 2,500 B 前後
         self.assertGreater(mid['sub_bytes'], 2000)
         self.assertLessEqual(mid['sub_bytes'], 4096)
-        self.assertEqual(subtitles(out)[0], 'あ' * 15)
+        self.assertEqual(reply_subs(out)[0], 'あ' * 15)
 
     def test_the_turn_timing_log_says_where_the_subtitles_came_from(self):
         out = self.turn(done_body(self.INLINE))
@@ -975,7 +1096,7 @@ print
     def test_pages_are_shown_in_order_and_cleared_at_the_end(self):
         out = self.happy()
         # ★ 行は積む。2 ページ目は 1 ページ目の下に足す (置き換えない)。
-        self.assertEqual(subtitles(out),
+        self.assertEqual(reply_subs(out),
                          [r'こんにちは',
                           r'こんにちは\nさようなら',
                           r'こんにちは\nさようなら\nまたね', '-'])
@@ -995,13 +1116,16 @@ print
     def test_a_page_is_pushed_only_when_it_changes(self):
         # 3 ページで 3 回 + 消すので 1 回。毎周呼んでいたら数千回になる。
         out = self.happy()
-        self.assertEqual(len(subtitles(out)), 4)
+        self.assertEqual(len(reply_subs(out)), 4)
 
     def test_pages_change_at_the_start_times(self):
         out = self.happy()
         lines = out.splitlines()
         play_at = [i for i, s in enumerate(lines) if s.startswith('PLAY ')][0]
-        shown = [i for i, s in enumerate(lines) if s.startswith('SUB ')]
+        # ★ 案内 (録音中 / 考えています…) は鳴らす前に出るので数えない。
+        shown = [i for i, s in enumerate(lines)
+                 if s.startswith('SUB ') and
+                 s[4:] not in (GUIDE_REC, GUIDE_THINK)]
         self.assertTrue(all(i > play_at for i in shown[:3]), out[:400])
 
     def test_ms_to_page_index(self):
@@ -1035,7 +1159,7 @@ pageat 60000
         mid = prints(out)[0]
         self.assertEqual(mid['pages'], 2)
         self.assertEqual(mid['dropped'], 4)
-        self.assertEqual(subtitles(out), [r'よい', r'よい\nもうひとつ', '-'])
+        self.assertEqual(reply_subs(out), [r'よい', r'よい\nもうひとつ', '-'])
 
     def test_too_many_pages_are_dropped(self):
         body = ''.join(r'%d\t%d\n' % (i * 10, i) for i in range(60))
@@ -1087,7 +1211,7 @@ band 9
     def test_the_band_never_carries_more_than_three_lines(self):
         body = ''.join(r'%d\tぺ%d\n' % (i * 1000, i) for i in range(9))
         out = self.happy(subs=body)
-        for text in subtitles(out):
+        for text in reply_subs(out):
             if text == '-':
                 continue
             self.assertLessEqual(len(text.split(r'\n')), 3, text)
@@ -1097,7 +1221,9 @@ band 9
         self.assertIn('PLAY 48000', out)
         self.assertEqual(last_print(out)['state'], 'idle')
         self.assertEqual(last_print(out)['error'], '')
-        self.assertEqual(subtitles(out), [])
+        # ★ 字幕は 1 つも出ない。出るのは「案内を消した」の 1 回だけ
+        #   (鳴らしているのに「考えています…」のままにしない)。
+        self.assertEqual(reply_subs(out), ['-'])
 
     def test_a_broken_connection_while_fetching_subtitles_is_survivable(self):
         out = run("""
@@ -1137,7 +1263,8 @@ print
         self.assertNotIn('subs', state_names(out))
         self.assertEqual([c[1] for c in http_calls(out)],
                          ['/talk', '/jobs/abc?wait=25', '/jobs/abc/audio'])
-        self.assertEqual(subtitles(out), [])
+        # ★ 字幕は 1 つも出ない。出るのは「案内を消した」の 1 回だけ。
+        self.assertEqual(reply_subs(out), ['-'])
 
     def test_a_bad_subtitles_url_is_ignored(self):
         out = run("""

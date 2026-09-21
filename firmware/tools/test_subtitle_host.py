@@ -402,6 +402,48 @@ class AckLinesTest(unittest.TestCase):
                          sub.render(self.font, '\n'.join(lines)).crc())
 
 
+class GuideTextTest(unittest.TestCase):
+    """案内の字幕が本体の定数と同じで、帯に収まるか。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.font = gen_font16.load(FONT16)
+        cls.header = (IDF / 'main/stackee_talksm.h').read_text()
+
+    def test_the_text_matches_the_firmware_constants(self):
+        # C の文字列は \n で書いてあるので、そこだけ直して比べる。
+        self.assertIn('#define STACKEE_TALK_GUIDE_RECORDING "%s"'
+                      % sub.GUIDE_RECORDING.replace('\n', '\\n'), self.header)
+        self.assertIn('#define STACKEE_TALK_GUIDE_THINKING  "%s"'
+                      % sub.GUIDE_THINKING, self.header)
+
+    def test_it_matches_the_server_way_of_splitting(self):
+        self.assertEqual(sub.GUIDE_RECORDING.split('\n'),
+                         ack_lines.subtitle_lines('マイクに向かって話しかけてください'))
+        self.assertEqual([sub.GUIDE_THINKING],
+                         ack_lines.subtitle_lines('考えています…'))
+
+    def test_it_fits_the_band(self):
+        for text in (sub.GUIDE_RECORDING, sub.GUIDE_THINKING):
+            lines = text.split('\n')
+            self.assertLessEqual(len(lines), sub.SUB_LINES, text)
+            for line in lines:
+                self.assertLessEqual(sub.text_px(self.font, line),
+                                     sub.SUB_WIDTH, line)
+
+    def test_every_character_has_a_glyph(self):
+        # 〓 になる字が 1 つでもあれば案内として使えない (… = U+2026 を含む)。
+        for text in (sub.GUIDE_RECORDING, sub.GUIDE_THINKING):
+            for ch in text.replace('\n', ''):
+                self.assertIsNotNone(self.font.glyph(ord(ch)),
+                                     '%r (U+%04X) の字形が無い' % (ch, ord(ch)))
+
+    def test_the_two_guides_are_different_pictures(self):
+        crcs = {c['name']: c['crc'] for c in sub.expected(self.font)['cases']}
+        self.assertNotEqual(crcs['案内(録音中)'], crcs['案内(考え中)'])
+        self.assertNotEqual(crcs['案内(録音中)'], crcs['空'])
+
+
 class BrokenFontTest(unittest.TestCase):
     """壊れた font16.bin を掴まされても落ちない (帯だけ出す)。"""
 

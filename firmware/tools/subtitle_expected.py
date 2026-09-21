@@ -46,8 +46,14 @@ SUB_BG = 0x000000
 SUB_FG = 0xFFFFFF
 SCREEN_BG = 0xFFFFFF
 
+# 案内の字幕 (main/stackee_talksm.h の STACKEE_TALK_GUIDE_RECORDING /
+# _THINKING と**同じ文字列**)。行の割り方はサーバと同じ規則
+# (tools/ack_lines.py。tools/test_talk_host.py が突き合わせる)。
+GUIDE_RECORDING = 'マイクに向かって\n話しかけてください'
+GUIDE_THINKING = '考えています…'
+
 # check_phase2.py が実機に投げる文字列。1 行・3 行・頁めくり直後・空・
-# 字形なし・半角混在を含む。
+# 字形なし・半角混在・案内を含む。
 CASES = [
     ('空', ''),
     ('1行', 'あいうえおかきくけこさしすせそ'),
@@ -64,6 +70,11 @@ CASES = [
     # 帯がいちばん重くなる中身 (3 行 x 15 桁 = 全角 45 字)。描画時間の合否は
     # これで測る (check_phase2.py の SUB_PAINT_MAX_US)。
     ('3行15桁', '\n'.join(['あいうえおかきくけこさしすせそ'] * 3)),
+    # 案内の字幕 (main/stackee_talksm.h の STACKEE_TALK_GUIDE_*)。
+    # ★ 実機が会話中に出すものそのもの。字形が引けるか (… = U+2026 を含む)
+    #   まで含めて、ここで CRC で確かめる。
+    ('案内(録音中)', GUIDE_RECORDING),
+    ('案内(考え中)', GUIDE_THINKING),
 ]
 
 

@@ -1100,7 +1100,8 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     "\"rec_ms\":%lu,\"first_sample_ms\":%lu,\"rms_max\":%lu,"
                     "\"rms_at\":%d,\"rms_mean\":%lu,\"rms_2nd\":%lu,"
                     "\"loud\":%lu,"
-                    "\"min_ms\":%lu,\"voice_rms\":%lu,\"voice_windows\":%lu",
+                    "\"min_ms\":%lu,\"voice_rms\":%lu,\"voice_windows\":%lu,"
+                    "\"guide\":%d",
                     id, stackee_talk_state_names[t->state], t->polls,
                     (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
                     (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
@@ -1123,7 +1124,7 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     t->last_rms_at, (unsigned long)t->last_rms_mean,
                     (unsigned long)t->last_rms_2nd, (unsigned long)t->last_loud,
                     (unsigned long)t->min_ms, (unsigned long)t->voice_rms,
-                    (unsigned long)t->voice_windows);
+                    (unsigned long)t->voice_windows, t->guide_shown);
     at = put(buf, cap, at, ",\"reply\":\"");
     at = put_json_str(buf, cap, at, t->reply);
     at = put(buf, cap, at, "\",\"error\":\"");

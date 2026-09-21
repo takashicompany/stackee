@@ -479,18 +479,18 @@ python3 firmware/tools/hid_desc_check.py       # 記述子の構成を目で見�
 python3 firmware/tools/test_faceanim_host.py   # 顔の状態機械 (20 件)
 python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (27 件)
 python3 firmware/tools/test_cfg_host.py        # 段階 3: 設定・登録簿・音量・素材 + 4 KB の JSON (48 件)
-python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 + 切り捨て (73 件)
+python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 + 切り捨て + 案内 (83 件)
 python3 firmware/tools/test_wifi_host.py       # 段階 3: Wi-Fi の状態機械 (21 件)
 python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
-python3 firmware/tools/test_subtitle_host.py   # 字幕: フォント・帯・一次回答の行 (33 件)
+python3 firmware/tools/test_subtitle_host.py   # 字幕: フォント・帯・一次回答/案内の行 (38 件)
 python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 (40 件、§25)
 python3 firmware/tools/test_micopen_host.py    # マイクの開け方の印 (8 件、§11-5)
 python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **487 件**。どれも実機に触らない。
+全部で **502 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -1310,6 +1310,42 @@ audio タスクの上)。将来プリロール (録音の冒頭の取りこぼ�
 
 ★ `talk.inject` (決まった PCM を流す検査の道) は録音を通らないので、
 この切り捨ての外にある。
+
+#### 案内の字幕 (2026-09-22)
+
+帯が黒いだけだと「いま何をすればいいか」が分からない。会話の状態を
+そのまま言葉にして出す。文面は `main/stackee_talksm.h` の定数
+(`STACKEE_TALK_GUIDE_RECORDING` / `_THINKING`)。
+
+| いつ | 帯 |
+|---|---|
+| **録音中** (STK_TALK を押している間。顔は `listening`) | 「マイクに向かって」<br>「話しかけてください」 |
+| **考え中** (送信〜返答待ち。顔は `thinking`) | 「考えています…」 |
+
+★ **行の割り方はサーバと同じ規則** (1 行 15 桁、句読点で行を始めない。
+`tools/ack_lines.py`)。返答の字幕と切れ目の作法をそろえる。
+
+★ **帯の持ち主は 1 人。** 一次回答 (ack) が鳴っている間はそちらが持ち主で、
+案内は**鳴り終わってから**出す。返答の字幕が来たら置き換わる。持ち主が
+居る間は案内が帯を**消しもしない**。
+
+| 起きること | 帯 |
+|---|---|
+| 押す | 「マイクに向かって / 話しかけてください」 |
+| 離す → 一次回答が鳴る | 一次回答の字幕 (§23-9) |
+| 一次回答が鳴り終わる | 「考えています…」 |
+| 返答の字幕が来る | 返答の行 (1 行ずつ積む。§23-8) |
+| 鳴り終わる | 黒・文字なし |
+
+* **短押し / 無音で捨てたときは案内も消す** (上の切り捨て)。押しただけで
+  「考えています…」が残らない。
+* **返答に字幕が無いとき** (旧サーバ / 取れなかった) は、鳴らし始めに案内を
+  消す。「考えています…」のまま鳴らし続けない。
+* **`MIC(kc)` の押下 (PC 側のプッシュトゥトーク) では出さない。** あれは顔
+  だけを変えるもので、会話の状態機械を通らない (§10-1)。
+
+`talk.status` の `guide` に、いま案内を出しているか (0 なし / 1 録音中 /
+2 考え中 / 3 ほかの持ち主) が出る。
 | 計時 | `[talk-http-timing]` / `[talk-turn-timing]` をログに出す |
 
 通信は**専用タスク** (`stackee_http`、CPU0 / 優先度 4 / スタック 10 KB) が持つ。
@@ -1511,7 +1547,7 @@ I2C も NVS も触らない (値を書き換えるだけ)。レジスタと NVS 
 
 ```
 python3 firmware/tools/test_cfg_host.py    # 設定・登録簿・音量・JSON・URL・素材 (48 件)
-python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 + 切り捨て (73 件)
+python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 + 切り捨て + 案内 (83 件)
 python3 firmware/tools/test_wifi_host.py   # Wi-Fi の状態機械 (21 件)
 ```
 
