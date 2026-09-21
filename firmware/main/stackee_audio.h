@@ -20,6 +20,9 @@
 #include "esp_err.h"
 
 #define STACKEE_AUDIO_RATE     16000
+// 立ち上がりの計測: 先頭 500 ms を 50 ms ずつ 10 枠で見る。
+#define STACKEE_AUDIO_HEAD_SLOTS 10
+
 #define STACKEE_AUDIO_ACK_MAX  5
 
 // I2S のピン (firmware/kmk/code.py と CoreS3 のボード定義と同じ)。

@@ -1,6 +1,7 @@
 #include "stackee_codec.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -106,6 +107,24 @@ bool stackee_codec_ready(void) {
 // code.py のコメントに書いてある実測。
 #define ES_GAIN_CODE    14
 
+// 0x0B = CHIP STATUS。bit1:0 が CSM_STATE。
+#define ES_CHIP_STATUS  0x0B
+
+// 直前の setup / enable にかかった I2C の時間 [us] (計測用)。
+static uint32_t s_setup_us;
+static uint32_t s_enable_us;
+
+uint32_t stackee_es7210_last_setup_us(void) { return s_setup_us; }
+uint32_t stackee_es7210_last_enable_us(void) { return s_enable_us; }
+
+int stackee_es7210_csm_state(void) {
+    if (!s_ready) {
+        return -1;
+    }
+    int v = r8(s_es, ES_CHIP_STATUS);
+    return (v < 0) ? -1 : (v & 0x03);
+}
+
 // es7210.py の _mic_select_config()。MIC1 + MIC2 の 2ch = 通常の I2S。
 static void es7210_mic_select(void) {
     for (int i = 0; i < 4; i++) {
@@ -130,6 +149,7 @@ esp_err_t stackee_es7210_setup(void) {
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
+    int64_t t0 = esp_timer_get_time();
     esp_err_t err = w8(s_es, ES_RESET, 0xFF);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ES7210 が応答しない: %s", esp_err_to_name(err));
@@ -161,13 +181,17 @@ esp_err_t stackee_es7210_setup(void) {
     if (v >= 0) {
         w8(s_es, ES_SDP1, (uint8_t)(v & 0xFC));
     }
-    return stackee_es7210_enable(true);
+    err = stackee_es7210_enable(true);
+    // ★ enable のぶんも込みで「押下時に I2C へ費やした時間」。
+    s_setup_us = (uint32_t)(esp_timer_get_time() - t0);
+    return err;
 }
 
 esp_err_t stackee_es7210_enable(bool on) {
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
+    int64_t t0 = esp_timer_get_time();
     if (on) {
         int off = r8(s_es, ES_CLOCK_OFF);
         if (off >= 0) {
@@ -192,6 +216,7 @@ esp_err_t stackee_es7210_enable(bool on) {
         w8(s_es, ES_CLOCK_OFF, 0x7F);
         w8(s_es, ES_POWER_DOWN, 0x07);
     }
+    s_enable_us = (uint32_t)(esp_timer_get_time() - t0);
     return ESP_OK;
 }
 

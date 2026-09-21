@@ -35,6 +35,12 @@ static const char *TAG = "audio";
 
 #define TICK_MS          5
 #define RECORD_MAX_MS    1000       // audio.selftest の録音時間
+
+// ---- 立ち上がりの計測 -------------------------------------------------------
+// 先頭 500 ms を 50 ms ずつ 10 枠。押下 → 使える音までの形を数字で見る。
+#define HEAD_SLOT_MS     50
+#define HEAD_MS          (HEAD_SLOT_MS * STACKEE_AUDIO_HEAD_SLOTS)
+#define CSM_TIMEOUT_MS   300
 #define PLAY_CHUNK       512        // 1 回に I2S へ渡すサンプル数
 #define PLAY_DRAIN_MS    200        // 書き終えてから DMA が吐き切るまで
 
@@ -105,6 +111,17 @@ static struct {
     uint32_t selftest_rms_max;
     int      selftest_rms_at;       // 最大だった窓の番号 (-1 = 測れなかった)
     uint32_t selftest_rms_mean;     // 窓ごとの RMS の平均
+    // ---- 立ち上がりの計測 (research/stackee/record_onset_2026-09-21.md) ----
+    bool     onset_valid;
+    bool     onset_was_open;    // 測る前からマイクが開いていた (UAC など)
+    uint32_t onset_open_ms;     // enter_mic() 全体
+    uint32_t onset_i2c_us;      // そのうち ES7210 の I2C 設定
+    uint32_t onset_enable_us;   // そのうち enable(true) ぶん
+    uint32_t onset_first_ms;    // i2s_channel_enable → 最初の DMA バッファ
+    int      onset_csm_before;  // enable の直後に読んだ CSM_STATE
+    int      onset_csm_ms;      // → normal になるまで [ms] (-1 = 届かなかった)
+    int      onset_csm_polls;
+    uint16_t onset_head_rms[STACKEE_AUDIO_HEAD_SLOTS];  // 50 ms ごとの RMS
     int      selftest_peak;
     uint32_t selftest_ms;
     char     selftest_err[64];
@@ -798,6 +815,103 @@ static const stackee_talk_ops_t TALK_OPS = {
 };
 
 // ---------------------------------------------------------------------------
+// 立ち上がりの計測 (research/stackee/record_onset_2026-09-21.md)
+// ---------------------------------------------------------------------------
+// ★ **無音のまま、人手ゼロで**「押してから使える音が録れ始めるまで」の形を
+//   数字にする。鳴らすものは何も無い (マイクを開けて 500 ms 録るだけ)。
+//
+//   onset_open_ms    enter_mic() 全体 (押下の道でそのまま待たされるぶん)
+//   onset_i2c_us     そのうち ES7210 を I2C で設定するぶん
+//   onset_first_ms   i2s_channel_enable → 最初の DMA バッファが返るまで
+//   onset_csm_ms     同 → ES7210 の CSM_STATE が normal になるまで
+//                    (0x0B。LRCK を数えて進むので I2S を止めている間は進まない)
+//   head_rms[10]     先頭 500 ms を 50 ms ずつ。立ち上がりの跳ねが見える
+//
+// ★ CSM を読む I2C の往復と DMA の汲み出しは**同じ輪**で回す。汲まずに
+//   ポーリングだけすると DMA が溢れて head_rms が壊れる。
+static void run_onset(void) {
+    a.onset_valid = false;
+    memset(a.onset_head_rms, 0, sizeof(a.onset_head_rms));
+    a.onset_csm_ms = -1;
+    a.onset_csm_polls = 0;
+    a.onset_csm_before = -1;
+    a.onset_first_ms = 0;
+
+    // ★ 冷えた状態から測る。UAC が握っていたら閉じられないので、その旨を出す。
+    a.onset_was_open = (a.mode == MODE_MIC);
+    if (!a.onset_was_open) {
+        enter_off();
+    }
+    int64_t t_open = esp_timer_get_time();
+    if (enter_mic() != ESP_OK) {
+        snprintf(a.selftest_err, sizeof(a.selftest_err), "マイクを開けない");
+        return;
+    }
+    int64_t t_enabled = esp_timer_get_time();
+    a.onset_open_ms = (uint32_t)((t_enabled - t_open) / 1000);
+    a.onset_i2c_us = stackee_es7210_last_setup_us();
+    a.onset_enable_us = stackee_es7210_last_enable_us();
+    a.onset_csm_before = stackee_es7210_csm_state();
+
+    static int16_t chunk[512];
+    uint64_t slot_square = 0;
+    uint32_t slot_count = 0;
+    int      slot = 0;
+    uint32_t got_total = 0;
+    int64_t  next_csm = t_enabled;
+    for (;;) {
+        int64_t now = esp_timer_get_time();
+        uint32_t since_ms = (uint32_t)((now - t_enabled) / 1000);
+        if (since_ms >= HEAD_MS) {
+            break;
+        }
+        // CSM を 2 ms おきに 1 回だけ読む (normal になるまで)。
+        if (a.onset_csm_ms < 0 && since_ms < CSM_TIMEOUT_MS && now >= next_csm) {
+            next_csm = now + 2000;
+            a.onset_csm_polls++;
+            if (stackee_es7210_csm_state() == STACKEE_ES7210_CSM_NORMAL) {
+                a.onset_csm_ms = (int)((esp_timer_get_time() - t_enabled) / 1000);
+            }
+        }
+        size_t got = 0;
+        esp_err_t err = i2s_channel_read(a.rx, chunk, sizeof(chunk), &got,
+                                         pdMS_TO_TICKS(5));
+        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+            snprintf(a.selftest_err, sizeof(a.selftest_err), "i2s_read %s",
+                     esp_err_to_name(err));
+            break;
+        }
+        size_t n = got / 2;
+        if (n > 0 && got_total == 0) {
+            a.onset_first_ms = (uint32_t)((esp_timer_get_time() - t_enabled) / 1000);
+        }
+        got_total += (uint32_t)n;
+        for (size_t i = 0; i < n; i++) {
+            slot_square += (uint64_t)((int32_t)chunk[i] * chunk[i]);
+            if (++slot_count >= (uint32_t)(STACKEE_AUDIO_RATE * HEAD_SLOT_MS / 1000)) {
+                uint32_t mean = (uint32_t)(slot_square / slot_count);
+                uint32_t root = 0;
+                while ((uint64_t)(root + 1) * (root + 1) <= mean) {
+                    root++;
+                }
+                if (slot < STACKEE_AUDIO_HEAD_SLOTS) {
+                    a.onset_head_rms[slot++] = (uint16_t)
+                        (root > 0xFFFF ? 0xFFFF : root);
+                }
+                slot_square = 0;
+                slot_count = 0;
+            }
+        }
+    }
+    a.selftest_samples = got_total;
+    // 測ったら畳む (元から開いていたなら開けたまま)。
+    if (!a.onset_was_open) {
+        enter_off();
+    }
+    a.onset_valid = true;
+}
+
+// ---------------------------------------------------------------------------
 // audio.selftest (無音でよい。I2S の DMA が動いている証拠を数字で出す)
 // ---------------------------------------------------------------------------
 static void run_selftest(void) {
@@ -890,6 +1004,12 @@ static void audio_task(void *unused) {
             run_selftest();
             continue;
         }
+        if (atomic_load(&a.selftest_req) == 4) {
+            a.selftest_err[0] = '\0';
+            run_onset();
+            atomic_store(&a.selftest_req, 3);
+            continue;
+        }
         int want = atomic_exchange(&a.play_req, -1);
         if (want >= 0 && want < a.ack_count && !a.play_active) {
             start_ack(want, false);
@@ -970,7 +1090,7 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     "\"sub_dropped\":%d,\"subs_ok\":%lu,\"subs_failed\":%lu,"
                     "\"sub_src\":\"%s\","
                     "\"dropped_short\":%lu,\"dropped_silent\":%lu,"
-                    "\"rec_ms\":%lu,\"rms_max\":%lu,"
+                    "\"rec_ms\":%lu,\"first_sample_ms\":%lu,\"rms_max\":%lu,"
                     "\"rms_at\":%d,\"rms_mean\":%lu,\"rms_2nd\":%lu,"
                     "\"loud\":%lu,"
                     "\"min_ms\":%lu,\"voice_rms\":%lu,\"voice_windows\":%lu",
@@ -991,6 +1111,7 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     (unsigned long)t->dropped_short,
                     (unsigned long)t->dropped_silent,
                     (unsigned long)t->last_rec_ms,
+                    (unsigned long)t->first_sample_ms,
                     (unsigned long)t->last_rms_max,
                     t->last_rms_at, (unsigned long)t->last_rms_mean,
                     (unsigned long)t->last_rms_2nd, (unsigned long)t->last_loud,
@@ -1071,9 +1192,11 @@ static size_t audio_console(const char *cmd, const char *line, long id,
         if (a.play_active || stackee_talk_busy(a.talk)) {
             return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
         }
+        // ★ `{"onset":1}` … 立ち上がりの計測 (押下 → 使える音までの形)。
+        bool onset = stackee_console_bool(line, "onset", false);
         int state = atomic_load(&a.selftest_req);
         if (state == 0 || state == 3) {
-            atomic_store(&a.selftest_req, 1);
+            atomic_store(&a.selftest_req, onset ? 4 : 1);
             // audio タスクが 1 秒録る。終わるまでここで待つ (最大 3 秒)。
             for (int i = 0; i < 300; i++) {
                 vTaskDelay(pdMS_TO_TICKS(10));
@@ -1084,6 +1207,28 @@ static size_t audio_console(const char *cmd, const char *line, long id,
         }
         if (atomic_load(&a.selftest_req) != 3) {
             return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"timeout\"}", id);
+        }
+        if (onset) {
+            size_t at = put(buf, cap, 0,
+                            "{\"id\":%ld,\"ok\":%s,\"onset\":1,\"was_open\":%s,"
+                            "\"open_ms\":%lu,\"i2c_us\":%lu,\"enable_us\":%lu,"
+                            "\"first_ms\":%lu,\"csm_before\":%d,\"csm_ms\":%d,"
+                            "\"csm_polls\":%d,\"samples\":%lu,\"slot_ms\":%d,"
+                            "\"head_rms\":[",
+                            id, a.selftest_err[0] ? "0" : "1",
+                            a.onset_was_open ? "true" : "false",
+                            (unsigned long)a.onset_open_ms,
+                            (unsigned long)a.onset_i2c_us,
+                            (unsigned long)a.onset_enable_us,
+                            (unsigned long)a.onset_first_ms,
+                            a.onset_csm_before, a.onset_csm_ms,
+                            a.onset_csm_polls,
+                            (unsigned long)a.selftest_samples, HEAD_SLOT_MS);
+            for (int i = 0; i < STACKEE_AUDIO_HEAD_SLOTS; i++) {
+                at = put(buf, cap, at, "%s%u", i ? "," : "",
+                         (unsigned)a.onset_head_rms[i]);
+            }
+            return put(buf, cap, at, "],\"error\":\"%s\"}", a.selftest_err);
         }
         return put(buf, cap, 0,
                    "{\"id\":%ld,\"ok\":%s,\"samples\":%lu,\"ms\":%lu,\"rms\":%lu,"

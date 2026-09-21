@@ -260,6 +260,11 @@ typedef struct {
     uint32_t last_rec_ms, last_rms_max;
     int      last_rms_at;       // 最大だった窓の番号 (-1 = 測れなかった)
     uint32_t last_rms_mean;     // 窓ごとの RMS の平均
+    // 押下 (録音を頼んだ瞬間) → 最初のサンプルが手に入るまで [ms]。
+    // ★ research/stackee/record_onset_2026-09-21.md の ①〜⑩ をまとめた数字。
+    //   ここが大きいと録音の頭が欠ける。
+    uint32_t rec_request;       // 録音を頼んだ時刻
+    uint32_t first_sample_ms;
     uint32_t last_rms_2nd;      // 2 番目に大きい窓 (立ち上がりの跳ねを除く目安)
     uint32_t last_loud;         // voice_rms を越えた窓の数
     // 切り捨ての閾値 (0 = その条件を見ない)。

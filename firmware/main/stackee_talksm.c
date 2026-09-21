@@ -337,6 +337,9 @@ void stackee_talk_set_pressed(stackee_talk_t *t, bool pressed) {
 // 録音
 // ---------------------------------------------------------------------------
 static bool start_recording(stackee_talk_t *t) {
+    // ★ 押下 → 最初のサンプルまでを測る起点。マイクを開ける前に取る。
+    t->rec_request = now(t);
+    t->first_sample_ms = 0;
     if (!valid_path(t->path)) {
         fail(t, "STACKEE_TALK_URL が未設定です");
         return false;
@@ -722,6 +725,12 @@ void stackee_talk_step(stackee_talk_t *t) {
                 fail(t, "マイクから音声を取得できません");
                 return;
             }
+            if (got > 0 && t->first_sample_ms == 0) {
+                t->first_sample_ms = since_ms(t, t->rec_request);
+                if (t->first_sample_ms == 0) {
+                    t->first_sample_ms = 1;     // 0 は「まだ」の意味に使う
+                }
+            }
             t->count += got;
             return;
         }
@@ -807,11 +816,14 @@ void stackee_talk_step(stackee_talk_t *t) {
             logf_(t, "[talk-turn-timing] {\"accepted_ms\":%lu,\"reply_ready_ms\":%lu,"
                      "\"audio_ready_ms\":%lu,\"play_setup_ms\":%lu,"
                      "\"audio_duration_ms\":%d,\"polls\":%d,\"complete_ms\":%lu,"
-                     "\"sub_pages\":%d,\"sub_src\":\"%s\"}",
+                     "\"sub_pages\":%d,\"sub_src\":\"%s\","
+                     "\"first_sample_ms\":%lu,\"rec_ms\":%lu}",
                   (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
                   (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
                   t->audio_duration_ms, t->polls, (unsigned long)t->complete_ms,
-                  t->page_count, stackee_talk_sub_src_names[t->sub_src]);
+                  t->page_count, stackee_talk_sub_src_names[t->sub_src],
+                  (unsigned long)t->first_sample_ms,
+                  (unsigned long)t->last_rec_ms);
             t->turns++;
             cleanup(t);
             to(t, STACKEE_TALK_IDLE);

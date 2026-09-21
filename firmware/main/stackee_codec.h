@@ -27,6 +27,18 @@ bool      stackee_codec_ready(void);
 esp_err_t stackee_es7210_setup(void);
 esp_err_t stackee_es7210_enable(bool on);
 
+// ---- 立ち上がりの計測 (research/stackee/record_onset_2026-09-21.md) --------
+// 直前の setup / enable が I2C に費やした時間 [us]。押下 → 音が録れ始めるまでの
+// うち「そもそも音を取っていない」ぶんの支配項なので、数字で見えるようにする。
+uint32_t stackee_es7210_last_setup_us(void);
+uint32_t stackee_es7210_last_enable_us(void);
+
+// ES7210 の状態機械 (レジスタ 0x0B の CSM_STATE)。
+//   0 = power down / 1 = chip initial / 2 = normal / 3 = power up
+// 読めなければ -1。★ LRCK を数えて進むので、I2S を止めている間は進まない。
+int stackee_es7210_csm_state(void);
+#define STACKEE_ES7210_CSM_NORMAL 2
+
 // ---- AW88298 (スピーカー) --------------------------------------------------
 // sample_rate から reg 0x06 の値を作る (M5Unified.cpp:463-470 の写し)。
 uint16_t  stackee_aw88298_reg06(int sample_rate);
