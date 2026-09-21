@@ -36,9 +36,11 @@ static const char *TAG = "ui";
 #define FACE_X           0
 // stackee_face.py の TileGrid: y=(height-size)//2 + 10 = (320-240)/2+10 = 50
 #define FACE_Y           50
-// ★ 元絵と faces.bin は 240x240 のまま。画面に出すのは上下 33 行を捨てた
-//   240x174 で、空いた 66 px は字幕の帯 (4 行) に回る。顔は y=50..223。
-#define FACE_TRIM        STACKEE_FACE_TRIM_ROWS
+// ★ 元絵と faces.bin は 240x240 のまま。画面に出すのは上 29 行・下 11 行を
+//   捨てた 240x200 で、空いた 40 px は字幕の帯 (3 行) に回る。顔は y=50..249。
+//   29 / 11 は 32 コマ全部の余白の最小値で、**1 画素も落ちない**
+//   (stackee_draw.h の ★★)。
+#define FACE_TRIM        STACKEE_FACE_TRIM_TOP
 #define FACE_ROWS        STACKEE_FACE_ROWS
 #define FACE_COUNT       STACKEE_FACE_MAX_COUNT
 // 展開した直後の丈 (シートの検証はここ。素材の形は変わっていない)。
@@ -56,8 +58,8 @@ static const char *TAG = "ui";
 
 #define STATUS_GLYPHS    "0123456789%-? "
 
-// 帯に出す文字列。**改行区切りで最大 4 行**。1 行 15 全角 = 45 バイト、
-// 上限は 1 ページ 63 バイト x 4 + 改行 3 + NUL
+// 帯に出す文字列。**改行区切りで最大 3 行**。1 行 15 全角 = 45 バイト、
+// 上限は 1 ページ 63 バイト x 3 + 改行 2 + NUL
 // (stackee_talksm の STACKEE_TALK_SUB_BAND_MAX と揃えてある)。
 #define SUB_TEXT_MAX     STACKEE_TALK_SUB_BAND_MAX
 
@@ -169,8 +171,8 @@ static void paint_bar(const stackee_bar_state_t *state) {
     stackee_perf_sample(STACKEE_PERF_UI_BAR, (uint32_t)(esp_timer_get_time() - t0));
 }
 
-// 字幕の帯 (y=224..319)。★ 顔 (y=50..223) と領域が重ならないので、
-//   顔の差分描画と互いに描き直さない。塗るのは 240x96 = 46 KB だけ。
+// 字幕の帯 (y=250..319)。★ 顔 (y=50..249) と領域が重ならないので、
+//   顔の差分描画と互いに描き直さない。塗るのは 240x70 = 33.6 KB だけ。
 static void paint_subtitle(const char *text) {
     int64_t t0 = esp_timer_get_time();
     stackee_draw_subtitle(&ui.canvas, ui.have_font16 ? &ui.font16 : NULL, text);
@@ -792,10 +794,10 @@ static size_t ui_console(const char *cmd, const char *line, long id,
 // ---------------------------------------------------------------------------
 // 立ち上げ
 // ---------------------------------------------------------------------------
-// 展開した 240x240 のシートを、各コマの上下 FACE_TRIM 行を落として
-// 240x174 に詰め直す (同じ入れ物の前へ寄せるだけ)。元絵も faces.bin も
-// 変えない。落ちる画素の数は tools/render_expected.py --json の
-// "face_trim" に出る (RESULTS.md に実測を残してある)。
+// 展開した 240x240 のシートを、各コマの上 FACE_TRIM_TOP 行・
+// 下 FACE_TRIM_BOTTOM 行を落として 240x200 に詰め直す (同じ入れ物の前へ
+// 寄せるだけ)。元絵も faces.bin も変えない。落ちる画素は **0**
+// (tools/render_expected.py --json の "face_lost" が空。RESULTS.md に実測)。
 static void trim_faces(uint8_t *sheet) {
     const size_t row_bytes = (size_t)FACE_SIZE / 2;
     for (int frame = 0; frame < FACE_COUNT; frame++) {
@@ -820,9 +822,9 @@ static void load_assets(void) {
     ui.faces = stackee_assets_read_inflate("faces.bin", FACE_SHEET_BYTES,
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ui.faces != NULL) {
-        // ★ 素材は 240x240 のまま展開して丈を確かめ、**その場で** 上下 33 行を
-        //   捨てて 240x174 に詰め直す。行は前へしか動かないので同じ入れ物で
-        //   済む (余った 253,440 B は realloc で PSRAM へ返す)。
+        // ★ 素材は 240x240 のまま展開して丈を確かめ、**その場で** 上 29 / 下 11 行を
+        //   捨てて 240x200 に詰め直す。行は前へしか動かないので同じ入れ物で
+        //   済む (余った 153,600 B は realloc で PSRAM へ返す)。
         trim_faces(ui.faces);
         ui.faces_len = FACE_KEPT_BYTES;
         ui.faces_crc = stackee_crc32(0, ui.faces, FACE_KEPT_BYTES);
@@ -889,7 +891,7 @@ esp_err_t stackee_ui_start(void) {
     if (ui.lock == NULL || ui.sub_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    // 起動直後は帯を出していない (y=224..319 は地の色のまま)。
+    // 起動直後は帯を出していない (y=250..319 は地の色のまま)。
     ui.sub_want[0] = '\0';
     ui.sub_shown[0] = '\0';
     ui.sub_shown_valid = true;

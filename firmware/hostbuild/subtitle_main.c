@@ -1,7 +1,7 @@
 // 字幕まわりを Mac の上でそのまま走らせる。
 //
 // 実機と**同じ実体** (main/stackee_font16.c / stackee_draw.c / stackee_crc32.c)
-// に、実機と同じ素材 (assets/font16.bin) を通して、帯 (240x30) の CRC32 を出す。
+// に、実機と同じ素材 (assets/font16.bin) を通して、帯 (240x70) の CRC32 を出す。
 //
 //   ./subtitle <font16.bin のパス>      ← 命令は標準入力から 1 行 1 つ
 //
@@ -117,12 +117,13 @@ int main(int argc, char **argv) {
             printf("info %s %d %d %d %u\n", g_ready ? "ok" : "bad",
                    STACKEE_FONT16_HEIGHT, g_font.narrow_count, g_font.wide_count,
                    (unsigned)len);
-            printf("band_geom %d %d %d %d %d %d %d\n",
+            printf("band_geom %d %d %d %d %d %d %d %d\n",
                    STACKEE_SUB_Y, STACKEE_SUB_HEIGHT, STACKEE_SUB_COLS,
                    STACKEE_SUB_WIDTH, STACKEE_SUB_LINES, STACKEE_SUB_LINE_H,
-                   STACKEE_SUB_PAD);
-            printf("face_geom %d %d %d\n", STACKEE_FACE_SIZE,
-                   STACKEE_FACE_TRIM_ROWS, STACKEE_FACE_ROWS);
+                   STACKEE_SUB_PAD, STACKEE_SUB_MARGIN);
+            printf("face_geom %d %d %d %d\n", STACKEE_FACE_SIZE,
+                   STACKEE_FACE_TRIM_TOP, STACKEE_FACE_TRIM_BOTTOM,
+                   STACKEE_FACE_ROWS);
         } else if (strcmp(line, "glyph") == 0) {
             cmd_glyph(arg ? (uint32_t)strtoul(arg, NULL, 16) : 0);
         } else if (strcmp(line, "px") == 0) {

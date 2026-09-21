@@ -3,6 +3,7 @@
 //
 //   node firmware/tools/ota.mjs --image firmware/build-full/stackee.bin
 //   node firmware/tools/ota.mjs --image ... --no-commit   # 書くだけ。切り替えない
+//   node firmware/tools/ota.mjs --commit                  # 書いてある next に切り替える
 //   node firmware/tools/ota.mjs --info                    # いま載っている版を見るだけ
 //   node firmware/tools/ota.mjs --abort                   # 途中で止まった転送を畳む
 //
@@ -265,7 +266,9 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--image' || a === '-i') out.image = argv[++i];
     else if (a === '--no-commit') out.commit = false;
-    else if (a === '--commit') out.commit = true;
+    // ★ --image 無しの --commit は「書いてある next へ切り替えるだけ」。
+    //   --no-commit で書き終えたあと、転送し直さずに切り替えられる。
+    else if (a === '--commit') { out.commit = true; out.commitOnly = true; }
     else if (a === '--force') out.force = true;
     else if (a === '--info') out.info = true;
     else if (a === '--abort') out.abort = true;
@@ -279,13 +282,104 @@ function parseArgs(argv) {
 
 const USAGE_TEXT = `使い方:
   node tools/ota.mjs --image <stackee.bin> [--no-commit] [--force] [-v]
+  node tools/ota.mjs --commit    書いてある next へ切り替えて再起動する
   node tools/ota.mjs --info      いま載っている版と sha256 を見る
   node tools/ota.mjs --status    進行中の転送の様子
   node tools/ota.mjs --abort     途中で止まった転送を畳む
 
-  --no-commit  ota_1 に書くところまでで止める (起動する側は切り替えない)
-  --force      同じ sha256 が動いていても書く
+  --no-commit  もう片方の区画に書くところまでで止める (切り替えない)
+  --commit     像を渡さずに単体で使うと「書き終えてある next に切り替える」
+  --force      同じ sha256 が動いていても書く / 切り替える
 `;
+
+// ---------------------------------------------------------------------------
+// --image 無しの --commit — 書き終えてある next へ切り替えるだけ
+// ---------------------------------------------------------------------------
+// ★ `--no-commit` で書いたあと「やっぱり切り替える」に使う。像をもう一度
+//   送らない (1.4 MB = 約 60 秒を捨てない)。
+//
+// 断るところ:
+//   ・app.info が無い (OTA 非対応の古い像)
+//   ・next が無い / 名札が読めない
+//   ・next が running と同じ名札 (切り替えても何も変わらない) … --force で通す
+//   ・本体が `notready` を返す (ota.end が通っていない = まだ何も書いていない、
+//     か、書いたあとに再起動して転送の状態が消えている)
+//
+// link は runOta と同じ口 (request / 任意の waitAndReconnect)。テストから
+// 偽の link を渡せるように、ここは node-hid を一切知らない。
+function sameSha(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.length === 64
+    && a.toLowerCase() === b.toLowerCase();
+}
+
+export async function commitWritten(link, opts = {}) {
+  const onStep = opts.onStep || (() => {});
+  const sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+
+  onStep('info', '書いてある版を読んでいます');
+  const before = await link.request('app.info', null, { timeoutMs: 15000 });
+  if (!before || before.error) {
+    const e = new Error('この像は app.info を持っていません (OTA 非対応の古いファーム)。');
+    e.code = 'unsupported';
+    throw e;
+  }
+  const next = before.next || null;
+  const running = before.running || {};
+  if (!next || !next.sha256) {
+    const e = new Error('切り替え先 (next) の名札を読めません。まだ何も書いていない可能性があります。');
+    e.code = 'nonext';
+    e.detail = before;
+    throw e;
+  }
+  if (sameSha(next.sha256, running.sha256) && !opts.force) {
+    const e = new Error(
+      'next にはいま動いているのと同じ像が入っています (切り替えても変わりません)。'
+      + ' --force で通せます。');
+    e.code = 'same';
+    e.detail = before;
+    throw e;
+  }
+  const wantImage = next.sha256;
+
+  onStep('commit', '起動する側を切り替えています');
+  const committed = await link.request('ota.commit', null, { timeoutMs: 10000 });
+  if (!committed || !committed.ok) {
+    const why = committed && committed.error;
+    const e = new Error(why === 'notready'
+      ? '本体が notready を返しました (ota.end が通っていません)。'
+        + ' --image を渡して書き直してください。'
+      : '起動区画を切り替えられませんでした。');
+    e.code = why === 'notready' ? 'notready' : 'commit';
+    e.detail = committed;
+    throw e;
+  }
+
+  onStep('reboot', '再起動を待っています');
+  if (link.waitAndReconnect) {
+    const back = await link.waitAndReconnect({ timeoutMs: 40000 });
+    if (!back) {
+      const e = new Error('再起動したあと、デバイスを開き直せませんでした。');
+      e.code = 'reconnect';
+      throw e;
+    }
+  }
+  let after = null;
+  for (let i = 0; i < 20; i += 1) {
+    try {
+      after = await link.request('app.info', null, { timeoutMs: 5000 });
+      if (after && after.running) break;
+    } catch (e) { /* まだ起きていない */ }
+    await sleep(1000);
+  }
+  if (!sameSha(after && after.running && after.running.sha256, wantImage)) {
+    const e = new Error('再起動しましたが、動いている像が切り替え先と違います。');
+    e.code = 'verify';
+    e.detail = after;
+    throw e;
+  }
+  onStep('done', '新しい版で動いています');
+  return { committed: true, before, after, wantImage };
+}
 
 function fmtPart(name, p) {
   if (!p) return `  ${name}: (なし)`;
@@ -312,6 +406,20 @@ async function main() {
     if (args.status) {
       const r = await link.request('ota.status', null, { timeoutMs: 10000 });
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      return 0;
+    }
+    if (args.commitOnly && !args.image) {
+      const r = await commitWritten(link, {
+        force: args.force,
+        onStep: (kind, text) => process.stderr.write(`# [${kind}] ${text}\n`),
+      });
+      process.stderr.write('# 切り替えて再起動しました。新しい版で動いています。\n');
+      process.stderr.write(fmtPart('running', r.after.running) + '\n');
+      process.stderr.write(fmtPart('next', r.after.next) + '\n');
+      process.stdout.write(JSON.stringify({
+        ok: true, committed: true, image_sha256: r.wantImage,
+        before: r.before, after: r.after,
+      }) + '\n');
       return 0;
     }
     if (args.info || !args.image) {

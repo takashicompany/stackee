@@ -138,22 +138,23 @@ class RenderTest(unittest.TestCase):
             self.assertEqual(self.extra[key], self.expected['assets'][key], key)
 
     def test_crc32_is_zlib_compatible(self):
-        # ★ 本体が持つのは切り詰めたシート (240x174)。素材そのもの
+        # ★ 本体が持つのは切り詰めたシート (240x200)。素材そのもの
         #   (240x240) は 1 バイトも変わっていないことも一緒に見る。
         import zlib
         raw = zlib.decompress((ASSETS / 'faces.bin').read_bytes())
         self.assertEqual(len(raw), 240 * 240 // 2 * 32)
         self.assertEqual(zlib.crc32(raw), self.expected['assets']['sheet_crc'])
         trimmed, _lost = expected_mod.trim_faces(raw, 32)
-        self.assertEqual(len(trimmed), 240 * 174 // 2 * 32)
+        self.assertEqual(len(trimmed), 240 * 200 // 2 * 32)
         self.assertEqual(self.extra['faces_crc'], zlib.crc32(trimmed))
 
     def test_the_c_and_python_sides_trim_the_same_rows(self):
         # ホストビルドが出す face_geom と期待値側の定数が同じか。
         want = (expected_mod.FACE_Y, expected_mod.FACE_SIZE,
-                expected_mod.FACE_TRIM, expected_mod.FACE_ROWS)
+                expected_mod.FACE_TRIM_TOP, expected_mod.FACE_TRIM_BOTTOM,
+                expected_mod.FACE_ROWS)
         self.assertEqual(self.extra['face_geom'], want)
-        self.assertEqual(self.extra['faces_len'], 240 * 174 // 2 * 32)
+        self.assertEqual(self.extra['faces_len'], 240 * 200 // 2 * 32)
 
 
 class TablesTest(unittest.TestCase):
@@ -243,7 +244,7 @@ class ExpectedUnitTest(unittest.TestCase):
 
     def test_asset_sizes(self):
         self.assertEqual(len(self.renderer.faces_raw), 240 * 240 // 2 * 32)
-        self.assertEqual(len(self.renderer.faces), 240 * 174 // 2 * 32)
+        self.assertEqual(len(self.renderer.faces), 240 * 200 // 2 * 32)
         self.assertEqual(len(self.renderer.changes), 32 * 32 * 4)
         self.assertEqual(len(self.renderer.icons_raw), 6 * 24 * 18)
         self.assertEqual(self.renderer.count, 32)
@@ -265,34 +266,58 @@ class ExpectedUnitTest(unittest.TestCase):
     def test_background_is_white_outside_bar_and_face(self):
         fb = self.renderer.framebuffer(face=0, bar=0)
         white = expected_mod.rgb565_bytes(0xFFFFFF)
-        # 顔は y=50..223。帯を出していなければ下も白。
-        for y in (28, 49, 224, 319):
+        # 顔は y=50..249。帯を出していなければ下も白。
+        for y in (28, 49, 250, 319):
             row = bytes(fb.buf[y * 480:(y + 1) * 480])
             self.assertEqual(row, white * 240, '行 %d は白のはず' % y)
 
-    def test_face_sits_at_y50_and_ends_at_y223(self):
-        # 顔 0 の 1 行目 (= 元絵の 33 行目) が y=50 に入っている (x=0、幅 240)。
+    def test_face_sits_at_y50_and_ends_at_y249(self):
+        # 顔 0 の 1 行目 (= 元絵の 29 行目) が y=50 に入っている (x=0、幅 240)。
         fb = self.renderer.framebuffer(face=0, bar=0)
         table = expected_mod.face_row_table()
         row_bytes = 120
-        at = expected_mod.FACE_TRIM * row_bytes
+        at = expected_mod.FACE_TRIM_TOP * row_bytes
         first = b''.join(table[b] for b in self.renderer.faces_raw[at:at + row_bytes])
         self.assertEqual(bytes(fb.buf[50 * 480:50 * 480 + 480]), first)
-        # 最後の行 (= 元絵の 206 行目) が y=223。
-        at = (expected_mod.FACE_SIZE - expected_mod.FACE_TRIM - 1) * row_bytes
+        # 最後の行 (= 元絵の 228 行目) が y=249。
+        at = (expected_mod.FACE_SIZE - expected_mod.FACE_TRIM_BOTTOM - 1) * row_bytes
         last = b''.join(table[b] for b in self.renderer.faces_raw[at:at + row_bytes])
-        self.assertEqual(bytes(fb.buf[223 * 480:223 * 480 + 480]), last)
+        self.assertEqual(bytes(fb.buf[249 * 480:249 * 480 + 480]), last)
 
     def test_the_trim_keeps_the_sheet_untouched(self):
         # 切り詰めは**描くときだけ**。faces.bin そのものは 240x240 のまま。
         trimmed, lost = expected_mod.trim_faces(self.renderer.faces_raw, 32)
         self.assertEqual(trimmed, self.renderer.faces)
         self.assertEqual(len(lost), 32)
-        # 落ちる非背景画素は分かっているコマだけ (RESULTS.md に実測がある)。
+
+    def test_the_trim_loses_nothing(self):
+        """★ 上 29 / 下 11 では **1 画素も落ちない** (32 コマ全数)。
+
+        素材を差し替えたらここが落ちる。そのときは数え直して、
+        落ちない切り詰め (= 全コマの余白の最小値) に取り直すこと。
+        """
+        _trimmed, lost = expected_mod.trim_faces(self.renderer.faces_raw, 32)
         hit = {row['frame']: (row['top'], row['bottom'])
                for row in lost if row['top'] or row['bottom']}
-        self.assertEqual(hit, {0: (70, 0), 1: (70, 0),
-                               13: (0, 51), 14: (0, 51), 31: (0, 614)})
+        self.assertEqual(hit, {}, '切り詰めで非背景画素が落ちている: %r' % hit)
+        self.assertEqual(self.renderer.expected()['face_lost'], [])
+
+    def test_the_trim_is_as_tight_as_it_can_be(self):
+        """29 / 11 は余白の最小値そのもの (1 行でも増やすと欠ける)。"""
+        raw = self.renderer.faces_raw
+        row_bytes = 120
+
+        def nonbg(frame, y):
+            at = frame * 240 * row_bytes + y * row_bytes
+            return sum((b >> 4 != 15) + (b & 0x0F != 15)
+                       for b in raw[at:at + row_bytes])
+
+        top = min(next(y for y in range(240) if nonbg(f, y)) for f in range(32))
+        bottom = min(239 - next(y for y in range(239, -1, -1) if nonbg(f, y))
+                     for f in range(32))
+        self.assertEqual((top, bottom),
+                         (expected_mod.FACE_TRIM_TOP,
+                          expected_mod.FACE_TRIM_BOTTOM))
 
     def test_grey_palette_is_i_times_17(self):
         table = expected_mod.face_row_table()

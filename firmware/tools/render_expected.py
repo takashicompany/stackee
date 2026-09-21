@@ -17,8 +17,9 @@
   ・CRC32       zlib.crc32 と同じ (多項式 0xEDB88320、初期値・最終 XOR とも
                 0xFFFFFFFF)。本体は main/stackee_crc32.c
   ・顔          4bpp、画素 0 が上位ニブル、パレットは i*17 の等間隔グレー、
-                位置は x=0 / y=50。**上下 33 行を捨てた 240x174** を置く
-                (元絵も faces.bin も変えない。空いた 66 px は字幕 4 行へ)
+                位置は x=0 / y=50。**上 29 行・下 11 行を捨てた 240x200** を置く
+                (元絵も faces.bin も変えない。空いた 40 px は字幕 3 行へ。
+                 29/11 は 32 コマ全部の余白の最小値 = 1 画素も落ちない)
   ・アイコン    2bpp、画素 0 が最上位 2 ビット、濃さ 0 は透明、
                 色は stackee_icons.shade() で黒地とまぜる
   ・文字        status_h24.bdf。baseline = y_mid - box_h//2 + FONT_ASCENT
@@ -47,9 +48,10 @@ WIDTH = 240
 HEIGHT = 320
 STRIDE = WIDTH * 2
 FACE_SIZE = 240
-# main/stackee_draw.h の STACKEE_FACE_TRIM_ROWS / STACKEE_FACE_ROWS。
-FACE_TRIM = 33
-FACE_ROWS = FACE_SIZE - 2 * FACE_TRIM        # 174
+# main/stackee_draw.h の STACKEE_FACE_TRIM_TOP / _BOTTOM / STACKEE_FACE_ROWS。
+FACE_TRIM_TOP = 29
+FACE_TRIM_BOTTOM = 11
+FACE_ROWS = FACE_SIZE - FACE_TRIM_TOP - FACE_TRIM_BOTTOM      # 200
 FACE_X = 0
 FACE_Y = 50                      # stackee_face.py: (height-size)//2 + 10
 SCREEN_BG = 0xFFFFFF
@@ -141,8 +143,9 @@ def face_row_table():
 def trim_faces(raw, count):
     """本体 (main/stackee_ui.c の trim_faces) と同じ切り詰め。
 
-    各コマの上下 FACE_TRIM 行を落として 240x174 に詰め直す。
-    落ちた非背景画素 (地の色 = 濃さ 15) の数も一緒に返す。
+    各コマの上 FACE_TRIM_TOP 行・下 FACE_TRIM_BOTTOM 行を落として
+    240x200 に詰め直す。落ちた非背景画素 (地の色 = 濃さ 15) の数も一緒に返す。
+    ★ 29 / 11 は 32 コマ全部の余白の最小値なので、ここは全部 0 になる。
     """
     row_bytes = FACE_SIZE // 2
     out = bytearray()
@@ -150,22 +153,22 @@ def trim_faces(raw, count):
     for f in range(count):
         base = f * FACE_SIZE * row_bytes
         top = bottom = 0
-        for y in list(range(FACE_TRIM)) + list(range(FACE_SIZE - FACE_TRIM,
-                                                     FACE_SIZE)):
+        for y in (list(range(FACE_TRIM_TOP)) +
+                  list(range(FACE_SIZE - FACE_TRIM_BOTTOM, FACE_SIZE))):
             row = raw[base + y * row_bytes: base + (y + 1) * row_bytes]
             n = sum((b >> 4 != 15) + (b & 0x0F != 15) for b in row)
-            if y < FACE_TRIM:
+            if y < FACE_TRIM_TOP:
                 top += n
             else:
                 bottom += n
         lost.append({'frame': f, 'top': top, 'bottom': bottom})
-        out += raw[base + FACE_TRIM * row_bytes:
-                   base + (FACE_SIZE - FACE_TRIM) * row_bytes]
+        out += raw[base + FACE_TRIM_TOP * row_bytes:
+                   base + (FACE_SIZE - FACE_TRIM_BOTTOM) * row_bytes]
     return bytes(out), lost
 
 
 def draw_face(fb, faces, frame, table):
-    """切り詰めたシート (240x174) を y=FACE_Y に置く。"""
+    """切り詰めたシート (240x200) を y=FACE_Y に置く。"""
     row_bytes = FACE_SIZE // 2
     base = frame * FACE_ROWS * row_bytes
     for y in range(FACE_ROWS):
@@ -270,7 +273,8 @@ class Renderer:
         return {
             'width': WIDTH, 'height': HEIGHT, 'stride': STRIDE,
             'face_x': FACE_X, 'face_y': FACE_Y, 'face_size': FACE_SIZE,
-            'face_trim': FACE_TRIM, 'face_rows': FACE_ROWS,
+            'face_trim_top': FACE_TRIM_TOP,
+            'face_trim_bottom': FACE_TRIM_BOTTOM, 'face_rows': FACE_ROWS,
             'face_lost': [row for row in self.face_lost
                           if row['top'] or row['bottom']],
             'bar_height': self.icons.BAR_AREA_HEIGHT,

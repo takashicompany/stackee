@@ -29,8 +29,8 @@
 #define HEIGHT     320
 #define STRIDE     (WIDTH * 2)
 #define FACE_SIZE  STACKEE_FACE_SIZE
-#define FACE_ROWS  STACKEE_FACE_ROWS      // 上下 33 行を捨てた丈 (174)
-#define FACE_TRIM  STACKEE_FACE_TRIM_ROWS
+#define FACE_ROWS  STACKEE_FACE_ROWS      // 上 29 / 下 11 を捨てた丈 (200)
+#define FACE_TRIM  STACKEE_FACE_TRIM_TOP
 #define FACE_X     0
 #define FACE_Y     50
 
@@ -177,8 +177,8 @@ int main(int argc, char **argv) {
                       0, 0, FACE_SIZE, FACE_ROWS);
 
     printf("count %d\n", count);
-    printf("face_geom %d %d %d %d\n", FACE_Y, STACKEE_FACE_SIZE,
-           STACKEE_FACE_TRIM_ROWS, STACKEE_FACE_ROWS);
+    printf("face_geom %d %d %d %d %d\n", FACE_Y, STACKEE_FACE_SIZE,
+           STACKEE_FACE_TRIM_TOP, STACKEE_FACE_TRIM_BOTTOM, STACKEE_FACE_ROWS);
     printf("assets faces_len=%zu faces_crc=%u changes_len=%zu changes_crc=%u "
            "icons_len=%zu icons_crc=%u glyphs=%d ascent=%d\n",
            faces_len, stackee_crc32(0, faces, faces_len),

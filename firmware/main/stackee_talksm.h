@@ -82,11 +82,11 @@
 // 持たないので、内蔵 RAM の静的な使用量は 1 バイトも増えない。
 //   "<10 桁>" + TAB + 本文 (最大 63 B) + 余裕
 #define STACKEE_TALK_SUB_LINE_MAX    128
-// 帯は 4 行。ページは頭から 1 行ずつ**積む**。4 行が埋まった状態で次の
+// 帯は 3 行。ページは頭から 1 行ずつ**積む**。3 行が埋まった状態で次の
 // ページが来たら帯を空にしてそれを 1 行目に置く (頁めくり)。つまり
-// ページ i は必ず帯の i%4 行目に出る (行の集合は i だけで決まる)。
-#define STACKEE_TALK_SUB_LINES       4
-// 帯へ渡す文字列の上限 (63 B x 4 行 + 改行 3 + NUL = 256)。
+// ページ i は必ず帯の i%3 行目に出る (行の集合は i だけで決まる)。
+#define STACKEE_TALK_SUB_LINES       3
+// 帯へ渡す文字列の上限 (63 B x 3 行 + 改行 2 + NUL = 192)。
 #define STACKEE_TALK_SUB_BAND_MAX \
     (STACKEE_TALK_SUB_LINES * STACKEE_TALK_SUB_TEXT_MAX)
 
@@ -225,7 +225,7 @@ typedef struct {
 int stackee_talk_page_at(const stackee_talk_t *t, uint32_t ms);
 
 // page 番のページを出すときに帯へ渡す文字列 (改行区切り、最大 4 行)。
-// ★ 行の集合は page だけで決まる: 同じ頁の先頭 (page - page%4) から page まで。
+// ★ 行の集合は page だけで決まる: 同じ頁の先頭 (page - page%3) から page まで。
 //   page < 0 なら空文字列。戻り値は並べた行数。
 int stackee_talk_band(const stackee_talk_t *t, int page, char *out, size_t cap);
 

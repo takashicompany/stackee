@@ -181,11 +181,11 @@ void stackee_draw_text(const stackee_canvas_t *c, const stackee_bdf_font_t *font
 
 // ---- 字幕の帯 -------------------------------------------------------------
 //
-// ★ 1 回の描き直しは 240x96 = 23,040 画素 (46 KB) の塗りつぶしと、多くても
-//   4 行 x 15 字ぶんの 16x16 の点打ち。割り当ても検索表の構築もしない
+// ★ 1 回の描き直しは 240x70 = 16,800 画素 (33.6 KB) の塗りつぶしと、多くても
+//   3 行 x 15 字ぶんの 16x16 の点打ち。割り当ても検索表の構築もしない
 //   (字形は font16.bin の中を指すポインタのまま使う)。
 //
-// 行の区切りは改行 (\n)。5 行目以降は捨てる (頁めくりは呼び手の仕事)。
+// 行の区切りは改行 (\n)。4 行目以降は捨てる (頁めくりは呼び手の仕事)。
 static void draw_subtitle_line(const stackee_canvas_t *c,
                                const stackee_font16_t *font,
                                const char *utf8, size_t len, int top) {
@@ -270,8 +270,8 @@ void stackee_draw_subtitle(const stackee_canvas_t *c,
         const char *nl = strchr(at, '\n');
         size_t len = (nl != NULL) ? (size_t)(nl - at) : strlen(at);
         draw_subtitle_line(c, font, at, len,
-                           STACKEE_SUB_Y + line * STACKEE_SUB_LINE_H +
-                               STACKEE_SUB_PAD);
+                           STACKEE_SUB_Y + STACKEE_SUB_MARGIN +
+                               line * STACKEE_SUB_LINE_H + STACKEE_SUB_PAD);
         if (nl == NULL) {
             break;
         }

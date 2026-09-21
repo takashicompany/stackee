@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""字幕の帯 (y=224..319) の期待値。**実機に触らない。**
+"""字幕の帯 (y=250..319) の期待値。**実機に触らない。**
 
-本体と同じ素材 (assets/font16.bin) から、同じ配置・同じ変換で 240x96 の
+本体と同じ素材 (assets/font16.bin) から、同じ配置・同じ変換で 240x70 の
 RGB565 を組み立てて CRC32 を出す。実機の `ui.subtitle` が返す CRC と
 tools/check_phase2.py で突き合わせる (顔の CRC 検査と同じ方式)。
 
@@ -9,12 +9,13 @@ tools/check_phase2.py で突き合わせる (顔の CRC 検査と同じ方式)�
   python3 firmware/tools/subtitle_expected.py --json
 
 ■ 本体と厳密に揃えてあるもの (ずれると照合が無意味になる)
-  ・帯の位置    y=224、高さ 96 px (24 px x 4 行)、幅は画面と同じ 240 px
-  ・行の区切り  改行 (\n)。5 行目以降は捨てる (頁めくりは呼び手の仕事)
+  ・帯の位置    y=250、高さ 70 px (22 px x 3 行 + 上下に 2 px ずつの余り)、
+                幅は画面と同じ 240 px
+  ・行の区切り  改行 (\n)。4 行目以降は捨てる (頁めくりは呼び手の仕事)
   ・1 行の桁数  15 桁 (全角 16 px / 半角 8 px)。はみ出す字は**描かない**
   ・色          文字があれば黒地 (0x000000) に白文字 (0xFFFFFF)、
                 空なら画面の地の色 (0xFFFFFF) で塗って帯を消す
-  ・縦位置      i 行目の字形の上端 = 224 + i*24 + 4
+  ・縦位置      i 行目の字形の上端 = 250 + 2 + i*22 + 3
   ・字形が無い字  〓 (U+3013) で代替する
   ・画素の並び  RGB565 / 2 バイト / 上位バイトが先 / 1 行 480 バイト
 """
@@ -33,35 +34,36 @@ FONT16 = IDF / 'assets/font16.bin'
 
 WIDTH = 240
 STRIDE = WIDTH * 2
-SUB_LINES = 4
-SUB_LINE_H = 24
+SUB_LINES = 3
+SUB_LINE_H = 22
 SUB_PAD = (SUB_LINE_H - 16) // 2
-SUB_HEIGHT = SUB_LINES * SUB_LINE_H
+SUB_HEIGHT = 70
 SUB_Y = 320 - SUB_HEIGHT
+SUB_MARGIN = (SUB_HEIGHT - SUB_LINES * SUB_LINE_H) // 2
 SUB_COLS = 15
 SUB_WIDTH = SUB_COLS * 16
 SUB_BG = 0x000000
 SUB_FG = 0xFFFFFF
 SCREEN_BG = 0xFFFFFF
 
-# check_phase2.py が実機に投げる文字列。1 行・4 行・頁めくり直後・空・
+# check_phase2.py が実機に投げる文字列。1 行・3 行・頁めくり直後・空・
 # 字形なし・半角混在を含む。
 CASES = [
     ('空', ''),
     ('1行', 'あいうえおかきくけこさしすせそ'),
     ('はみ出し16桁', 'あいうえおかきくけこさしすせそた'),
     ('2行', 'いちぎょうめ\nにぎょうめ'),
-    ('4行', 'いちぎょうめ\nにぎょうめ\nさんぎょうめ\nよんぎょうめ'),
-    ('頁めくり直後', 'ごぎょうめ'),
-    ('5行目は捨てる', 'あ\nい\nう\nえ\nお'),
+    ('3行', 'いちぎょうめ\nにぎょうめ\nさんぎょうめ'),
+    ('頁めくり直後', 'よんぎょうめ'),
+    ('4行目は捨てる', 'あ\nい\nう\nえ'),
     ('半角混在', 'ABC 123 かな漢字'),
     ('記号と句読点', '、。「」！？ー〜'),
     ('字形なし', '絵文字→\U0001F600☃'),
     ('半角カタカナ', 'ｱｲｳｴｵ ﾊﾝｶｸ'),
-    ('4行の半角混在', 'ABC 123\nかな漢字\nｱｲｳ ﾊﾝｶｸ\n絵文字→☃'),
-    # 帯がいちばん重くなる中身 (4 行 x 15 桁 = 全角 60 字)。描画時間の合否は
+    ('3行の半角混在', 'ABC 123\nかな漢字\nｱｲｳ ﾊﾝｶｸ'),
+    # 帯がいちばん重くなる中身 (3 行 x 15 桁 = 全角 45 字)。描画時間の合否は
     # これで測る (check_phase2.py の SUB_PAINT_MAX_US)。
-    ('4行15桁', '\n'.join(['あいうえおかきくけこさしすせそ'] * 4)),
+    ('3行15桁', '\n'.join(['あいうえおかきくけこさしすせそ'] * 3)),
 ]
 
 
@@ -95,7 +97,7 @@ def render(font, text):
         return band
     limit = min(WIDTH, SUB_WIDTH)
     for i, line in enumerate(text.split('\n')[:SUB_LINES]):
-        top = i * SUB_LINE_H + SUB_PAD
+        top = SUB_MARGIN + i * SUB_LINE_H + SUB_PAD
         x = 0
         for ch in line:
             got = font.glyph_or_tofu(ord(ch))
@@ -130,7 +132,7 @@ def expected(font=None):
     return {
         'y': SUB_Y, 'h': SUB_HEIGHT, 'cols': SUB_COLS, 'width': SUB_WIDTH,
         'stride': STRIDE, 'lines': SUB_LINES, 'line_h': SUB_LINE_H,
-        'pad': SUB_PAD,
+        'pad': SUB_PAD, 'margin': SUB_MARGIN,
         'font16': {
             'bytes': len(font.data),
             'crc': zlib.crc32(font.data),
@@ -149,7 +151,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('text', nargs='*',
-                    help='帯に出す行 (複数なら 1 つ 1 行、最大 4 行)')
+                    help='帯に出す行 (複数なら 1 つ 1 行、最大 3 行)')
     ap.add_argument('--font', type=Path, default=FONT16)
     ap.add_argument('--json', action='store_true', help='check_phase2 の期待値')
     args = ap.parse_args()

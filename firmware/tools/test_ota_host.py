@@ -7,7 +7,7 @@
   2. ブラウザ側   docs/js/ota.js                    (node があれば一緒に見る)
      — Node 側の道具 (firmware/tools/ota.mjs) は同じ ota.js を import する
 
-見るのは 6 つ:
+見るのは 7 つ:
   ・0xC3 の枠 (id / len / 位置 24 bit / 本文 27 バイト) の組み立てと分解
   ・環状バッファが 1 バイトも落とさず・並べ替えずに通すか
   ・credit の材料 (accepted / written / 空き) の数え方
@@ -15,6 +15,8 @@
   ・断りどころ — 二重 begin / 位置違い / magic 違い / sha 違い / 長さ違い /
     溢れ / 無通信の自動 abort / フラッシュの失敗
   ・途中で切れて abort してから、最初からやり直せるか
+  ・`ota.mjs --commit` を**像なしで**叩いたとき (書き終えてある next へ
+    切り替えるだけ) の断りどころと歩き方
 
   python3 firmware/tools/test_ota_host.py
 """
@@ -521,6 +523,136 @@ class WebTest(unittest.TestCase):
                      'state', 'magic'):
             self.assertIn("'%s'" % name, js)
             self.assertIn('"%s"' % name, core)
+
+
+class CommitOnlyTest(unittest.TestCase):
+    """`node tools/ota.mjs --commit` を像なしで叩いたときの歩き方。
+
+    ★ 2026-09-21 まで `--commit` は `--image` が無いと使い方を出すだけで、
+      `--no-commit` で書き終えたあと**転送し直さないと切り替えられなかった**。
+      ここは実機にも node-hid にも触らない。偽の link を渡して、
+      `commitWritten()` が何を聞いて何を断るかだけを見る。
+    """
+
+    OTA_MJS = os.path.join(HERE, 'ota.mjs')
+
+    def setUp(self):
+        try:
+            subprocess.run(['node', '--version'], capture_output=True, check=True)
+        except Exception:
+            self.skipTest('node が無い')
+
+    def drive(self, replies, force=False):
+        """偽の link で commitWritten を回し、{calls, result|error} を返す。
+
+        replies は cmd -> 応答の list (呼ばれた順に取り出す)。
+        """
+        import json
+        src = (
+            "import { commitWritten } from '%s';\n"
+            "const plan = JSON.parse(process.argv[2]);\n"
+            "const force = process.argv[3] === '1';\n"
+            "const calls = [];\n"
+            "const link = {\n"
+            "  request(cmd) {\n"
+            "    calls.push(cmd);\n"
+            "    const q = plan[cmd];\n"
+            "    if (!q || !q.length) throw new Error('unexpected ' + cmd);\n"
+            "    return Promise.resolve(q.length > 1 ? q.shift() : q[0]);\n"
+            "  },\n"
+            "};\n"
+            "commitWritten(link, { force, sleep: () => Promise.resolve(),\n"
+            "                      onStep: (k) => calls.push('step:' + k) })\n"
+            "  .then((r) => console.log(JSON.stringify(\n"
+            "      { calls, result: r })))\n"
+            "  .catch((e) => console.log(JSON.stringify(\n"
+            "      { calls, error: e.code || 'unknown', message: e.message })));\n"
+            % self.OTA_MJS)
+        with tempfile.NamedTemporaryFile('w', suffix='.mjs', delete=False) as fh:
+            fh.write(src)
+            path = fh.name
+        out = subprocess.run(['node', path, json.dumps(replies),
+                              '1' if force else '0'],
+                             capture_output=True, text=True)
+        os.unlink(path)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    @staticmethod
+    def info(running, nxt):
+        part = lambda label, sha: {'label': label, 'sha256': sha,
+                                   'version': sha[:7]}
+        return {'ok': 1, 'running': part('ota_1', running),
+                'boot': part('ota_1', running), 'next': part('ota_0', nxt)}
+
+    OLD = 'f6' + '0' * 62
+    NEW = 'e9' + '9' * 62
+
+    def test_it_commits_without_sending_the_image_again(self):
+        got = self.drive({
+            'app.info': [self.info(self.OLD, self.NEW),
+                         self.info(self.NEW, self.OLD)],
+            'ota.commit': [{'ok': 1, 'boot': 'ota_0', 'in_ms': 500}],
+        })
+        self.assertNotIn('error', got, got)
+        # 聞いたのは app.info -> ota.commit -> app.info の 3 回だけ。
+        # **像は 1 バイトも送っていない** (ota.begin も 0xC3 も無い)。
+        self.assertEqual([c for c in got['calls'] if not c.startswith('step:')],
+                         ['app.info', 'ota.commit', 'app.info'])
+        self.assertTrue(got['result']['committed'])
+        self.assertEqual(got['result']['wantImage'], self.NEW)
+        self.assertEqual(got['result']['after']['running']['sha256'], self.NEW)
+
+    def test_it_refuses_when_next_is_the_running_image(self):
+        got = self.drive({'app.info': [self.info(self.OLD, self.OLD)]})
+        self.assertEqual(got['error'], 'same')
+        self.assertNotIn('ota.commit', got['calls'])
+
+    def test_force_commits_even_when_next_is_the_same(self):
+        got = self.drive({
+            'app.info': [self.info(self.OLD, self.OLD),
+                         self.info(self.OLD, self.OLD)],
+            'ota.commit': [{'ok': 1, 'boot': 'ota_0'}],
+        }, force=True)
+        self.assertNotIn('error', got, got)
+        self.assertIn('ota.commit', got['calls'])
+
+    def test_it_reports_notready_instead_of_a_bare_failure(self):
+        # 書いていない (ota.end が通っていない) ときの本体の断り方。
+        got = self.drive({
+            'app.info': [self.info(self.OLD, self.NEW)],
+            'ota.commit': [{'error': 'notready',
+                            'note': 'ota.end が通っていない'}],
+        })
+        self.assertEqual(got['error'], 'notready')
+        self.assertIn('--image', got['message'])
+
+    def test_it_refuses_an_image_without_app_info(self):
+        got = self.drive({'app.info': [{'error': 'unsupported'}]})
+        self.assertEqual(got['error'], 'unsupported')
+
+    def test_it_refuses_when_next_has_no_label(self):
+        got = self.drive({'app.info': [{'ok': 1, 'running': {'sha256': OLD_SHA},
+                                        'next': None}]})
+        self.assertEqual(got['error'], 'nonext')
+
+    def test_it_checks_what_actually_booted(self):
+        # 切り替えたのに別の像で起きたら verify で落とす。
+        got = self.drive({
+            'app.info': [self.info(self.OLD, self.NEW),
+                         self.info(self.OLD, self.NEW)],
+            'ota.commit': [{'ok': 1, 'boot': 'ota_0'}],
+        })
+        self.assertEqual(got['error'], 'verify')
+
+    def test_the_usage_text_mentions_the_standalone_commit(self):
+        with open(self.OTA_MJS) as fh:
+            src = fh.read()
+        self.assertIn('--commit    書いてある next へ切り替えて再起動する', src)
+        self.assertIn('out.commitOnly = true', src)
+
+
+OLD_SHA = 'f6' + '0' * 62
 
 
 if __name__ == '__main__':

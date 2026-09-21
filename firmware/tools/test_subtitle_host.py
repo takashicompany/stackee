@@ -6,7 +6,8 @@
   1. **本体の実体そのもの** (main/stackee_font16.c / stackee_draw.c /
      stackee_crc32.c) を Mac 用にビルドし、本物の assets/font16.bin を
      通して描いた帯の CRC32 が、tools/subtitle_expected.py の期待値と
-     1 ビットも違わないこと (日本語 15 桁・半角混在・字形なし〓・空)。
+     1 ビットも違わないこと (1 行・2 行・3 行・3 行 15 桁・頁めくり直後・
+     4 行目は捨てる・半角混在・字形なし〓・空・半角カタカナ)。
   2. font16.bin の索引 — tools/gen_font16.py が作った表を、C の二分探索と
      Python の二分探索が同じ字形として引けること。**東雲 BDF から作り直して**
      同じバイト列になること (生成が決定的であること) も見る。
@@ -96,50 +97,62 @@ class BandTest(unittest.TestCase):
         # 16 桁目は帯からはみ出すので描かない = 15 桁の絵と同じになる。
         self.assertEqual(crcs['1行'], crcs['はみ出し16桁'])
         # 5 行目は捨てる = 4 行目までと同じ絵。
-        self.assertEqual(crcs['5行目は捨てる'],
-                         sub.render(self.font, 'あ\nい\nう\nえ').crc())
+        self.assertEqual(crcs['4行目は捨てる'],
+                         sub.render(self.font, 'あ\nい\nう').crc())
         # それ以外は全部違う絵 (同じ CRC が並んだら描き分けていない)。
-        skip = ('はみ出し16桁', '5行目は捨てる')
+        skip = ('はみ出し16桁', '4行目は捨てる')
         others = [v for k, v in crcs.items() if k not in skip]
         self.assertEqual(len(set(others)), len(others))
 
     def test_lines_stack_from_the_top(self):
         """1 行目は 1 行だけのときと同じ場所に出る (行は下へ積む)。"""
         one = sub.render(self.font, 'いちぎょうめ')
-        four = sub.render(self.font, 'いちぎょうめ\nに\nさん\nよん')
-        top = sub.SUB_PAD
+        three = sub.render(self.font, 'いちぎょうめ\nに\nさん')
+        top = sub.SUB_MARGIN + sub.SUB_PAD
         rows = slice(top * sub.STRIDE,
                      (top + 16) * sub.STRIDE)
-        self.assertEqual(bytes(one.buf[rows]), bytes(four.buf[rows]))
+        self.assertEqual(bytes(one.buf[rows]), bytes(three.buf[rows]))
 
     def test_each_line_sits_at_its_own_pitch(self):
-        """i 行目の字形の上端 = i*24 + 4。空行は 1 行ぶん空ける。"""
+        """i 行目の字形の上端 = 2 + i*22 + 3。空行は 1 行ぶん空ける。"""
         black = sub.rgb565_bytes(0x000000) * sub.WIDTH
         band = sub.render(self.font, 'あ\n\nあ')
-        for i, drawn in enumerate((True, False, True, False)):
-            top = i * sub.SUB_LINE_H + sub.SUB_PAD
+        for i, drawn in enumerate((True, False, True)):
+            top = sub.SUB_MARGIN + i * sub.SUB_LINE_H + sub.SUB_PAD
             row = bytes(band.buf[top * sub.STRIDE + 3 * sub.STRIDE:
                                  top * sub.STRIDE + 4 * sub.STRIDE])
             self.assertEqual(row != black, drawn, '行 %d' % i)
 
+    def test_the_band_margins_are_even(self):
+        """余りの 4 px は帯の上下へ 2 px ずつ。字形は端に寄らない。"""
+        self.assertEqual(sub.SUB_MARGIN, 2)
+        self.assertEqual(sub.SUB_HEIGHT,
+                         2 * sub.SUB_MARGIN + sub.SUB_LINES * sub.SUB_LINE_H)
+        # いちばん上の字形の上端と、いちばん下の字形の下端までの余白が同じ。
+        first_top = sub.SUB_MARGIN + sub.SUB_PAD
+        last_bottom = (sub.SUB_MARGIN + (sub.SUB_LINES - 1) * sub.SUB_LINE_H +
+                       sub.SUB_PAD + 16)
+        self.assertEqual(first_top, sub.SUB_HEIGHT - last_bottom)
+
     def test_the_page_turn_shows_one_line_again(self):
-        """5 ページ目は帯を空にして 1 行目に置く (= 1 行だけの絵)。"""
+        """4 ページ目は帯を空にして 1 行目に置く (= 1 行だけの絵)。"""
         crcs = {c['name']: c['crc'] for c in self.expected['cases']}
         self.assertEqual(crcs['頁めくり直後'],
-                         sub.render(self.font, 'ごぎょうめ').crc())
+                         sub.render(self.font, 'よんぎょうめ').crc())
 
     def test_geometry_is_the_same_on_both_sides(self):
         rows = dict()
         for line in run('info\n').splitlines():
             parts = line.split()
             rows[parts[0]] = parts[1:]
-        y, h, cols, width, lines, pitch, pad = (int(v) for v in rows['band_geom'])
-        self.assertEqual((y, h, cols, width, lines, pitch, pad),
+        got = tuple(int(v) for v in rows['band_geom'])
+        self.assertEqual(got,
                          (sub.SUB_Y, sub.SUB_HEIGHT, sub.SUB_COLS, sub.SUB_WIDTH,
-                          sub.SUB_LINES, sub.SUB_LINE_H, sub.SUB_PAD))
+                          sub.SUB_LINES, sub.SUB_LINE_H, sub.SUB_PAD,
+                          sub.SUB_MARGIN))
         # 顔の切り詰めと帯の高さが噛み合っているか (C 側の定数で確かめる)。
-        size, trim, face_rows = (int(v) for v in rows['face_geom'])
-        self.assertEqual(face_rows, size - 2 * trim)
+        size, top, bottom, face_rows = (int(v) for v in rows['face_geom'])
+        self.assertEqual(face_rows, size - top - bottom)
         self.assertEqual(50 + face_rows, sub.SUB_Y)
         self.assertEqual(rows['info'][0], 'ok')
         self.assertEqual(int(rows['info'][1]), gen_font16.HEIGHT)
@@ -147,10 +160,10 @@ class BandTest(unittest.TestCase):
         self.assertEqual(int(rows['info'][3]), len(self.font.wide_codes))
         self.assertEqual(int(rows['info'][4]), len(self.font.data))
 
-    def test_the_band_is_exactly_the_bottom_ninetysix_rows(self):
+    def test_the_band_is_exactly_the_bottom_seventy_rows(self):
         self.assertEqual(sub.SUB_Y + sub.SUB_HEIGHT, 320)
-        self.assertEqual(sub.SUB_HEIGHT, 4 * 24)
-        self.assertEqual(sub.SUB_Y, 50 + 174)       # 顔の真下 (重ならない)
+        self.assertEqual(sub.SUB_HEIGHT, 3 * 22 + 2 * sub.SUB_MARGIN)
+        self.assertEqual(sub.SUB_Y, 50 + 200)       # 顔の真下 (重ならない)
 
 
 class WidthTest(unittest.TestCase):

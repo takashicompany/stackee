@@ -20,25 +20,42 @@
 #include "stackee_icons.h"
 
 // ---- 顔の切り詰め ----------------------------------------------------------
-// 顔の素材 (faces.bin) は 240x240 のまま。**描くときだけ** 上下 33 行を
-// 捨てて 240x174 にし、空いた 66 px を字幕の帯へ回す。素材も元絵も変えない。
-//   ・シートは起動時に 240x240 で展開したあと、その場で 240x174 へ詰め直す
-//     (921,600 B -> 668,160 B)。以後、本体は 174 行のシートしか持たない。
-//   ・画面に置く位置 (y=50) は変えない。顔は y=50..223。
-#define STACKEE_FACE_SIZE       240
-#define STACKEE_FACE_TRIM_ROWS  33
-#define STACKEE_FACE_ROWS       (STACKEE_FACE_SIZE - 2 * STACKEE_FACE_TRIM_ROWS)
+// 顔の素材 (faces.bin) は 240x240 のまま。**描くときだけ** 上 29 行・下 11 行を
+// 捨てて 240x200 にし、空いた 40 px を字幕の帯へ回す。素材も元絵も変えない。
+//   ・シートは起動時に 240x240 で展開したあと、その場で 240x200 へ詰め直す
+//     (921,600 B -> 768,000 B)。以後、本体は 200 行のシートしか持たない。
+//   ・画面に置く位置 (y=50) は変えない。顔は y=50..249。
+//
+// ★★ 29 / 11 は **32 コマ全部の余白の最小値そのもの**。上を 30 にすると
+//   awake/a_00 (最初の非背景が y=29) が、下を 12 にすると camera/a_00
+//   (下の余白が 11) が欠ける。この値でだけ **1 画素も落ちない**。
+//   落ちる数は tools/render_expected.py の face_lost に出て、ホストテスト
+//   (test_render_host.py の test_the_trim_loses_nothing) が 0 を固定している。
+//   ここを動かすときは必ず数え直すこと。
+//
+// ★ 2026-09-21 に一度 **上下 33 px 対称** で入れたが、awake の上 29 px と
+//   camera の下 11 px を数え落としていて 5 コマ 856 px 欠けた。欠けない範囲に
+//   切り直したのがこの 29 / 11 (経緯は README §23-8)。
+#define STACKEE_FACE_SIZE         240
+#define STACKEE_FACE_TRIM_TOP     29
+#define STACKEE_FACE_TRIM_BOTTOM  11
+#define STACKEE_FACE_ROWS \
+    (STACKEE_FACE_SIZE - STACKEE_FACE_TRIM_TOP - STACKEE_FACE_TRIM_BOTTOM)
 
 // ---- 字幕の帯 (scratchpad/subtitle_design.md) -------------------------------
-// 顔は y=50..223 (174 px)。その下の 96 px が空いているので、そこに
-// **4 行**出す。**顔と領域が重ならない**ので、顔の差分描画と字幕は
+// 顔は y=50..249 (200 px)。その下の 70 px が空いているので、そこに
+// **3 行**出す。**顔と領域が重ならない**ので、顔の差分描画と字幕は
 // お互いを描き直さない。
-//   1 行 = 24 px (上 4 px の余白 + 16 px の字形 + 下 4 px の余白)。
-#define STACKEE_SUB_LINES   4
-#define STACKEE_SUB_LINE_H  24
+//   1 行 = 22 px (上 3 px の余白 + 16 px の字形 + 下 3 px の余白)。
+//   3 行で 66 px。余りの 4 px は帯の上下へ 2 px ずつ。
+#define STACKEE_SUB_LINES   3
+#define STACKEE_SUB_LINE_H  22
 #define STACKEE_SUB_PAD     ((STACKEE_SUB_LINE_H - STACKEE_FONT16_HEIGHT) / 2)
-#define STACKEE_SUB_HEIGHT  (STACKEE_SUB_LINES * STACKEE_SUB_LINE_H)
+#define STACKEE_SUB_HEIGHT  70
 #define STACKEE_SUB_Y       (320 - STACKEE_SUB_HEIGHT)
+// 帯の上下に残る余り (70 - 3*22 = 4 を 2 px ずつ)。
+#define STACKEE_SUB_MARGIN \
+    ((STACKEE_SUB_HEIGHT - STACKEE_SUB_LINES * STACKEE_SUB_LINE_H) / 2)
 // テレビ字幕と同じ 1 行 15 桁 (全角 1 桁 = 16 px、半角 0.5 桁 = 8 px)。
 // 15 桁 x 16 px = 240 px = 画面の幅ちょうど。
 #define STACKEE_SUB_COLS    15
@@ -89,11 +106,11 @@ void stackee_draw_text(const stackee_canvas_t *c, const stackee_bdf_font_t *font
 void stackee_draw_bar(const stackee_canvas_t *c, const stackee_bar_state_t *st,
                       const uint8_t *icons, const stackee_bdf_font_t *font);
 
-// 字幕の帯 (y=224..319) を丸ごと描き直す。
+// 字幕の帯 (y=250..319) を丸ごと描き直す。
 //   utf8 が NULL か空      … 帯を消す (画面の地の色で塗る)
-//   それ以外               … 黒地に白文字。**改行 (\n) で区切って最大 4 行**。
+//   それ以外               … 黒地に白文字。**改行 (\n) で区切って最大 3 行**。
 //                            1 行で 240 px を超える字は描かない (途中で切らない)
-//                            5 行目以降は捨てる (頁めくりは呼び手の仕事)
+//                            4 行目以降は捨てる (頁めくりは呼び手の仕事)
 // font が NULL / 未読込みなら文字は出さない (帯だけ)。字形が無い字は 〓。
 // ★ 割り当てをしない。呼ぶのは ui タスクとコンソールだけ (どちらも ui の錠の中)。
 void stackee_draw_subtitle(const stackee_canvas_t *c,

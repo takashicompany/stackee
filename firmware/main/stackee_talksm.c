@@ -704,7 +704,7 @@ void stackee_talk_step(stackee_talk_t *t) {
                             subtitle(t, NULL);
                         } else {
                             // ★ 帯には「その頁のここまで」を積んで渡す。
-                            //   4 行が埋まった次のページで頁がめくれる
+                            //   3 行が埋まった次のページで頁がめくれる
                             //   (band が 1 行だけを返すのがその印)。
                             char band[STACKEE_TALK_SUB_BAND_MAX];
                             stackee_talk_band(t, want, band, sizeof(band));

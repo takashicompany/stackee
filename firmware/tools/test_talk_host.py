@@ -104,7 +104,7 @@ def prints(text):
 def subtitles(text):
     """SUB 行 (帯に渡した文字列の並び)。"-" は「帯を消した」。
 
-    ★ 帯は 4 行。ページは頭から 1 行ずつ**積む**ので、行は
+    ★ 帯は 3 行。ページは頭から 1 行ずつ**積む**ので、行は
       `\n` (逆斜線 + n) 区切りで 1 行に出てくる。
     """
     return re.findall(r'^SUB (.*)$', text, re.M)
@@ -773,6 +773,7 @@ print
                          [r'こんにちは',
                           r'こんにちは\nさようなら',
                           r'こんにちは\nさようなら\nまたね', '-'])
+        # ★ 3 ページちょうどで帯が埋まる (4 ページ目があれば頁がめくれる)。
         # 再生の途中では 3 ページを持っている。
         mid = prints(out)[0]
         self.assertEqual(mid['state'], 'playing')
@@ -838,9 +839,9 @@ pageat 60000
         self.assertEqual(mid['dropped'], 60 - 48)
 
     def test_lines_stack_until_the_band_is_full_then_the_page_turns(self):
-        """帯は 4 行。5 ページ目で帯を空にして 1 行目に置く。
+        """帯は 3 行。4 ページ目で帯を空にして 1 行目に置く。
 
-        ★ 行の集合はページ番号だけで決まる (i%4 行目に出る)。
+        ★ 行の集合はページ番号だけで決まる (i%3 行目に出る)。
           ここは state machine を通さずに stackee_talk_band を直に呼ぶ。
         """
         body = ''.join(r'%d\tぺ%d\n' % (i * 1000, i) for i in range(9))
@@ -861,7 +862,7 @@ band 1
 band 2
 band 3
 band 4
-band 5
+band 6
 band 8
 band 9
 """ % (ACCEPT_BODY, DONE_SUBS_BODY, body))
@@ -870,20 +871,20 @@ band 9
             (0, 1, r'ぺ0'),
             (1, 2, r'ぺ0\nぺ1'),
             (2, 3, r'ぺ0\nぺ1\nぺ2'),
-            (3, 4, r'ぺ0\nぺ1\nぺ2\nぺ3'),
-            (4, 1, r'ぺ4'),                 # 頁めくり
-            (5, 2, r'ぺ4\nぺ5'),
-            (8, 1, r'ぺ8'),                 # 2 回目の頁めくり
+            (3, 1, r'ぺ3'),                 # 頁めくり
+            (4, 2, r'ぺ3\nぺ4'),
+            (6, 1, r'ぺ6'),                 # 2 回目の頁めくり
+            (8, 3, r'ぺ6\nぺ7\nぺ8'),
             (9, 0, '-'),                    # ページが無い
         ])
 
-    def test_the_band_never_carries_more_than_four_lines(self):
+    def test_the_band_never_carries_more_than_three_lines(self):
         body = ''.join(r'%d\tぺ%d\n' % (i * 1000, i) for i in range(9))
         out = self.happy(subs=body)
         for text in subtitles(out):
             if text == '-':
                 continue
-            self.assertLessEqual(len(text.split(r'\n')), 4, text)
+            self.assertLessEqual(len(text.split(r'\n')), 3, text)
 
     def test_a_missing_subtitle_file_does_not_stop_the_reply(self):
         out = self.happy(status=404)
