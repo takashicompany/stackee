@@ -971,8 +971,9 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     "\"sub_src\":\"%s\","
                     "\"dropped_short\":%lu,\"dropped_silent\":%lu,"
                     "\"rec_ms\":%lu,\"rms_max\":%lu,"
-                    "\"rms_at\":%d,\"rms_mean\":%lu,"
-                    "\"min_ms\":%lu,\"voice_rms\":%lu",
+                    "\"rms_at\":%d,\"rms_mean\":%lu,\"rms_2nd\":%lu,"
+                    "\"loud\":%lu,"
+                    "\"min_ms\":%lu,\"voice_rms\":%lu,\"voice_windows\":%lu",
                     id, stackee_talk_state_names[t->state], t->polls,
                     (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
                     (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
@@ -992,7 +993,9 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     (unsigned long)t->last_rec_ms,
                     (unsigned long)t->last_rms_max,
                     t->last_rms_at, (unsigned long)t->last_rms_mean,
-                    (unsigned long)t->min_ms, (unsigned long)t->voice_rms);
+                    (unsigned long)t->last_rms_2nd, (unsigned long)t->last_loud,
+                    (unsigned long)t->min_ms, (unsigned long)t->voice_rms,
+                    (unsigned long)t->voice_windows);
     at = put(buf, cap, at, ",\"reply\":\"");
     at = put_json_str(buf, cap, at, t->reply);
     at = put(buf, cap, at, "\",\"error\":\"");
@@ -1175,9 +1178,12 @@ esp_err_t stackee_audio_start(const char *post_path) {
         (uint32_t)stackee_settings_int("STACKEE_TALK_MIN_MS",
                                        STACKEE_TALK_MIN_MS_DEFAULT),
         (uint32_t)stackee_settings_int("STACKEE_TALK_VOICE_RMS",
-                                       STACKEE_TALK_VOICE_RMS_DEFAULT));
-    ESP_LOGI(TAG, "会話の切り捨て: 最短 %lu ms / 声の RMS %lu",
-             (unsigned long)a.talk->min_ms, (unsigned long)a.talk->voice_rms);
+                                       STACKEE_TALK_VOICE_RMS_DEFAULT),
+        (uint32_t)stackee_settings_int("STACKEE_TALK_VOICE_WINDOWS",
+                                       STACKEE_TALK_VOICE_WINDOWS_DEFAULT));
+    ESP_LOGI(TAG, "会話の切り捨て: 最短 %lu ms / 声の RMS %lu x %lu 窓",
+             (unsigned long)a.talk->min_ms, (unsigned long)a.talk->voice_rms,
+             (unsigned long)a.talk->voice_windows);
     a.ready = true;
     stackee_console_register(audio_console);
     // CPU0 / 高優先度 (ui = 3 より上、入力 = CPU1 とは別)。

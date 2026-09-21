@@ -11,7 +11,9 @@
 //   inject <samples>  録音の代わりに PCM を注入する
 //   mic <n>           record_read が 1 回に返すサンプル数 (-1 で失敗)
 //   miclevel <n>      マイクが返す波の振幅 (0 = 無音。既定 4000)
-//   gate <min_ms> <rms>  短押し / 無音の切り捨ての閾値 (0 でその条件を見ない)
+//   gate <min_ms> <rms> [<窓数>]  短押し / 無音の切り捨ての閾値
+//                                  (0 でその条件を見ない。窓数の既定は 5)
+//   burst <n>         次の録音のうち先頭 n 窓だけ大きくする (立ち上がりの跳ね)
 //   net <0|1>         Wi-Fi が繋がっているか
 //   resp <status> <body>   次の HTTP 完了で返すもの。body が "PCM:<n>" なら
 //                          n サンプルぶんの生 PCM
@@ -121,6 +123,10 @@ static bool ops_record_begin(void) {
 //   切り捨て (stackee_talksm.c の gate_recording) に全部かかってしまう。
 static int g_mic_level = 4000;
 static int g_mic_phase;
+// 先頭の何サンプルだけ大きくするか (マイクを開けた直後の跳ねの真似)。
+static int g_mic_burst_samples;
+static int g_mic_burst_level = 4000;
+static int g_mic_written;
 
 static int ops_record_read(int16_t *dst, int max) {
     if (g_mic_chunk < 0) {
@@ -128,7 +134,10 @@ static int ops_record_read(int16_t *dst, int max) {
     }
     int n = g_mic_chunk < max ? g_mic_chunk : max;
     for (int i = 0; i < n; i++) {
-        dst[i] = (int16_t)((g_mic_phase++ & 1) ? g_mic_level : -g_mic_level);
+        int level = (g_mic_written < g_mic_burst_samples) ? g_mic_burst_level
+                                                          : g_mic_level;
+        dst[i] = (int16_t)((g_mic_phase++ & 1) ? level : -level);
+        g_mic_written++;
     }
     return n;
 }
@@ -335,11 +344,22 @@ int main(void) {
             g_mic_chunk = arg ? atoi(arg) : 240;
         } else if (strcmp(line, "miclevel") == 0) {
             g_mic_level = arg ? atoi(arg) : 4000;
+        } else if (strcmp(line, "burst") == 0) {
+            // 先頭 n 窓だけ大きい録音 (立ち上がりの跳ねの真似)。
+            int windows = arg ? atoi(arg) : 1;
+            char *level = arg ? strchr(arg, ' ') : NULL;
+            g_mic_burst_samples = windows * STACKEE_TALK_RMS_WINDOW;
+            g_mic_burst_level = level ? atoi(level + 1) : 4000;
+            g_mic_written = 0;
         } else if (strcmp(line, "gate") == 0) {
             char *second = arg ? strchr(arg, ' ') : NULL;
             if (second) { *second++ = '\0'; }
+            char *third = second ? strchr(second, ' ') : NULL;
+            if (third) { *third++ = '\0'; }
             stackee_talk_set_gate(&g_talk, arg ? (uint32_t)atol(arg) : 0,
-                                  second ? (uint32_t)atol(second) : 0);
+                                  second ? (uint32_t)atol(second) : 0,
+                                  third ? (uint32_t)atol(third)
+                                        : STACKEE_TALK_VOICE_WINDOWS_DEFAULT);
         } else if (strcmp(line, "net") == 0) {
             g_net = arg && atoi(arg) != 0;
         } else if (strcmp(line, "ack") == 0) {
@@ -425,6 +445,7 @@ int main(void) {
             printf("NOW %u STATE %s POLLS %d ALLOC %d RELEASE %d "
                    "PAGES %d PAGE %d DROPPED %d SUBBYTES %u SRC %s "
                    "SHORT %lu SILENT %lu RECMS %lu RMSMAX %lu "
+                   "RMS2ND %lu LOUD %lu "
                    "MINMS %lu VOICERMS %lu "
                    "REPLY %s ERROR %s\n",
                    (unsigned)g_now, stackee_talk_state_names[g_talk.state],
@@ -436,6 +457,8 @@ int main(void) {
                    (unsigned long)g_talk.dropped_silent,
                    (unsigned long)g_talk.last_rec_ms,
                    (unsigned long)g_talk.last_rms_max,
+                   (unsigned long)g_talk.last_rms_2nd,
+                   (unsigned long)g_talk.last_loud,
                    (unsigned long)g_talk.min_ms,
                    (unsigned long)g_talk.voice_rms,
                    g_talk.reply, g_talk.error);

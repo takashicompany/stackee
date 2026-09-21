@@ -479,7 +479,7 @@ python3 firmware/tools/hid_desc_check.py       # 記述子の構成を目で見�
 python3 firmware/tools/test_faceanim_host.py   # 顔の状態機械 (20 件)
 python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (27 件)
 python3 firmware/tools/test_cfg_host.py        # 段階 3: 設定・登録簿・音量・素材 + 4 KB の JSON (48 件)
-python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 (57 件)
+python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 + 切り捨て (73 件)
 python3 firmware/tools/test_wifi_host.py       # 段階 3: Wi-Fi の状態機械 (21 件)
 python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
@@ -489,7 +489,7 @@ python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **463 件**。どれも実機に触らない。
+全部で **479 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -1202,6 +1202,9 @@ FAT の根っこ (`/settings.toml`) を起動時に 1 回だけ読む。
 |---|---|---|
 | `STACKEE_TALK_URL` | **必須** | 会話の相手。`https://pi400.…:8443/talk` のような形。無いと会話が使えない |
 | `STACKEE_TALK_TOKEN` | 任意 | `Authorization: Bearer` に載せる。**HTTPS のときしか受け付けない** (平文に載せない) |
+| `STACKEE_TALK_MIN_MS` | 任意 | 短押しを捨てる下限 [ms]。既定 **1000**。0 でこの条件を見ない (§11-4 の「誤って触れたときは何も起こさない」) |
+| `STACKEE_TALK_VOICE_RMS` | 任意 | 「声がある」とみなす 20 ms 窓の RMS。既定 **1000**。0 でこの条件を見ない |
+| `STACKEE_TALK_VOICE_WINDOWS` | 任意 | その窓がいくつ要るか。既定 **5** (= 100 ms)。0 でこの条件を見ない |
 
 ★ 値はログにも `status` にも出さない。`status` に出るのは
 `talk_url` / `talk_token` の**真偽だけ**。
@@ -1264,7 +1267,7 @@ idle --(42 キー押下)--> recording --(離す)--> upload --> poll_wait ⇄ pol
 
 | 決まり | 値 |
 |---|---|
-| 録音 | 16 kHz / mono / 16bit。最大 **30 秒** (960,000 B)。0.3 秒未満は送らない |
+| 録音 | 16 kHz / mono / 16bit。最大 **30 秒** (960,000 B)。**短押し / 無音は捨てる** (下の「誤って触れたときは何も起こさない」) |
 | 送信 | `POST /talk` (`Content-Type: audio/wav`、44 バイトの RIFF ヘッダ + PCM) |
 | 受理 | `202 {"id":..,"status_url":"/jobs/<id>"}` |
 | 応答待ち | `GET /jobs/<id>?wait=25` (**ロングポーリング**)。中継が最大 25 秒握る |
@@ -1275,6 +1278,37 @@ idle --(42 キー押下)--> recording --(離す)--> upload --> poll_wait ⇄ pol
 | 最終回答 | **一次回答が鳴り終わってから**鳴らす (`play_wait`) |
 | スピーカー待ち | 15 秒で諦める |
 | 返答文 | `status` の `screen` に出る (現行と同じ意味) |
+
+#### 誤って触れたときは何も起こさない (2026-09-21)
+
+キーに指がかすっただけで**一次回答が声を出し、録音がサーバへ飛ぶ**のを止める。
+録音を終えた時点で 2 つとも満たしたときだけ、従来の流れへ進む。
+
+| 条件 | 既定 | settings のキー |
+|---|---|---|
+| 録音の長さ ≥ | **1000 ms** (録音の長さ = キーを押していた長さ) | `STACKEE_TALK_MIN_MS` |
+| 20 ms の窓の RMS ≥ | **1000** … の窓が **5 個**以上 (= 100 ms) | `STACKEE_TALK_VOICE_RMS` / `STACKEE_TALK_VOICE_WINDOWS` |
+
+満たさなければ**静かに idle へ戻る** — 一次回答を鳴らさない、送信しない、
+「考え中」の顔にもならない (`listening` から直接 `idle`)。ログに
+`[talk] 短すぎ/無音のため破棄 (len_ms=…, loud=…, rms_max=…, …)` を残し、
+`talk.status` の `dropped_short` / `dropped_silent` が増える。
+サーバ側の防御 (0.3 秒未満は 400、peak<150 は ignored) は変えていない。
+
+★★ **「いちばん大きい窓」では判定できない。** 実機で測ると、環境音しか
+無い部屋でも **窓 5 (マイクを開けてから 100〜120 ms) の RMS が毎回
+3,257〜3,945** になる (6 回測って毎回 窓 5。窓の平均は 266〜276)。
+マイクの立ち上がりの跳ねで、`research/stackee/record_onset_2026-09-21.md`
+の「ES7210 の CSM 起動 約 96 ms」と時刻が合う。最大だけを見ると、この跳ね
+1 つで必ず「声あり」になってしまう。だから**越えた窓の数**で見る —
+跳ねは 1 窓しか無いので越えられず、声は 100 ms も続けば 5 窓ある。
+
+★ 測るのは**録音バッファ全体**を 1 度なめる形 (1 サンプルあたり掛け算 1 回、
+audio タスクの上)。将来プリロール (録音の冒頭の取りこぼしを埋める先読み) を
+足しても、そのぶんを含めて数える。
+
+★ `talk.inject` (決まった PCM を流す検査の道) は録音を通らないので、
+この切り捨ての外にある。
 | 計時 | `[talk-http-timing]` / `[talk-turn-timing]` をログに出す |
 
 通信は**専用タスク** (`stackee_http`、CPU0 / 優先度 4 / スタック 10 KB) が持つ。
@@ -1413,7 +1447,7 @@ I2C も NVS も触らない (値を書き換えるだけ)。レジスタと NVS 
 
 ```
 python3 firmware/tools/test_cfg_host.py    # 設定・登録簿・音量・JSON・URL・素材 (48 件)
-python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 (57 件)
+python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 + 切り捨て (73 件)
 python3 firmware/tools/test_wifi_host.py   # Wi-Fi の状態機械 (21 件)
 ```
 

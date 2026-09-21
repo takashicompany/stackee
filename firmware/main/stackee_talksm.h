@@ -61,8 +61,18 @@
 //   (音も出ない・送信もしない・「考え中」の顔にもならない)。
 //
 //   (a) 録音の長さ ≥ min_ms      … 録音の長さ = キーを押していた長さ
-//   (b) 声がある                 … 20 ms の窓ごとの RMS の**最大**が
-//                                  voice_rms 以上
+//   (b) 声がある                 … 20 ms の窓のうち RMS が voice_rms 以上の
+//                                  ものが voice_windows 個以上
+//
+// ★★ **「いちばん大きい窓」では判定できない** (2026-09-21 に実測して分かった)。
+//   マイクを開けた直後に決まった跳ねがあり、環境音しか無い部屋でも
+//   **窓 5 (開けてから 100〜120 ms) の RMS が毎回 3,257〜3,945** になる
+//   (6 回測って毎回 窓 5)。窓の平均は 266〜276 しかない。最大だけを見ると、
+//   この跳ね 1 つで必ず「声あり」になってしまう。
+//   そこで **何個の窓が閾値を越えたか**で見る。跳ねは 1 窓しか無いので
+//   越えられない。声は 100 ms も続けば 5 窓ある。
+//   (跳ねの出どころは ES7210 の立ち上がり。research/stackee/
+//    record_onset_2026-09-21.md)
 //
 // ★ 判定は**録音バッファ全体**を 1 度なめて行う。将来プリロール (録音の
 //   冒頭の取りこぼしを埋める先読み) を足しても、そのぶんを含めて数える。
@@ -73,8 +83,12 @@
     (STACKEE_TALK_RATE * STACKEE_TALK_RMS_WINDOW_MS / 1000)     // 320 サンプル
 // 既定。settings.toml の STACKEE_TALK_MIN_MS / STACKEE_TALK_VOICE_RMS で
 // 変えられる (README §11-1)。
-#define STACKEE_TALK_MIN_MS_DEFAULT     1000
-#define STACKEE_TALK_VOICE_RMS_DEFAULT  1500
+#define STACKEE_TALK_MIN_MS_DEFAULT      1000
+// 環境音の窓の平均が 270 前後。その約 3.7 倍。立ち上がりの跳ね (3,257〜3,945)
+// より下だが、跳ねは 1 窓しか無いので下の窓数で落ちる。
+#define STACKEE_TALK_VOICE_RMS_DEFAULT   1000
+// 越えた窓がいくつ要るか。5 窓 = 100 ms。
+#define STACKEE_TALK_VOICE_WINDOWS_DEFAULT 5
 
 #define STACKEE_TALK_PATH_MAX        160
 #define STACKEE_TALK_TEXT_MAX        256
@@ -246,8 +260,10 @@ typedef struct {
     uint32_t last_rec_ms, last_rms_max;
     int      last_rms_at;       // 最大だった窓の番号 (-1 = 測れなかった)
     uint32_t last_rms_mean;     // 窓ごとの RMS の平均
+    uint32_t last_rms_2nd;      // 2 番目に大きい窓 (立ち上がりの跳ねを除く目安)
+    uint32_t last_loud;         // voice_rms を越えた窓の数
     // 切り捨ての閾値 (0 = その条件を見ない)。
-    uint32_t min_ms, voice_rms;
+    uint32_t min_ms, voice_rms, voice_windows;
 } stackee_talk_t;
 
 // 再生位置 [ms] に出すページの番号。無ければ -1。
@@ -275,20 +291,23 @@ void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
 // 短押し / 無音の切り捨ての閾値を差し替える (settings.toml から)。
 // 0 を渡すとその条件を見ない。呼ぶのは立ち上げのときだけ。
 void stackee_talk_set_gate(stackee_talk_t *t, uint32_t min_ms,
-                           uint32_t voice_rms);
+                           uint32_t voice_rms, uint32_t voice_windows);
 
-// 録音に声があるか測る: **20 ms の窓ごとの RMS の最大値**。
+// 録音を 20 ms の窓に切って測った結果。
+typedef struct {
+    uint32_t max;           // いちばん大きい窓の RMS
+    int      max_at;        // その窓の番号 (-1 = 窓 1 つぶんも無かった)
+    uint32_t second;        // 2 番目に大きい窓 (跳ねを除いた目安)
+    uint32_t mean;          // 窓ごとの RMS の平均
+    uint32_t loud;          // threshold を越えた窓の数
+    int      windows;       // 数えた窓の数
+} stackee_talk_voice_t;
+
 // ★ 純粋な関数。バッファ全体をなめるので、プリロールを足しても
 //   そのぶんを含めて数える。端数の窓 (最後の 20 ms 未満) は数えない
 //   — 短すぎる窓は RMS が跳ねやすく、判定が甘くなるため。
-uint32_t stackee_talk_voice_rms(const int16_t *pcm, int count);
-
-// 同じものに「どの窓が最大だったか」と「窓の平均」を添えて返す。
-// ★ 閾値を決めるための物差し。最大だけ見ていると、マイクを開けた直後の
-//   跳ね (立ち上がりの過渡) と、ずっと鳴っている環境音の区別がつかない。
-//   max_window / mean_rms は NULL を渡してよい。
-uint32_t stackee_talk_voice_rms_stats(const int16_t *pcm, int count,
-                                      int *max_window, uint32_t *mean_rms);
+void stackee_talk_voice_scan(const int16_t *pcm, int count,
+                             uint32_t threshold, stackee_talk_voice_t *out);
 
 // STK_TALK の押し離し。実際の仕事は次の step() で起きる。
 void stackee_talk_set_pressed(stackee_talk_t *t, bool pressed);

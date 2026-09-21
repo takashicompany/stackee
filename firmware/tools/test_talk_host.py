@@ -65,7 +65,7 @@ def binary():
 #   (300 ms の下限だけ・声は見ない) に戻してから流す。会話の状態機械を
 #   見ている検査の意味を変えないため。
 #   切り捨てそのもの (既定値を含む) は RecordGateTest が見る。
-LEGACY_GATE = 'gate 300 0\n'
+LEGACY_GATE = 'gate 300 0 0\n'
 
 
 def run(script, legacy_gate=True):
@@ -102,19 +102,20 @@ def prints(text):
                       r'RELEASE (\d+) PAGES (-?\d+) PAGE (-?\d+) DROPPED (\d+) '
                       r'SUBBYTES (\d+) SRC (\S+) '
                       r'SHORT (\d+) SILENT (\d+) RECMS (\d+) RMSMAX (\d+) '
+                      r'RMS2ND (\d+) LOUD (\d+) '
                       r'MINMS (\d+) VOICERMS (\d+) '
                       r'REPLY (.*) ERROR (.*)$', text, re.M)
     keys = ('now', 'state', 'polls', 'alloc', 'release', 'pages', 'page',
             'dropped', 'sub_bytes', 'src',
             'dropped_short', 'dropped_silent', 'rec_ms', 'rms_max',
-            'min_ms', 'voice_rms', 'reply', 'error')
+            'rms_2nd', 'loud', 'min_ms', 'voice_rms', 'reply', 'error')
     out = []
     for row in rows:
         item = dict(zip(keys, row))
         for k in ('now', 'polls', 'alloc', 'release', 'pages', 'page',
                   'dropped', 'sub_bytes',
                   'dropped_short', 'dropped_silent', 'rec_ms', 'rms_max',
-                  'min_ms', 'voice_rms'):
+                  'rms_2nd', 'loud', 'min_ms', 'voice_rms'):
             item[k] = int(item[k])
         out.append(item)
     return out
@@ -366,7 +367,7 @@ class RecordGateTest(unittest.TestCase):
     def turn(self, extra='', ms=1200, level=None, gate=None):
         script = ''
         if gate is not None:
-            script += 'gate %d %d\n' % gate
+            script += 'gate %s\n' % ' '.join(str(v) for v in gate)
         if level is not None:
             script += 'miclevel %d\n' % level
         script += ('ack 0\nrespdelay 10\nresp 202 %s\nresp 200 %s\n'
@@ -377,12 +378,12 @@ class RecordGateTest(unittest.TestCase):
         return run(script, legacy_gate=False)
 
     # ---- 既定の閾値 ------------------------------------------------------
-    def test_the_defaults_are_a_second_and_fifteen_hundred(self):
+    def test_the_defaults_are_a_second_and_a_thousand(self):
         out = self.turn(ms=1200)
         info = last_print(out)
         # 既定は像に焼いてある値 (stackee_talksm.h)。
         self.assertEqual(info['min_ms'], 1000)
-        self.assertEqual(info['voice_rms'], 1500)
+        self.assertEqual(info['voice_rms'], 1000)
         self.assertEqual(info['state'], 'idle')
         # 既定のまま声ありなら従来どおり進む。
         self.assertTrue(http_calls(out))
@@ -415,14 +416,49 @@ class RecordGateTest(unittest.TestCase):
         self.assertEqual(state_names(out), ['idle', 'recording', 'idle'])
 
     def test_voice_just_over_the_line_goes_through(self):
-        out = self.turn(ms=1500, level=1500)      # ちょうど閾値
+        out = self.turn(ms=1500, level=1000)      # ちょうど閾値
         self.assertTrue(http_calls(out))
         self.assertEqual(last_print(out)['dropped_silent'], 0)
 
     def test_voice_just_under_the_line_is_dropped(self):
-        out = self.turn(ms=1500, level=1499)
+        out = self.turn(ms=1500, level=999)
         self.assertEqual(http_calls(out), [])
         self.assertEqual(last_print(out)['dropped_silent'], 1)
+
+    # ---- 立ち上がりの跳ね -------------------------------------------------
+    def test_a_single_loud_window_is_not_voice(self):
+        """★ マイクを開けた直後の跳ね 1 窓では「声あり」にしない。
+
+        実測 (2026-09-21): 環境音しか無い部屋でも **窓 5 の RMS が
+        3,257〜3,945** になる (6 回測って毎回 窓 5)。窓の平均は 270 前後。
+        「いちばん大きい窓」で判定すると、この跳ねだけで必ず通ってしまう。
+        """
+        out = self.turn(ms=1500, level=100, extra='burst 1 4000\n')
+        info = last_print(out)
+        self.assertGreater(info['rms_max'], 3000)     # 跳ねは見えている
+        self.assertEqual(info['loud'], 1)             # でも 1 窓だけ
+        self.assertEqual(info['dropped_silent'], 1)
+        self.assertEqual(http_calls(out), [])
+
+    def test_four_loud_windows_are_still_not_enough(self):
+        out = self.turn(ms=1500, level=100, extra='burst 4 4000\n')
+        self.assertEqual(last_print(out)['loud'], 4)
+        self.assertEqual(http_calls(out), [])
+
+    def test_five_loud_windows_are_voice(self):
+        # 100 ms 続けば声。
+        out = self.turn(ms=1500, level=100, extra='burst 5 4000\n')
+        info = last_print(out)
+        self.assertEqual(info['loud'], 5)
+        self.assertEqual(info['dropped_silent'], 0)
+        self.assertTrue(http_calls(out))
+
+    def test_the_second_loudest_window_is_reported(self):
+        # 跳ね 1 窓 + 静かな残り → 2 番目は静かな窓の値。
+        out = self.turn(ms=1500, level=100, extra='burst 1 4000\n')
+        info = last_print(out)
+        self.assertGreater(info['rms_max'], 3000)
+        self.assertEqual(info['rms_2nd'], 100)
 
     # ---- 設定で変えられる ------------------------------------------------
     def test_the_thresholds_come_from_the_settings(self):

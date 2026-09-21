@@ -185,6 +185,7 @@ static const char *const ALLOWED_KEYS[] = {
     // ★ 誤って触れたときの起動を止める 2 つ (2026-09-21。README §11-4)。
     "STACKEE_TALK_MIN_MS",
     "STACKEE_TALK_VOICE_RMS",
+    "STACKEE_TALK_VOICE_WINDOWS",
     NULL,
 };
 
@@ -203,6 +204,7 @@ static const char *const REPORT_KEYS[] = {
     "STACKEE_TALK_TOKEN",
     "STACKEE_TALK_MIN_MS",
     "STACKEE_TALK_VOICE_RMS",
+    "STACKEE_TALK_VOICE_WINDOWS",
     // 廃止した Wi-Fi キー。書き換えは拒むが、古い settings.toml に残って
     // いたらページが「移行してください」と言えるように見せる。
     "STACKEE_WIFI_SSID",
