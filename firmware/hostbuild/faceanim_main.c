@@ -81,6 +81,7 @@ int main(int argc, char **argv) {
         }
         if (strcmp(word, "speak") == 0) { in.speaking = value != 0; continue; }
         if (strcmp(word, "rec") == 0)   { in.talk_recording = value != 0; continue; }
+        if (strcmp(word, "mic") == 0)   { in.mic_held = value != 0; continue; }
         if (strcmp(word, "busy") == 0)  { in.talk_busy = value != 0; continue; }
         if (strcmp(word, "cam") == 0)   { in.camera_active = value != 0; continue; }
         if (strcmp(word, "show") == 0)  { view.current = (int)value; view.target = -1; continue; }

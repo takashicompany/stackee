@@ -5,6 +5,12 @@
 //    出さない** — ホスト側から見て存在しないキーである、というのが
 //    KMK 版と同じ振る舞い。中身 (録音・音量・BLE) は段階 3 / 4。
 //
+//    ★ **例外が 1 つだけ: STK_MIC_KEY。** これは PC 側のプッシュトゥトークに
+//      使っているキー (F13) で、**F13 は今までどおりホストへ送る**。
+//      足したのは「押している間だけ本体の顔を聞き取り中にする」ことだけ。
+//      ホストから見た振る舞いを変えないのが肝なので、送るのは
+//      register_code/unregister_code — 普通のキーとまったく同じ道。
+//
 // 2. 修飾つきタップの HoldTap (STK_MT_n)
 //    KMK の KC.HT(KC.LSFT(KC.SCLN), KC.LSFT) のように「タップ側が修飾つき」
 //    の HoldTap は、QMK の MT() がタップを 1 バイトしか持てないので表せない。
@@ -21,6 +27,10 @@
 #include "stackee_keycodes.h"
 
 #define STACKEE_EXT_MT_MAX 8
+
+// STK_MIC_KEY がホストへ送るキー。元の既定配列と同じ F13
+// (ユーザーが PC 側のプッシュトゥトークに使っている)。
+#define STACKEE_MIC_KEY_CODE KC_F13
 
 typedef struct {
     bool     pending;       // 押されたが tap/hold が決まっていない
@@ -93,6 +103,18 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
         return false;
     }
 
+    // ★ STK_MIC_KEY — 顔を変えつつ、F13 は普通のキーとして送る。
+    if (keycode == STK_MIC_KEY) {
+        if (record->event.pressed) {
+            s_custom_presses++;
+            register_code(STACKEE_MIC_KEY_CODE);
+        } else {
+            unregister_code(STACKEE_MIC_KEY_CODE);
+        }
+        stackee_qmk_custom_key(STACKEE_KEY_MIC, record->event.pressed);
+        return false;   // 送るのはこちらで済ませた
+    }
+
     // QMK のキーコードを「何をしたいか」に翻訳してからアプリへ渡す。
     // 翻訳表はここ 1 か所だけ (tools/keycodes.md の並びと同じ)。
     static const struct {
@@ -133,6 +155,7 @@ const char *stackee_key_action_name(stackee_key_action_t action) {
         case STACKEE_KEY_BLE_REFRESH: return "BLE_REFRESH";
         case STACKEE_KEY_CAMERA: return "CAMERA";
         case STACKEE_KEY_TOUCH_SCROLL: return "TOUCH_SCROLL";
+        case STACKEE_KEY_MIC: return "MIC_KEY";
         default: return "?";
     }
 }

@@ -6,7 +6,7 @@
   2. キー押下 → HID レポート生成 の遅延 (合否: 中央値 2 ms 以内・最大 5 ms 以内)
   3. 入力タスクの周期 (合否: 中央値 1 ms 前後)
   4. 送信キューが詰まっていないか (捨てた数 0)
-  5. 独自キーが HID に漏れていないか (custom の数だけ増えて送出は増えない)
+  5. 独自キーが押された数 (STK_MIC_KEY 以外は HID に漏れない)
   6. BLE がつながっているか / 接続間隔 (ms)
   7. 送信先 (BLE / USB) と、その選択が NVS に残っているか
 
@@ -116,8 +116,14 @@ def verdicts(result):
                    queue.get('dropped'), queue.get('failed'),
                    queue.get('depth'))))
 
+    # ★ 独自キーは HID に出ない — **ただし STK_MIC_KEY だけは出る**
+    #   (PC 側のプッシュトゥトークに使っている F13 をそのまま送る。§10-1)。
+    #   だからここは「数えているか」だけを見て、「送出が増えていないこと」は
+    #   合否にしない。漏れていないことは打鍵列テスト
+    #   (tools/test_keyseq_host.py の CustomKeyTest) が 1 バイト単位で見ている。
     out.append(('独自キー', keys.get('custom') is not None,
-                '%s 回押された (HID には出ていないはず)' % keys.get('custom')))
+                '%s 回押された (HID に出るのは STK_MIC_KEY の F13 だけ)'
+                % keys.get('custom')))
 
     # 送信先。既定は BLE (現行 CircuitPython 版と同じ)。
     out.append(('HID の送信先', status.get('hid') in ('BLE', 'USB'),

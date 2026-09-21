@@ -1,10 +1,12 @@
 #include "stackee_input.h"
 
+#include <stdatomic.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -24,6 +26,9 @@
 #include "stackee_usb.h"
 
 static const char *TAG = "input";
+
+// STK_MIC_KEY を押しているか。入力タスクが書き、ui タスクが読む。
+static _Atomic bool s_mic_held;
 
 #define INPUT_TASK_STACK 6144
 #define INPUT_TASK_PRIO  (configMAX_PRIORITIES - 2)  // 最高優先度 (IDLE より上)
@@ -56,6 +61,13 @@ void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed) {
     //   ここでは印を立てるだけ。実際の録音は audio タスクが進める。
     if (action == STACKEE_KEY_TALK) {
         stackee_audio_talk_key(pressed);
+        return;
+    }
+    // ★ STK_MIC_KEY も押し離しの両方。印を 1 つ立てるだけで、
+    //   F13 の送出そのものは qmk_port/stackee_holdtap.c が済ませている。
+    //   顔を変えるのは ui タスク (ここでは画面に触らない)。
+    if (action == STACKEE_KEY_MIC) {
+        atomic_store(&s_mic_held, pressed);
         return;
     }
     // ★ STK_TOUCH_SCROLL も押し離しの両方が要る (押している間だけ
@@ -292,6 +304,10 @@ void stackee_input_start(void) {
     }
     ESP_LOGI(TAG, "入力タスク開始 (CPU%d 優先度 %d 周期 1 ms)",
              INPUT_TASK_CPU, INPUT_TASK_PRIO);
+}
+
+bool stackee_input_mic_held(void) {
+    return atomic_load(&s_mic_held);
 }
 
 void stackee_input_stats(stackee_input_stats_t *out) {

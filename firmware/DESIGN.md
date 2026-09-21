@@ -79,6 +79,21 @@ ESP32-S3 は IN エンドポイントが EP0 を含めて 5 本まで（docs.esp
   - HoldTap の設定は**マトリクス位置 + キーコード**で引く。レイヤー 0 のキー 36 と 37 はどちらも LT(1, LANG1) だが prefer_hold が違うため、キーコードだけで引くと片方の設定が消える
   - **タップ側が修飾つきの HoldTap は QMK の MT() では表せない**（`MT(mod, kc)` の kc は 1 バイト）。該当するのは `KC.HT(KC.LSFT(KC.SCLN), KC.LSFT)`（レイヤー 1 のキー 21。離せば JIS の「+」、押さえれば Shift）。独自キーコード `STK_MT_n` に逃がし、qmk_port の小さな状態機械で「hold = 修飾 / tap = 16bit キーコード」を実装する
   - 対応の正しさは Phase 1 で「同じ打鍵列を入れて同じ出力になる」テストで確認する（tools/test_keyseq_host.py。TAPPING_TERM の両側を 1 ms 単位で狙う）
+- **独自キーは HID に出さない。ただし `STK_MIC_KEY` だけは出す（2026-09-21）。**
+  右下のキーはユーザーが PC 側のプッシュトゥトークに使っている `KC_F13`。
+  「押している間だけ本体の顔を聞き取り中にしたい」だけなので、**ホストから見た
+  振る舞いは変えない** — `register_code(KC_F13)` / `unregister_code(KC_F13)` で
+  普通のキーとまったく同じ道を通す。打鍵列テストが「素の F13 と 1 バイトも
+  違わない」ことを見ている。
+- **新しい独自キーは並びのうしろに足す。** VIA の customKeycodes の並び順が
+  そのままキーコードの番号になり、その番号は **VIA で変えた配列として NVS に
+  保存されている**。途中に足すとうしろが 1 つずつずれ、保存済みの配列の意味が
+  黙って変わる。置き場は tools/gen_keymap.py の `TRAILING_CUSTOM_KEYS`
+  （`STK_MT_0` = 0x7E07 は動かさない）。
+- **既定配列の位置ごとの差し替えは、この木だけで完結させる**
+  （tools/gen_keymap.py の `KEYMAP_OVERRIDES`）。移植元の keymap.py を触ると
+  現行 CircuitPython 版の配列まで変わってしまう。ネイティブ版にしか無い
+  独自キーは、位置とキーの結び付けをこちら側に置く。
 - **マウスキーは有効**（`MOUSEKEY_ENABLE` / `MOUSE_ENABLE`、`quantum/mousekey.c` を取り込み）。現行 CircuitPython 版も KMK の MouseKeys を入れている（code.py が `keyboard.modules.append(MouseKeys())`）ので、同じように使える状態にしておく。動作モードは QMK 既定（加速つき）。キーコードは標準の `MS_UP` / `MS_DOWN` / `MS_LEFT` / `MS_RGHT` / `MS_BTN1`〜 / `MS_WHLU` / `MS_WHLD` / `MS_ACL0`〜2。レポートは既存の Report ID 2 のコレクションで送る（USB・BLE 共通。将来のタッチパッドと同じ送信キューを通る）。VIA 定義 JSON は標準キーコードなので変更不要（2026-09-16 決定）。keymap.py 側に `KC.MS_*` / `KC.MB_*` / `KC.MW_*` があれば生成時に対応する QMK キーコードへ変換する（対応表は tools/keycodes.md）。
 - 独自キー（VIA の customKeycodes で表示）: STK_TALK、STK_VOLUP、STK_VOLDN、STK_HID_SWITCH、STK_BLE_REFRESH、STK_CAMERA、STK_TOUCH_SCROLL、および上記の STK_MT_n。**QK_KB_0（0x7E00）以降**に割り当て、process_record_kb で処理して false を返す（HID には出さない）。QMK の SAFE_RANGE（= QK_USER = 0x7E40）ではないのは、**VIA の customKeycodes が QK_KB_0 から順に対応づく約束**のため。並び順が実装とずれると VIA 上で別のキーとして表示されるので、生成時に機械照合する（2026-09-16 決定）。
 - VIA 定義 JSON: firmware/via/stackee.json（layouts は keymap.py の KLE 定義から生成）。VID/PID は現行の USB 記述子と同じ値を使い、Remap のカタログ登録は行わない（定義 JSON の手動読み込みで使う）。

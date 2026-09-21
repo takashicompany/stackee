@@ -277,7 +277,7 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | 入っている | 内容 |
 |---|---|
 | キー入力 | TCA8418 (PORT.A / I2C 0x34 / 5x10) を 1 ms 周期でポーリング → QMK quantum 0.34.4 → 送信キュー → USB HID |
-| 配列 | `firmware/kmk/keymap.py` から生成した 6 層。HoldTap・レイヤー・JIS (LANG1/LANG2)・独自キー |
+| 配列 | `firmware/kmk/keymap.py` から生成した 6 層。HoldTap・レイヤー・JIS (LANG1/LANG2)・独自キー。位置ごとの差し替えは `tools/gen_keymap.py` の `KEYMAP_OVERRIDES` (KMK 側を触らずに済ませる) |
 | VIA | Raw HID (0xFF60/0x61、32 バイト、**Report ID なし**)。dynamic keymap は NVS のブロブに保存 |
 | 脱出路 | 1200 bps タッチ / コンソール `bootloader` / `QK_BOOT` キー → ROM ダウンロードモード。コンソール `reset` → 通常再起動 |
 | USB (dev プロファイル) | CDC 1 本 + HID (キーボード / マウス / コンシューマ) + Raw HID |
@@ -469,14 +469,14 @@ factory = 0x410000」と思い込み、ビルドの最後に誤った書き込�
 ## 4. 実機に触らない確認
 
 ```
-python3 firmware/tools/test_keyseq_host.py     # 打鍵列テスト (31 件)
-python3 firmware/tools/test_gen_keymap.py      # 配列生成 (18 件)
+python3 firmware/tools/test_keyseq_host.py     # 打鍵列テスト (33 件)
+python3 firmware/tools/test_gen_keymap.py      # 配列生成 (21 件)
 python3 firmware/tools/test_console_host.py    # コンソールの組み立て (25 件)
 python3 firmware/tools/test_tools.py           # 道具・HID 記述子・ROM・nvs・USB 復帰 (67 件)
 python3 firmware/tools/test_hid_dest_host.py   # 送信先の選び方 (7 件)
 python3 firmware/tools/test_hid_report_map.py  # 記述子を esp_hid のパーサに通す (5 件)
 python3 firmware/tools/hid_desc_check.py       # 記述子の構成を目で見る
-python3 firmware/tools/test_faceanim_host.py   # 顔の状態機械 (16 件)
+python3 firmware/tools/test_faceanim_host.py   # 顔の状態機械 (20 件)
 python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (27 件)
 python3 firmware/tools/test_cfg_host.py        # 段階 3: 設定・登録簿・音量・素材 + 4 KB の JSON (48 件)
 python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 (57 件)
@@ -489,7 +489,7 @@ python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **438 件**。どれも実機に触らない。
+全部で **447 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -513,7 +513,8 @@ python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 * `prefer_hold` のキーで他キー割り込み / `prefer_hold` なしのキーで割り込まない
 * 同じキーコードで設定が違う 2 つのキー (レイヤー 0 の 36 と 37) の区別
 * JIS の LANG1 / LANG2 が 0x90 / 0x91 で出ること
-* 独自キーが HID に 1 バイトも漏れないこと
+* 独自キーが HID に 1 バイトも漏れないこと。**ただし `STK_MIC_KEY` だけは
+  `KC_F13` を送る** — 素の F13 を押して離したのと 1 バイトも違わないこと
 * FIFO 溢れで押下中を全解放すること
 * VIA で配列を書き換えたら実際に出る文字が変わり、NVS への書き戻しが
   1 回にまとまること
@@ -716,6 +717,13 @@ python3 firmware/kmk/tools/stackee_console_client.py status
 独自キー (会話・音量・BLE 切替など) は VIA の `Custom` タブ (customKeycodes)
 に出る。並び順が実装とずれると別のキーとして表示されるので、
 `tools/test_gen_keymap.py` がそこを機械照合している。
+
+★ **新しい独自キーは並びの "うしろ" に足す。** customKeycodes の並び順は
+そのままキーコードの番号 (`0x7E00` から) になり、**VIA で変えた配列として
+NVS に保存されている**。途中に足すとうしろが 1 つずつずれ、保存済みの配列の
+意味が黙って変わる。置き場は `tools/gen_keymap.py` の
+`TRAILING_CUSTOM_KEYS` (2026-09-21 の `STK_MIC_KEY` がそれ。
+`STK_MT_0` = `0x7E07` は動かしていない)。
 
 ### 配列を変えたら
 
@@ -940,11 +948,31 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 **1 行ずつ移した**。段階 2 では会話もカメラも無いので、実際に出るのは
 `awake` と `idle` だけ。
 
+**表情の選び方** (`stackee_face_pick_state`。上から順に見て最初に当たったもの):
+
+| 順 | 入力 | 表情 | どこから来るか |
+|---|---|---|---|
+| 1 | `speaking` | `speaking` | 返答の再生中 (audio) |
+| 2 | `talk_recording` | `listening` | STK_TALK を押している (本体が録音中) |
+| 3 | **`mic_held`** | **`listening`** | **STK_MIC_KEY (PC 側のプッシュトゥトーク) を押している (2026-09-21)** |
+| 4 | `talk_busy` | `thinking` | 送信・返答待ち・受信 |
+| 5 | `camera_active` (と撮影後 1500 ms) | `camera` | カメラ |
+| 6 | 起動から 2 秒以内 | `awake` | — |
+| 7 | それ以外 | `idle` | — |
+
+★ **`mic_held` は本体の録音より下、考え中より上。** 本体が自分で録っている
+ならそちらが勝ち、返答を待っている間に人が PC へ喋り始めたら耳の顔に戻る。
+**新しい表情は作っていない** — `listening` (耳が動く 3 コマ、250 ms 送り) を
+そのまま使う。印は入力タスクが立てる atomic な `bool` 1 つで、ui タスクが
+毎周読むだけ。**打鍵の道には何も足していない。**
+
+`ui.status` に `mic_held` が出る。
+
 ### 10-2. 実機に触らない確認
 
 ```
 python3 firmware/tools/test_render_host.py     # 描画と期待値 (27 件)
-python3 firmware/tools/test_faceanim_host.py   # 状態機械の時刻 (16 件)
+python3 firmware/tools/test_faceanim_host.py   # 状態機械の時刻と表情の選び方 (20 件)
 python3 firmware/tools/render_expected.py      # 期待値の CRC を見る
 ```
 

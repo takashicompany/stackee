@@ -158,6 +158,13 @@ class MatrixTest(unittest.TestCase):
         self.assertEqual(self.grid[0][0][0].expr, 'LT(4, KC_Q)')
         self.assertEqual(self.grid[0][4][5].expr, 'STK_TALK')
 
+    def test_the_bottom_right_key_is_the_mic_key(self):
+        # ★ KMK 側は KC.F13 のまま。この木の KEYMAP_OVERRIDES で差し替える。
+        self.assertEqual(self.grid[0][3][9].expr, 'STK_MIC_KEY')
+        self.assertEqual(gen_keymap.KEYMAP_OVERRIDES[(0, 3, 9)], 'STK_MIC_KEY')
+        # KMK 側 (移植元) はいまも F13。差し替えたのはこの木だけ。
+        self.assertEqual(self.grid[1][3][9].expr, 'KC_TRNS')
+
 
 class ViaDefinitionTest(unittest.TestCase):
     @classmethod
@@ -167,6 +174,24 @@ class ViaDefinitionTest(unittest.TestCase):
         with open(os.path.join(IDF, 'main', 'qmk_port', 'stackee_keycodes.h'),
                   encoding='utf-8') as handle:
             cls.header = handle.read()
+
+    def test_new_custom_keys_go_after_the_mod_taps(self):
+        """VIA の番号は NVS に保存されている。途中に足すとうしろがずれる。"""
+        names = [c['name'] for c in self.via['customKeycodes']]
+        self.assertEqual(names.index('STK_MT_0'), 7)      # 0x7E07 のまま
+        self.assertEqual(names[-1], 'STK_MIC_KEY')        # うしろに足した
+        self.assertEqual(names.index('STK_MIC_KEY'), 8)   # 0x7E08
+        # ヘッダの enum と VIA の並びが 1 つずつ同じか。
+        for index, name in enumerate(names):
+            self.assertIn('%-20s = QK_KB_0 + %d,' % (name, index), self.header)
+        self.assertIn('#define STACKEE_KEYCODE_LAST  (QK_KB_0 + %d)'
+                      % (len(names) - 1), self.header)
+
+    def test_the_mic_key_is_in_the_via_definition(self):
+        mic = [c for c in self.via['customKeycodes']
+               if c['name'] == 'STK_MIC_KEY']
+        self.assertEqual(len(mic), 1)
+        self.assertIn('F13', mic[0]['title'])   # 何を送るキーかが VIA に出る
 
     def test_matrix_is_five_by_ten(self):
         self.assertEqual(self.via['matrix'], {'rows': 5, 'cols': 10})

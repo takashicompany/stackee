@@ -95,6 +95,30 @@ CUSTOM_KEYS = (
 )
 N_FIXED_CUSTOM = len(CUSTOM_KEYS)
 
+# ★ **STK_MT_* のうしろ**に並ぶ独自キー。
+#
+#   VIA の customKeycodes は並び順がそのままキーコードの番号になり、その番号は
+#   VIA で変えた配列として **NVS に保存されている**。途中に足すとうしろが
+#   1 つずつずれ、保存済みの配列の意味が黙って変わる。だから新しい独自キーは
+#   いちばんうしろに足す (STK_MT_0 = 0x7E07 は動かない)。
+TRAILING_CUSTOM_KEYS = (
+    ('STK_MIC_KEY', None,
+     '押している間だけ「聞き取り中」の顔にする (キー自体は F13 を送る)', 'Mic'),
+)
+
+# 既定配列の差し替え。KMK 側 (firmware/kmk/keymap.py) を触らずに、
+# **この木だけ**で位置と独自キーを結びつける。
+#
+#   (レイヤー, 行, 列): 独自キーの名前
+#
+# 右下のキー (レイヤー 0 / row 3 / col 9) は KMK では KC.F13。PC 側の
+# プッシュトゥトークに使っているので **F13 はそのまま送る**。押している間だけ
+# 顔を「聞き取り中」にしたいので、F13 を送る独自キーに差し替える
+# (本体の処理は main/stackee_input.c、README §10-1)。
+KEYMAP_OVERRIDES = {
+    (0, 3, 9): 'STK_MIC_KEY',
+}
+
 # KMK 側で「本体が自前で処理する」キーのうち、QMK に同じものがあるもの。
 KMK_BUILTIN_TO_QMK = {
     'RESET': ('QK_BOOT', 0x7C00),
@@ -464,6 +488,14 @@ def build(keymap_module, converter):
             conv.col = col
             holdtap.append(conv)
         grid.append(rows)
+    # ★ 位置で差し替える独自キー (KMK 側を触らずに済ませるため)。
+    #   HoldTap ではないので、上の表には入れない。
+    for (layer, row, col), name in KEYMAP_OVERRIDES.items():
+        if layer >= len(grid):
+            raise SystemExit('KEYMAP_OVERRIDES: レイヤー %d が無い' % layer)
+        grid[layer][row][col] = Converted(0, name, kind='custom')
+        holdtap[:] = [c for c in holdtap
+                      if not (c.row == row and c.col == col)]
     return grid, holdtap
 
 
@@ -618,11 +650,15 @@ def render_keycodes_h(ext_mods):
     for index in range(len(ext_mods)):
         lines.append('    %-20s = QK_KB_0 + %d,'
                      % ('STK_MT_%d' % index, N_FIXED_CUSTOM + index))
+    trailing_base = N_FIXED_CUSTOM + len(ext_mods)
+    for index, (name, _kmk, _title, _short) in enumerate(TRAILING_CUSTOM_KEYS):
+        lines.append('    %-20s = QK_KB_0 + %d,' % (name, trailing_base + index))
+    last = trailing_base + len(TRAILING_CUSTOM_KEYS) - 1
     lines += [
         '};',
         '',
         '#define STACKEE_KEYCODE_FIRST QK_KB_0',
-        '#define STACKEE_KEYCODE_LAST  (QK_KB_0 + %d)' % (N_FIXED_CUSTOM + len(ext_mods) - 1),
+        '#define STACKEE_KEYCODE_LAST  (QK_KB_0 + %d)' % last,
         '#define STK_MT_BASE           (QK_KB_0 + %d)' % N_FIXED_CUSTOM,
         '',
         '// 修飾つきタップの HoldTap (default_keymap.c が中身を持つ)。',
@@ -673,6 +709,9 @@ def render_via(keymap_module, ext_mods, kle=None):
             'title': '押さえて %s / 離して %s' % (mod_expr, tap_expr),
             'shortName': 'MT%d' % index,
         })
+    # ★ STK_MT_* のうしろ (番号を動かさないため。CUSTOM_KEYS の上の注記)。
+    for name, _kmk, title, short in TRAILING_CUSTOM_KEYS:
+        custom.append({'name': name, 'title': title, 'shortName': short})
 
     return {
         'name': 'Stackee',

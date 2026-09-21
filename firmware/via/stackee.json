@@ -110,6 +110,11 @@
       "name": "STK_MT_0",
       "title": "押さえて MOD_LSFT / 離して LSFT(KC_SEMICOLON)",
       "shortName": "MT0"
+    },
+    {
+      "name": "STK_MIC_KEY",
+      "title": "押している間だけ「聞き取り中」の顔にする (キー自体は F13 を送る)",
+      "shortName": "Mic"
     }
   ]
 }

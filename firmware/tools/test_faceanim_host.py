@@ -185,6 +185,51 @@ class ConversationTest(unittest.TestCase):
         self.assertEqual(len(set(groups)), 1, '3 秒以内はグループを変えない')
         return frames
 
+    def test_the_mic_key_shows_the_listening_face(self):
+        """STK_MIC_KEY (PC 側のプッシュトゥトーク) を押している間は聞き取り中。"""
+        script = 'mic 1\nt 10\n' + settle(11, count=16)
+        script += 't 259\nt 260\n'
+        _, rows = run(script)
+        self.assertEqual(rows[0]['state'], 'listening')
+        # 本体の録音と同じ 250 ms 送り・同じ 3 コマ。
+        at_249 = [r for r in rows if r['t'] == 259][0]
+        at_250 = [r for r in rows if r['t'] == 260][0]
+        self.assertEqual(at_249['face'], rows[0]['face'])
+        self.assertNotEqual(at_250['face'], rows[0]['face'])
+
+    def test_the_mic_key_frames_are_the_same_three(self):
+        mic = self._frames_at('mic', 250, 3)
+        rec = self._frames_at('rec', 250, 3)
+        self.assertEqual(mic, rec, '録音中と同じコマの並びになるはず')
+
+    def test_releasing_the_mic_key_goes_back_to_idle(self):
+        script = 'mic 1\nt 10\n' + settle(11, count=16)
+        script += 'mic 0\nt 3000\n' + settle(3001, count=16)
+        _, rows = run(script)
+        self.assertEqual(rows[0]['state'], 'listening')
+        self.assertEqual(rows[-1]['state'], 'idle')
+
+    def test_the_mic_key_sits_between_recording_and_thinking(self):
+        """優先順位: speaking > 録音 > mic > 考え中 > カメラ > awake/idle。"""
+        def state(flags, at=10):
+            script = ''.join('%s 1\n' % f for f in flags) + 't %d\n' % at
+            _, rows = run(script)
+            return rows[-1]['state']
+
+        self.assertEqual(state(['mic']), 'listening')
+        # 本体が自分で録っているならそちらが勝つ。
+        self.assertEqual(state(['rec', 'mic']), 'listening')
+        self.assertEqual(state(['speak', 'mic']), 'speaking')
+        # 返答を待っている間に PC へ喋り始めたら耳の顔に戻る。
+        self.assertEqual(state(['busy', 'mic']), 'listening')
+        self.assertEqual(state(['busy']), 'thinking')
+        # カメラより上。
+        self.assertEqual(state(['cam', 'mic']), 'listening')
+        self.assertEqual(state(['cam']), 'camera')
+        # 起動直後の awake より上 (2 秒以内でも聞き取り中)。
+        self.assertEqual(state(['mic'], at=100), 'listening')
+        self.assertEqual(state([], at=100), 'awake')
+
     def test_speaking_frames_never_repeat(self):
         # ★ 発話中だけ **順送りではない**。stackee_face.py の
         #   `self._frame(now, sequential=state != 'speaking')` そのまま:

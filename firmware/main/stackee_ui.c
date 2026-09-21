@@ -456,6 +456,9 @@ static void ui_task(void *unused) {
         stackee_face_inputs_t inputs = {
             .speaking = atomic_load(&ui.talk_speaking),
             .talk_recording = atomic_load(&ui.talk_recording),
+            // ★ PC 側のプッシュトゥトーク (STK_MIC_KEY)。入力タスクが立てた
+            //   印を読むだけ (打鍵の道には何も足さない)。
+            .mic_held = stackee_input_mic_held(),
             .talk_busy = atomic_load(&ui.talk_busy),
             .camera_active = false,             // カメラは段階 4
         };
@@ -723,7 +726,8 @@ static size_t reply_ui_status(long id, char *buf, size_t cap) {
                     "\"state\":%d,\"group\":%d,\"frame\":%d,\"current\":%d,\"target\":%d,"
                     "\"updates\":%lu,\"paints\":%lu,\"skipped\":%lu,\"frames\":%lu,"
                     "\"font\":\"%s\",\"selftest\":%d,"
-                    "\"sub_paints\":%lu,\"sub_len\":%u,\"font16\":%s}",
+                    "\"sub_paints\":%lu,\"sub_len\":%u,\"font16\":%s,"
+                    "\"mic_held\":%s}",
                     id, atomic_load(&ui.ready) ? "true" : "false",
                     ui.view.frozen ? "true" : "false",
                     ui.bar_forced ? "true" : "false",
@@ -734,7 +738,8 @@ static size_t reply_ui_status(long id, char *buf, size_t cap) {
                     ui.have_font ? "h24" : "8x8",
                     atomic_load(&ui.selftest),
                     (unsigned long)ui.sub_paints, (unsigned)strlen(ui.sub_shown),
-                    ui.have_font16 ? "true" : "false");
+                    ui.have_font16 ? "true" : "false",
+                    stackee_input_mic_held() ? "true" : "false");
     unlock();
     return at;
 }

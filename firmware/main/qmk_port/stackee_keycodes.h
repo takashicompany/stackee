@@ -19,10 +19,11 @@ enum stackee_keycodes {
     STK_CAMERA           = QK_KB_0 + 5,
     STK_TOUCH_SCROLL     = QK_KB_0 + 6,
     STK_MT_0             = QK_KB_0 + 7,
+    STK_MIC_KEY          = QK_KB_0 + 8,
 };
 
 #define STACKEE_KEYCODE_FIRST QK_KB_0
-#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 7)
+#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 8)
 #define STK_MT_BASE           (QK_KB_0 + 7)
 
 // 修飾つきタップの HoldTap (default_keymap.c が中身を持つ)。

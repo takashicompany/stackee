@@ -195,6 +195,13 @@ int stackee_face_pick_state(stackee_face_view_t *v,
     if (in->talk_recording) {
         return STACKEE_FACE_LISTENING;
     }
+    // ★ PC 側のプッシュトゥトークを押している間も「聞き取り中」。
+    //   本体の録音 (talk_recording) より下、考え中 (talk_busy) より上。
+    //   本体が自分で録っているならそちらが勝ち、返答を待っている間に
+    //   人が PC へ喋り始めたら耳の顔に戻る、という並びにしてある。
+    if (in->mic_held) {
+        return STACKEE_FACE_LISTENING;
+    }
     if (in->talk_busy) {
         return STACKEE_FACE_THINKING;
     }

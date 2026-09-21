@@ -116,6 +116,9 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 「SAFE_RANGE 以降」と書いているが、VIA / Remap に名前を出すには
 `QK_KB_0` 側でなければならないので、そちらに合わせてある。
 `process_record_kb()` が受け止めて **`false` を返す** (= HID には出さない)。
+★ **例外が 1 つだけ: `STK_MIC_KEY`。** PC 側のプッシュトゥトークに使っている
+キーなので、**`KC_F13` を普通のキーとしてホストへ送る** (`register_code` /
+`unregister_code`)。足したのは「押している間だけ顔を聞き取り中にする」ことだけ。
 
 | 並び | C の名前 | KMK | 中身が入る段階 |
 |---|---|---|---|
@@ -127,6 +130,13 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 | 5 | `STK_CAMERA` | (未使用) | 4 |
 | 6 | `STK_TOUCH_SCROLL` | `KC.TOUCH_SCROLL` | 4 (タッチパッド) |
 | 7〜 | `STK_MT_n` | (上の §3) | 済 |
+| 8 | `STK_MIC_KEY` | (KMK 側は `KC.F13` のまま) | 済 (F13 を送りつつ顔を変える) |
+
+★ **新しい独自キーは `STK_MT_n` の "うしろ" に足す。** VIA の
+`customKeycodes` は並び順がそのままキーコードの番号になり、その番号は
+**VIA で変えた配列として NVS に保存されている**。途中に足すとうしろが
+1 つずつずれて、保存済みの配列の意味が黙って変わる。
+`tools/gen_keymap.py` の `TRAILING_CUSTOM_KEYS` がその置き場。
 
 `KC.RESET` だけは独自キーにしていない。QMK の `QK_BOOT` をそのまま使い、
 行き先を **ROM の USB ダウンロードモード** にしてある

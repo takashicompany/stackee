@@ -142,10 +142,13 @@ POS_LANG1 = (3, 6)      # レイヤー 0: LT(1, LANG1)
 POS_TALK = (4, 5)       # レイヤー 0: KC.TALK (独自キー)
 POS_SPC = (4, 6)        # レイヤー 0: LT(2, SPC, prefer_hold=True)
 POS_VOLDN = (3, 0)      # レイヤー 0: KC.STK_VOLDN (独自キー)
+POS_MIC = (3, 9)        # レイヤー 0: STK_MIC_KEY (F13 を送る独自キー)
 
 # 独自キーは「何をしたいか」で出る (qmk_port.h の stackee_key_action_t)。
 STK_TALK = 'TALK'
 STK_VOLDN = 'VOLDN'
+STK_MIC = 'MIC_KEY'
+KC_F13 = 0x68
 
 
 def tap(pos, at, hold_ms=40):
@@ -304,6 +307,27 @@ class CustomKeyTest(unittest.TestCase):
         out = after(lines, 'vol')
         self.assertEqual(out, ['CUSTOM %s 1' % STK_VOLDN,
                                'CUSTOM %s 0' % STK_VOLDN])
+
+    def test_the_mic_key_still_sends_f13(self):
+        """★ STK_MIC_KEY だけは独自キーでも **HID に出る**。
+
+        PC 側のプッシュトゥトークに使っているキーなので、ホストから見た
+        振る舞いは今までの KC_F13 とまったく同じでないといけない。
+        足したのは「押している間だけ顔を聞き取り中にする」ことだけ。
+        """
+        lines = run('t 100\nmark mic\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        out = after(lines, 'mic')
+        self.assertEqual(out, ['CUSTOM %s 1' % STK_MIC,
+                               kb(0, KC_F13),
+                               'CUSTOM %s 0' % STK_MIC,
+                               NONE])
+
+    def test_the_mic_key_looks_exactly_like_a_plain_f13(self):
+        # HID に出るものが「素の F13 を押して離した」のと 1 バイトも違わない。
+        mic = [l for l in after(
+            run('t 100\nmark mic\n' + tap(POS_MIC, 100, 50) + 't 400\n'), 'mic')
+            if l.startswith('KB ')]
+        self.assertEqual(mic, [kb(0, KC_F13), NONE])
 
 
 class ExtendedModTapTest(unittest.TestCase):
