@@ -27,6 +27,18 @@ bool      stackee_codec_ready(void);
 esp_err_t stackee_es7210_setup(void);
 esp_err_t stackee_es7210_enable(bool on);
 
+// マイクを開ける。**全設定は 1 回だけ**で、2 回目からは電源を上げ直すぶんだけ
+// (実測 44 ms → 十数 ms)。did_full に「全設定を通したか」が返る (NULL 可)。
+// ★ 印の考え方は stackee_micopen.h。
+esp_err_t stackee_es7210_open(bool *did_full);
+
+// 「ほかの経路が IC を触った (かもしれない)」。次にマイクを開けるとき
+// 全設定からやり直す。★ 触ったほうが自分で申告する。
+void stackee_es7210_invalidate(void);
+
+// 全設定した回数 / 電源だけで済んだ回数 / いま印が立っているか。
+void stackee_es7210_open_stats(uint32_t *full, uint32_t *light, bool *dirty);
+
 // ---- 立ち上がりの計測 (research/stackee/record_onset_2026-09-21.md) --------
 // 直前の setup / enable が I2C に費やした時間 [us]。押下 → 音が録れ始めるまでの
 // うち「そもそも音を取っていない」ぶんの支配項なので、数字で見えるようにする。

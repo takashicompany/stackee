@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 
 #include "stackee_board.h"
+#include "stackee_micopen.h"
 #include "stackee_volume.h"
 
 static const char *TAG = "codec";
@@ -114,6 +115,9 @@ bool stackee_codec_ready(void) {
 static uint32_t s_setup_us;
 static uint32_t s_enable_us;
 
+// 全設定が要るかの印 (stackee_micopen.h)。
+static stackee_micopen_t s_open;
+
 uint32_t stackee_es7210_last_setup_us(void) { return s_setup_us; }
 uint32_t stackee_es7210_last_enable_us(void) { return s_enable_us; }
 
@@ -123,6 +127,19 @@ int stackee_es7210_csm_state(void) {
     }
     int v = r8(s_es, ES_CHIP_STATUS);
     return (v < 0) ? -1 : (v & 0x03);
+}
+
+// ★ 電源を上げ直したあとの最小限の復帰 (A1)。
+//   stackee_es7210_enable(false) が落とすのは
+//   0x47..0x4A / 0x4B / 0x4C (マイクの電源)、0x40 (アナログ)、
+//   0x01 (クロック)、0x06 (パワーダウン) の 4 か所だけ。
+//   **ゲイン (0x43/0x44) も SDP (0x11/0x12) も残っている**ので、
+//   es7210_mic_select() を丸ごともう一度走らせる必要は無い。
+//   25 往復 = 約 9 ms を毎回払っていたのをやめる。
+static void es7210_mics_on(void) {
+    u8(s_es, ES_CLOCK_OFF, 0x0B, 0x00);     // MIC1/2 のクロックを入れる
+    w8(s_es, ES_MIC12_POWER, 0x00);         // MIC1/2 の電源を入れる
+    // MIC3/4 は使わないので 0xFF のまま (enable(false) が落としたまま)。
 }
 
 // es7210.py の _mic_select_config()。MIC1 + MIC2 の 2ch = 通常の I2S。
@@ -187,6 +204,49 @@ esp_err_t stackee_es7210_setup(void) {
     return err;
 }
 
+// 書いた値が残っているか (1 往復だけ)。0x02 = MAINCLK に 0xC1 を書いている。
+static bool es7210_alive(void) {
+    return r8(s_es, ES_MAINCLK) == 0xC1;
+}
+
+void stackee_es7210_invalidate(void) {
+    stackee_micopen_invalidate(&s_open);
+}
+
+void stackee_es7210_open_stats(uint32_t *full, uint32_t *light, bool *dirty) {
+    if (full)  { *full = s_open.full; }
+    if (light) { *light = s_open.light; }
+    if (dirty) { *dirty = s_open.dirty || !s_open.configured; }
+}
+
+esp_err_t stackee_es7210_open(bool *did_full) {
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // ★ 「まだ書いていない / 誰かが触った」ときだけ 1 往復読んで確かめる。
+    //   普段 (印が立っていない) は読みにも行かない。
+    bool full = stackee_micopen_needs_full(&s_open, true);
+    if (!full) {
+        // 書いた値が残っているかを 1 つだけ見る。化けていたら全設定へ。
+        full = !es7210_alive();
+    }
+    esp_err_t err;
+    if (full) {
+        int64_t t0 = esp_timer_get_time();
+        err = stackee_es7210_setup();
+        s_setup_us = (uint32_t)(esp_timer_get_time() - t0);
+    } else {
+        int64_t t0 = esp_timer_get_time();
+        err = stackee_es7210_enable(true);
+        s_setup_us = (uint32_t)(esp_timer_get_time() - t0);
+    }
+    stackee_micopen_done(&s_open, full, err == ESP_OK);
+    if (did_full) {
+        *did_full = full;
+    }
+    return err;
+}
+
 esp_err_t stackee_es7210_enable(bool on) {
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
@@ -202,7 +262,7 @@ esp_err_t stackee_es7210_enable(bool on) {
         for (int i = 0; i < 4; i++) {
             w8(s_es, (uint8_t)(ES_MIC1_POWER + i), 0x08);
         }
-        es7210_mic_select();
+        es7210_mics_on();
         w8(s_es, ES_ANALOG, 0x43);
         w8(s_es, ES_RESET, 0x71);
         w8(s_es, ES_RESET, 0x41);

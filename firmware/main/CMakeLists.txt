@@ -44,6 +44,7 @@ idf_component_register(
         "stackee_talksm.c"
         "stackee_http.c"
         "stackee_codec.c"
+        "stackee_micopen.c"
         "stackee_audio.c"
         "stackee_volume_core.c"
         "stackee_volume.c"

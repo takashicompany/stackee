@@ -485,11 +485,12 @@ python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
 python3 firmware/tools/test_subtitle_host.py   # 字幕: フォント・帯・一次回答の行 (33 件)
 python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 (40 件、§25)
+python3 firmware/tools/test_micopen_host.py    # マイクの開け方の印 (8 件、§11-5)
 python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **479 件**。どれも実機に触らない。
+全部で **487 件**。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる

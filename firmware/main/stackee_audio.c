@@ -65,6 +65,7 @@ static struct {
     bool chans_ready;           // 口を作り終えたか (作るのは一度だけ)
     esp_err_t chans_err;        // 作るのに失敗したときの理由 (作り直さない)
     int  amp_was_on;
+    uint32_t mic_open_full;     // ES7210 を全設定した回数 (status に出す)
 
     _Atomic bool null_out;      // ヌル出力 (I2S にも AW88298 にも触らない)
 
@@ -307,11 +308,17 @@ static esp_err_t enter_mic_once(void) {
     //   以後ゼロしか出さない (2026-09-18 実測: 常設化の 1 版目は setup のあとに
     //   MCLK を出していて samples は出るのに rms=0 だった)。
     mclk_out(true);
-    err = stackee_es7210_setup();
+    // ★ 全設定は 1 回だけ。2 回目からは電源を上げ直すぶんだけ (A2)。
+    //   印が立っていれば自分で全設定に戻る (stackee_micopen.h)。
+    bool did_full = false;
+    err = stackee_es7210_open(&did_full);
     if (err != ESP_OK) {
+        // 転んだ。次は全設定からやり直す。
+        stackee_es7210_invalidate();
         mclk_out(false);
         return err;
     }
+    a.mic_open_full += did_full ? 1 : 0;
     // ★ enable のたびに DMA の読み位置と受信待ちの行列が空になる
     //   (ESP-IDF が RX の行列を enable で reset する)。だから前の再生中に
     //   溜まった音が録音の頭に混ざらない。
@@ -1261,12 +1268,16 @@ static size_t audio_console(const char *cmd, const char *line, long id,
                    atomic_load(&a.null_out) ? "true" : "false");
     }
     if (strcmp(cmd, "audio.status") == 0) {
+        uint32_t mic_full = 0, mic_light = 0;
+        bool mic_dirty = false;
+        stackee_es7210_open_stats(&mic_full, &mic_light, &mic_dirty);
         return put(buf, cap, 0,
                    "{\"id\":%ld,\"ok\":1,\"mode\":%d,\"null\":%s,\"playing\":%s,"
                    "\"is_ack\":%s,\"ack\":%d,\"ack_sub\":%s,\"ack_lines\":%d,"
                    "\"pos\":%d,\"samples\":%d,\"played\":%lu,"
                    "\"play_ms\":%lu,\"failed\":%s,\"acks\":%d,\"volume\":%d,"
-                   "\"records\":%lu,\"plays\":%lu,\"codec\":%s,\"amp\":%s}",
+                   "\"records\":%lu,\"plays\":%lu,\"codec\":%s,\"amp\":%s,"
+                   "\"mic_full\":%lu,\"mic_light\":%lu,\"mic_dirty\":%s}",
                    id, (int)a.mode, atomic_load(&a.null_out) ? "true" : "false",
                    a.play_active ? "true" : "false",
                    a.play_is_ack ? "true" : "false",
@@ -1276,7 +1287,9 @@ static size_t audio_console(const char *cmd, const char *line, long id,
                    a.ack_count, stackee_volume_percent(),
                    (unsigned long)a.stat_records, (unsigned long)a.stat_plays,
                    stackee_codec_ready() ? "true" : "false",
-                   stackee_aw88298_powered() ? "true" : "false");
+                   stackee_aw88298_powered() ? "true" : "false",
+                   (unsigned long)mic_full, (unsigned long)mic_light,
+                   mic_dirty ? "true" : "false");
     }
     if (strcmp(cmd, "talk.inject") == 0) {
         return reply_talk_inject(id, line, buf, cap);
