@@ -264,8 +264,15 @@ esp_err_t stackee_es7210_enable(bool on) {
         }
         es7210_mics_on();
         w8(s_es, ES_ANALOG, 0x43);
+        // ★ 状態機械 (CSM) を**もう一度走らせる**。0x00 の bit0 = CSM_ON を
+        //   落としてから上げる。
+        //   これが要るのは、CSM の初期化期間 (0x09/0x0A = 0x30 → 16 kHz で
+        //   約 96 ms) が **アナログを上げ直したときの突入を隠している**から。
+        //   ここを飛ばすと録音の頭 50 ms の RMS が 140 → 21,800 に跳ね上がる
+        //   (実測。research/stackee/record_onset_2026-09-21.md と README §11-5)。
         w8(s_es, ES_RESET, 0x71);
-        w8(s_es, ES_RESET, 0x41);
+        w8(s_es, ES_RESET, 0x40);       // CSM_ON = 0
+        w8(s_es, ES_RESET, 0x41);       // CSM_ON = 1 → 初期化からやり直す
     } else {
         for (int i = 0; i < 4; i++) {
             w8(s_es, (uint8_t)(ES_MIC1_POWER + i), 0xFF);
