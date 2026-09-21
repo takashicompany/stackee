@@ -245,9 +245,14 @@ firmware/tools/install_assets.sh --only font16.bin   # 字幕のフォント (23
 python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 ```
 
-素材の出どころは 2 つある。`firmware/kmk/stackee_assets/` (現行 CircuitPython 版と
-共用) と `firmware/assets/` (ネイティブ版だけで使うもの = `font16.bin`)。
-`install_assets.sh` は前者を先に見て、無ければ後者から送る。
+★ **出どころは `firmware/assets/`。** ここが「道具が作って検査した
+バイト列」で、`tools/import_faces.py` が書き、`tools/render_expected.py` や
+`tools/test_subtitle_host.py` がこれを読んで期待値を組む。**送るものと
+検査したものを同じにする。** 開発元 (非公開) にしか無いものだけ
+`firmware/kmk/stackee_assets/` から拾う。
+(2026-09-21 まで逆で、古い manifest が実機へ行っていた。§23-9)
+
+`--only X` は **X だけ**を送る (既定の一式は送らない)。
 
 書き込みのたびにフラッシュを消すので、**変わったものだけ**送ること。
 反映には再起動が要る。
@@ -2724,12 +2729,66 @@ API は `stackee_ui_set_subtitle(const char *utf8)` のまま。中身が
 `-1`)、`ack_sub` (その字幕を帯に出しているか)、`ack_lines` (字幕を持って
 いる一次回答の本数)。
 
+#### 実機での確認 (`e6075c4`、full、2026-09-21)
+
+**待機中の帯** — `lcd.crc y=250 h=70` = **2186780939**。
+`subtitle_expected.py` が描いた「黒 240x70・文字なし」と一致。
+
+**一次回答 5 本を名指しで** (`audio.play i=N` → 帯の CRC32):
+
+| i | ファイル | 本体の CRC32 | 期待値 | 行 |
+|---|---|---|---|---|
+| 0 | `ack_01.pcmz` | 1220270829 | 1220270829 | 「わかったのだ。」/「少し待っていてほしいのだ。」 |
+| 1 | `ack_02.pcmz` | 3384805615 | 3384805615 | 「了解なのだ。」/「ちょっと考えるのだ。」 |
+| 2 | `ack_03.pcmz` | 2343289232 | 2343289232 | 「聞こえたのだ。」/「今から確認するのだ。」 |
+| 3 | `ack_04.pcmz` | 584589839 | 584589839 | 「任せてほしいのだ。」/「少し待っていてね。」 |
+| 4 | `ack_05.pcmz` | 3500596394 | 3500596394 | 「うん、」/「考えてみるのだ。」 |
+
+**5/5 一致**。どれも鳴り終わったあと帯は黒 (2186780939) に戻る。
+
+**無音 (`audio.null`) の往復 3 回** — 200 ms ごとに `audio.status` /
+`talk.status` / `ui.status` / `lcd.crc y=250 h=70` を読んだ:
+
+```
+往復 1  返答「うん、出かけるときは傘を忘れずにね。」
+  t=0.148  upload   ack=3  ack_sub=true   len=55  crc= 584589839  ← 一次回答 3 の行
+  t=6.235  upload   ack=-1 ack_sub=false  len=0   crc=2186780939  ← 黒 (鳴り終わった)
+  t=23.50  playing  page=0                len=9   crc=3132235215  ← 返答「うん、」
+  t=24.29  playing  page=1                len=55  crc=2534176427  ← +「出かけるときは傘を忘れずにね。」
+  終わったあと                                    crc=2186780939  ← 黒
+```
+
+3 往復とも同じ歩き方 (一次回答の行 → 黒 → 返答の頁 → 黒)。**CRC32 は
+どれも `subtitle_expected.py` の期待値と一致**(上の「返答」の 2 つは、
+サーバと同じ規則で割った行から描いたもの)。
+
 ★ **manifest.json は FAT に送り直す必要がある。** 像を書いても素材は
 変わらない。
 
 ```
-firmware/tools/install_assets.sh --only manifest.json
+firmware/tools/install_assets.sh --only manifest.json --transport hid
 ```
+
+#### `install_assets.sh` の 2 つの欠陥 (同じ日に踏んで直した)
+
+**1 回目の `--only manifest.json` は古い manifest を送っていた。**
+`ack_lines` が 0 本のままで気づいた。
+
+* **出どころが逆だった。** 開発元 (非公開) では現行 CircuitPython 版の
+  素材 `firmware/kmk/stackee_assets` を**先に**見ていたので、
+  `tools/import_faces.py` が書いた `firmware/assets/manifest.json`
+  (5,584 B、`lines` つき) ではなく、古いほう (5,012 B) が実機へ行っていた。
+  → **`firmware/assets` を先に見る**ようにした。道具が作って検査した
+  バイト列と、実機へ送るバイト列を同じにする。非公開側にしか無いものは
+  そちらから拾う (いまはそういうものは無い。`font16.bin` は公開側にしか無い)。
+* **`--only` が「それだけ」ではなかった。** 既定の一式 (目録・差分表・
+  アイコン・フォント) を送ったうえで、名指しのものを**もう一度**送っていた。
+  同じファイルを 2 回書いてフラッシュを余分に消す。
+  → `--only` は名指しの 1 つだけを送る。
+
+実測: 直したあと `--only manifest.json --transport hid` は
+**5,584 B / 401 ms / フラッシュ消去 1 回ぶん**で終わる
+(直す前は 5 ファイル + 重複で 12 回ぶん)。
 
 ## 24. 会話が「通信に失敗しました」で 7 秒で終わる — 内蔵 RAM の枯渇 (2026-09-20)
 

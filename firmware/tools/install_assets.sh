@@ -34,14 +34,18 @@ FW_DIR=$(dirname "$HERE")
 BASE=$(cd "$FW_DIR/.." && pwd)
 OUTER=$(cd "$BASE/.." && pwd)
 
-# 素材はこのリポジトリの firmware/assets に揃えてある (これだけで足りる)。
+# ★ 素材の出どころは **firmware/assets**。ここが「道具が作って検査した
+#   バイト列」で、tools/import_faces.py が書き、tools/render_expected.py や
+#   tools/test_subtitle_host.py がこれを読んで期待値を組む。
+#   **送るものと検査したものを同じにする**のがここの唯一の約束。
+#
+#   2026-09-21 まで、開発元では非公開の現行 CircuitPython 版
+#   (firmware/kmk/stackee_assets) を**先に**見ていた。そのせいで
+#   manifest.json に acks[].lines を足したのに、実機へ行くのは古いほうで、
+#   本体は字幕を持たないままだった (README §23-9)。順番を逆にしてある。
 SRC="$FW_DIR/assets"
-# 開発元では現行 CircuitPython 版の素材 (非公開) が真の出所なので、
-# **あればそちらを先に見る**。無ければ上の firmware/assets だけを使う。
+# 非公開側にしか無いものだけ、そちらから拾う (無ければ無視)。
 SRC2="$OUTER/firmware/kmk/stackee_assets"
-if [ -d "$SRC2" ]; then
-    tmp="$SRC"; SRC="$SRC2"; SRC2="$tmp"
-fi
 # settings.toml (パスワードとトークン入り) は非公開側にしかない。
 SETTINGS_SRC="$OUTER/firmware/kmk/settings.toml"
 
@@ -97,14 +101,23 @@ SMALL="manifest.json changes.bin status_h24.bdf status_icons.bin status_icons.js
 #   (--only font16.bin)。中身は東雲フォント (Public Domain)。
 BIG="faces.bin font16.bin ack_01.pcmz ack_02.pcmz ack_03.pcmz ack_04.pcmz ack_05.pcmz"
 
-echo "==> 目録とアイコンとフォント"
-for name in $SMALL; do
-    put "$name"
-done
-
+# ★ --only は「それだけ」。2026-09-21 まで既定の一式を送ったうえで
+#   名指しのものをもう一度送っていた (同じものを 2 回書いてフラッシュを
+#   余分に消していた)。
 if [ -n "$ONLY" ]; then
-    echo "==> 指定されたもの"
+    echo "==> 指定されたものだけ"
     put "$ONLY"
+    NOTHING_ELSE=1
+else
+    NOTHING_ELSE=0
+    echo "==> 目録とアイコンとフォント"
+    for name in $SMALL; do
+        put "$name"
+    done
+fi
+
+if [ "$NOTHING_ELSE" = "1" ]; then
+    :
 elif [ "$ALL" = "1" ]; then
     echo "==> 顔と一次回答 (大きい。フラッシュを消す回数が増える)"
     for name in $BIG; do
