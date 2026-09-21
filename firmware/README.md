@@ -898,11 +898,23 @@ python3 firmware/tools/nvs_dump.py nvs.bin
 ```
 python3 firmware/kmk/tools/stackee_console_client.py key.inject
 # {"cmd":"key.inject","kc":"F24","hold_ms":30}
+# {"cmd":"key.inject","kc":32264,"hold_ms":1500,"wait":false}   押し始めてすぐ返る
 ```
 
 配線の無いスロット (ROW4 / COL0) にキーコードを一時的に置き、**TCA8418 の
 イベントとして**押して離す。デバウンス → QMK → 送信キュー → hid_out と、
 普段の打鍵とまったく同じ道を通る。終わったら元に戻す。
+
+★ **`"wait":false` は押し始めてすぐ返る** (2026-09-21 に足した)。既定は
+離し終わるまで待つので、その間コンソールのタスクが止まり **`ui.status` や
+`lcd.crc` を読めない**。押している最中の画面を見たいとき (`STK_MIC_KEY` の
+表情など) に使う。**遅延は返らない**ので、遅延を測るときは既定のまま。
+
+★ 押している時間の上限は **3000 ms**。2026-09-21 まで 2 つの落とし穴があり、
+`hold_ms` が 1000 を超えると黙って 30 ms になり、さらに「押下レポートが
+出ないまま 500 ms」の諦め判定が**出ていても**効いていたので、
+1500 ms を頼んでも実機では約 600 ms しか押していなかった。どちらも直した
+(諦めるのはレポートが出ていないときだけ)。
 
 応答:
 
@@ -967,6 +979,34 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 毎周読むだけ。**打鍵の道には何も足していない。**
 
 `ui.status` に `mic_held` が出る。
+
+**実機での確認** (`cef8f0b`、full、2026-09-21)。`key.inject` で
+`STK_MIC_KEY` (`0x7E08`) を **1.5 秒押し**、100 ms ごとに `ui.status` と
+`lcd.crc y=50 h=200` を読んだ。顔の CRC32 は `render_expected.py` の
+期待値と突き合わせてある (下の「顔」は推測ではなく **CRC が合ったコマ**)。
+
+```
+押す前                                   state=idle  mic_held=False
+t[ms]  state      grp frm cur  mic    crc32        顔 (CRC で特定)
+103    listening  0   2   7    True    267893468   12 listening/a_02
+286    listening  0   2   12   True    267893468   12 listening/a_02
+484    listening  0   0   10   True   1899617587   10 listening/a_00
+669    listening  0   1   11   True   3856223340   11 listening/a_01
+849    listening  0   2   11   True    267893468   12 listening/a_02
+1029   listening  0   2   12   True    267893468   12 listening/a_02
+1212   listening  0   0   10   True   1899617587   10 listening/a_00
+1395   listening  0   1   11   True   3856223340   11 listening/a_01
+1766   idle       0   0   2    False  4242216851    2 idle/a_00
+```
+
+聞き取り中の 3 コマ (`listening/a_00` `a_01` `a_02` = 顔 10/11/12) が
+**250 ms ごとに順送り**で出て、離すと `idle` に戻っている。
+`key.inject` は **本物の F13 を Mac へ送る**が、無害なキーなので
+これだけは注入してよいことにしてある (ほかのキーは注入しない)。
+
+★ `ui.status` と `lcd.crc` は別々の往復なので、顔が変わる 250 ms の境目を
+またぐと `cur` と CRC のコマが 1 つずれて見えることがある (上の t=849)。
+**画面そのものは常に完全な 1 コマ**で、CRC はどれも期待値と一致している。
 
 ### 10-2. 実機に触らない確認
 
