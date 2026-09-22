@@ -3533,3 +3533,31 @@ link** で回す。像なしの `--commit` が `app.info` → `ota.commit` → `
 * **段階 3 (ロールバック) と段階 4 (Wi-Fi 入口)。** 入れていない。
   25-6 の「ブートローダが自分で見捨てる」は**読み込めない像**にしか効かず、
   **読み込めるが動かない像**は救えない。
+
+
+## PCマイク入力の表情（案11）
+
+`MIC(kc)` を押している間は `microphone` を表示する。マイクのヘッドが
+小→中→大と膨らみ、右上の3本線が短い→長い→消灯へ切り替わる。
+3コマは550 / 550 / 650 ms（1周1.75秒）で、押すたびに先頭から再開する。
+本体AIへの録音は従来の耳の `listening`。優先順位は発話 > 本体録音 >
+PCマイク > 考え中 > カメラ > 起動/待機。
+
+素材は35枚。既存の0〜31はそのままで、32〜34にPCマイクを追加した。
+表示する前に、ファームと **`manifest.json`・`faces.bin`・`changes.bin` の
+3ファイルを同じ版に揃える**必要がある。アプリのOTAだけでは素材は更新されない。
+`tools/install_assets.sh --only <ファイル名>` でそれぞれを送信できる。
+素材は起動時に読み込むため、反映には再起動が必要。
+
+動作確認用のコマンド:
+
+```
+face.set state=microphone group=0 frame=0
+face.set state=microphone group=0 frame=1
+face.set state=microphone group=0 frame=2
+face.auto
+```
+
+ホスト検査は `tools/test_faceanim_host.py`（入力の優先順位とタイミング）、
+`tools/test_render_host.py`（全35枚の描画）、`tools/test_microphone_assets.py`
+（顔と手を固定した差分・字幕領域へのはみ出し）で行う。

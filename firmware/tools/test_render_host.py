@@ -7,8 +7,8 @@
      stackee_bdf.c / stackee_faceanim.c / stackee_crc32.c) を Mac 用に
      ビルドして本物の素材を通し、出てきた CRC32 が
      tools/render_expected.py の期待値と 1 ビットも違わないこと。
-     32 表情ぶん + バー 6 状態 + 全面。
-  2. その 32 表情は **changes.bin の差分だけで** 作ること
+     35 表情ぶん + バー 6 状態 + 全面。
+  2. その 35 表情は **changes.bin の差分だけで** 作ること
      (顔 0 を全面で描いたあと、1 枚ずつ差分で寄せる)。全面で描いた絵と
      同じ CRC になれば、差分表の読み方が合っている。
   3. タイル番号・色・文字・配置の決め方が firmware/kmk/stackee_icons.py と
@@ -105,15 +105,15 @@ class RenderTest(unittest.TestCase):
         cls.faces, cls.bars, cls.extra = parse_render(run())
         cls.expected = expected_mod.Renderer().expected()
 
-    def test_all_32_faces_match(self):
-        mismatched = [i for i in range(32)
+    def test_all_faces_match(self):
+        mismatched = [i for i in range(35)
                       if self.faces[i] != self.expected['faces'][i]]
         self.assertEqual(mismatched, [],
                          '差分で作った顔が全面で描いた顔と違う: %r' % mismatched)
 
     def test_face_count(self):
-        self.assertEqual(self.extra['count'], 32)
-        self.assertEqual(self.expected['count'], 32)
+        self.assertEqual(self.extra['count'], 35)
+        self.assertEqual(self.expected['count'], 35)
 
     def test_bars_match(self):
         for i, (index, crc, name) in enumerate(self.bars):
@@ -142,10 +142,10 @@ class RenderTest(unittest.TestCase):
         #   (240x240) は 1 バイトも変わっていないことも一緒に見る。
         import zlib
         raw = zlib.decompress((ASSETS / 'faces.bin').read_bytes())
-        self.assertEqual(len(raw), 240 * 240 // 2 * 32)
+        self.assertEqual(len(raw), 240 * 240 // 2 * 35)
         self.assertEqual(zlib.crc32(raw), self.expected['assets']['sheet_crc'])
-        trimmed, _lost = expected_mod.trim_faces(raw, 32)
-        self.assertEqual(len(trimmed), 240 * 200 // 2 * 32)
+        trimmed, _lost = expected_mod.trim_faces(raw, 35)
+        self.assertEqual(len(trimmed), 240 * 200 // 2 * 35)
         self.assertEqual(self.extra['faces_crc'], zlib.crc32(trimmed))
 
     def test_the_c_and_python_sides_trim_the_same_rows(self):
@@ -154,7 +154,7 @@ class RenderTest(unittest.TestCase):
                 expected_mod.FACE_TRIM_TOP, expected_mod.FACE_TRIM_BOTTOM,
                 expected_mod.FACE_ROWS)
         self.assertEqual(self.extra['face_geom'], want)
-        self.assertEqual(self.extra['faces_len'], 240 * 200 // 2 * 32)
+        self.assertEqual(self.extra['faces_len'], 240 * 200 // 2 * 35)
 
 
 class TablesTest(unittest.TestCase):
@@ -243,11 +243,11 @@ class ExpectedUnitTest(unittest.TestCase):
         cls.renderer = expected_mod.Renderer()
 
     def test_asset_sizes(self):
-        self.assertEqual(len(self.renderer.faces_raw), 240 * 240 // 2 * 32)
-        self.assertEqual(len(self.renderer.faces), 240 * 200 // 2 * 32)
-        self.assertEqual(len(self.renderer.changes), 32 * 32 * 4)
+        self.assertEqual(len(self.renderer.faces_raw), 240 * 240 // 2 * 35)
+        self.assertEqual(len(self.renderer.faces), 240 * 200 // 2 * 35)
+        self.assertEqual(len(self.renderer.changes), 35 * 35 * 4)
         self.assertEqual(len(self.renderer.icons_raw), 6 * 24 * 18)
-        self.assertEqual(self.renderer.count, 32)
+        self.assertEqual(self.renderer.count, 35)
 
     def test_bdf(self):
         ascent, glyphs = self.renderer.font
@@ -297,17 +297,17 @@ class ExpectedUnitTest(unittest.TestCase):
 
     def test_the_trim_keeps_the_sheet_untouched(self):
         # 切り詰めは**描くときだけ**。faces.bin そのものは 240x240 のまま。
-        trimmed, lost = expected_mod.trim_faces(self.renderer.faces_raw, 32)
+        trimmed, lost = expected_mod.trim_faces(self.renderer.faces_raw, 35)
         self.assertEqual(trimmed, self.renderer.faces)
-        self.assertEqual(len(lost), 32)
+        self.assertEqual(len(lost), 35)
 
     def test_the_trim_loses_nothing(self):
-        """★ 上 29 / 下 11 では **1 画素も落ちない** (32 コマ全数)。
+        """★ 上 29 / 下 11 では **1 画素も落ちない** (35 コマ全数)。
 
         素材を差し替えたらここが落ちる。そのときは数え直して、
         落ちない切り詰め (= 全コマの余白の最小値) に取り直すこと。
         """
-        _trimmed, lost = expected_mod.trim_faces(self.renderer.faces_raw, 32)
+        _trimmed, lost = expected_mod.trim_faces(self.renderer.faces_raw, 35)
         hit = {row['frame']: (row['top'], row['bottom'])
                for row in lost if row['top'] or row['bottom']}
         self.assertEqual(hit, {}, '切り詰めで非背景画素が落ちている: %r' % hit)
@@ -323,9 +323,9 @@ class ExpectedUnitTest(unittest.TestCase):
             return sum((b >> 4 != 15) + (b & 0x0F != 15)
                        for b in raw[at:at + row_bytes])
 
-        top = min(next(y for y in range(240) if nonbg(f, y)) for f in range(32))
+        top = min(next(y for y in range(240) if nonbg(f, y)) for f in range(35))
         bottom = min(239 - next(y for y in range(239, -1, -1) if nonbg(f, y))
-                     for f in range(32))
+                     for f in range(35))
         self.assertEqual((top, bottom),
                          (expected_mod.FACE_TRIM_TOP,
                           expected_mod.FACE_TRIM_BOTTOM))
@@ -352,9 +352,9 @@ class ExpectedUnitTest(unittest.TestCase):
 
     def test_expected_arrays_are_distinct(self):
         exp = self.renderer.expected()
-        # 32 表情が全部違う絵になっている (同じ CRC が並んだら素材か
+        # 35 表情が全部違う絵になっている (同じ CRC が並んだら素材か
         # 読み方が壊れている)。
-        self.assertEqual(len(set(exp['faces'])), 32)
+        self.assertEqual(len(set(exp['faces'])), 35)
         self.assertEqual(len(set(exp['bars'])), 6)
 
 

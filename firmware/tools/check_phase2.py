@@ -286,18 +286,18 @@ def verdicts(result):
 
     selftest = result.get('selftest')
     if selftest is None:
-        out.append(('32 表情', None, '--no-selftest で飛ばした'))
+        out.append(('%d 表情' % expected['count'], None, '--no-selftest で飛ばした'))
         out.append(('ステータスバー', None, '--no-selftest で飛ばした'))
     elif selftest.get('state') != 'done':
-        out.append(('32 表情', False, 'ui.selftest が終わらなかった: %r' % selftest))
+        out.append(('%d 表情' % expected['count'], False, 'ui.selftest が終わらなかった: %r' % selftest))
     else:
         bad_faces = result.get('bad_faces') or []
         bad_bars = result.get('bad_bars') or []
-        out.append(('32 表情 (y=%d h=%d)' % (expected['face_y'],
+        out.append(('%d 表情 (y=%d h=%d)' % (expected['count'], expected['face_y'],
                                                expected['face_rows']),
                     not bad_faces,
                     '%d/%d 一致%s (%s ms)'
-                    % (32 - len(bad_faces), 32,
+                    % (expected['count'] - len(bad_faces), expected['count'],
                        '' if not bad_faces else ' / 違うのは %r' % bad_faces,
                        selftest.get('ms'))))
         out.append(('ステータスバー', not bad_bars,

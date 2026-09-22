@@ -457,7 +457,7 @@ static void ui_task(void *unused) {
             .speaking = atomic_load(&ui.talk_speaking),
             .talk_recording = atomic_load(&ui.talk_recording),
             // ★ PC 側のプッシュトゥトーク (MIC(kc))。入力タスクが立てた
-            //   印を読むだけ (打鍵の道には何も足さない)。
+            //   印を読むだけ (打鍵の道には何も足さない)。microphoneの3コマを表示。
             .mic_held = stackee_input_mic_held(),
             .talk_busy = atomic_load(&ui.talk_busy),
             .camera_active = false,             // カメラは段階 4

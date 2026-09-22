@@ -21,12 +21,13 @@ typedef enum {
     STACKEE_FACE_THINKING,
     STACKEE_FACE_SPEAKING,
     STACKEE_FACE_CAMERA,
+    STACKEE_FACE_MICROPHONE,
     STACKEE_FACE_STATES,
 } stackee_face_state_t;
 
 #define STACKEE_FACE_MAX_GROUPS  12
 #define STACKEE_FACE_MAX_FRAMES  12
-#define STACKEE_FACE_MAX_COUNT   32
+#define STACKEE_FACE_MAX_COUNT   35
 
 // 打鍵のあと、この時間は待機中の表情切り替え (まばたき) を始めない [ms]。
 #define STACKEE_FACE_TYPING_PAUSE_MS 1000
@@ -34,6 +35,9 @@ typedef enum {
 #define STACKEE_FACE_GROUP_MS        3000
 #define STACKEE_FACE_THINKING_MS     700
 #define STACKEE_FACE_FRAME_MS        250
+// PC マイク: 案11の呼吸 + 3本線の短い/長い/消灯。
+#define STACKEE_FACE_MIC_STEP_MS     550
+#define STACKEE_FACE_MIC_LAST_MS     650
 // 起動直後に awake を出す時間 [ms] と、撮影のあと camera を保つ時間 [ms]。
 #define STACKEE_FACE_AWAKE_MS        2000
 #define STACKEE_FACE_CAMERA_HOLD_MS  1500
@@ -65,8 +69,8 @@ typedef struct {
     bool speaking;              // stackee_halfduplex の再生中
     bool talk_recording;        // 録音中
     // ★ PC 側のプッシュトゥトーク (MIC(kc)。既定は MIC(KC_F13)) を押している。
-    //   本体は録音していないが、**人は喋っている**ので同じ顔にする。
-    //   新しい状態は作らない (listening をそのまま使う)。
+    //   本体の会話録音とは別のPC向け音声入力。
+    //   AIへの録音 (listening) と区別して microphone を表示する。
     bool mic_held;
     bool talk_busy;             // 録音以外で会話中 (送信・待ち・受信)
     bool camera_active;         // 撮影中 / 送信中

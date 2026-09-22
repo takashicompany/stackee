@@ -87,6 +87,7 @@ class CasesTest(unittest.TestCase):
         self.assertEqual(cases['thinking'], (1, [2]))
         self.assertEqual(cases['speaking'], (4, [4, 4, 4, 4]))
         self.assertEqual(cases['camera'], (1, [1]))
+        self.assertEqual(cases['microphone'], (1, [3]))
 
 
 class AwakeTest(unittest.TestCase):
@@ -185,28 +186,57 @@ class ConversationTest(unittest.TestCase):
         self.assertEqual(len(set(groups)), 1, '3 秒以内はグループを変えない')
         return frames
 
-    def test_the_mic_key_shows_the_listening_face(self):
-        """STK_MIC_KEY (PC 側のプッシュトゥトーク) を押している間は聞き取り中。"""
-        script = 'mic 1\nt 10\n' + settle(11, count=16)
-        script += 't 259\nt 260\n'
+    def test_pc_mic_uses_its_own_three_frames_and_exact_timing(self):
+        # 案11: 1 -> 2 -> 3を550/550/650 ms。3秒を過ぎてもリセットしない。
+        probes = [10, 559, 560, 1109, 1110, 1759, 1760,
+                  2309, 2310, 2859, 2860, 3509, 3510]
+        script = 'mic 1\n'
+        for t in probes:
+            script += 't %d\n' % t
         _, rows = run(script)
-        self.assertEqual(rows[0]['state'], 'listening')
-        # 本体の録音と同じ 250 ms 送り・同じ 3 コマ。
-        at_249 = [r for r in rows if r['t'] == 259][0]
-        at_250 = [r for r in rows if r['t'] == 260][0]
-        self.assertEqual(at_249['face'], rows[0]['face'])
-        self.assertNotEqual(at_250['face'], rows[0]['face'])
+        self.assertTrue(all(r['state'] == 'microphone' for r in rows))
+        self.assertEqual([r['face'] for r in rows],
+                         [32, 32, 33, 33, 34, 34, 32, 32, 33, 33, 34, 34, 32])
 
-    def test_the_mic_key_frames_are_the_same_three(self):
-        mic = self._frames_at('mic', 250, 3)
-        rec = self._frames_at('rec', 250, 3)
-        self.assertEqual(mic, rec, '録音中と同じコマの並びになるはず')
+    def test_mic_and_ai_recording_use_different_assets(self):
+        _, mic = run('mic 1\nt 10\n')
+        _, rec = run('rec 1\nt 10\n')
+        self.assertEqual(mic[0]['face'], 32)
+        self.assertIn(rec[0]['face'], (10, 11, 12))
+        self.assertEqual(rec[0]['state'], 'listening')
+
+    def test_mic_reentry_starts_at_first_frame(self):
+        script = 'mic 1\nt 10\n' + settle(11, 16)
+        script += 't 560\n' + settle(561, 16)
+        script += 'mic 0\nt 2200\n' + settle(2201, 16)
+        script += 'mic 1\nt 2300\n' + settle(2301, 16)
+        _, rows = run(script)
+        self.assertEqual(rows[-1]['state'], 'microphone')
+        self.assertEqual(rows[-1]['cur'], 32)
+
+    def test_releasing_mic_during_ai_wait_returns_to_thinking(self):
+        script = 'busy 1\nmic 1\nt 10\n' + settle(11, 16)
+        script += 'mic 0\nt 1000\n' + settle(1001, 16)
+        _, rows = run(script)
+        self.assertEqual(rows[-1]['state'], 'thinking')
+        self.assertIn(rows[-1]['cur'], (13, 14))
+
+    def test_recording_interrupts_pc_mic_and_pc_mic_resumes(self):
+        script = 'mic 1\nt 10\n' + settle(11, 16)
+        script += 'rec 1\nt 100\n' + settle(101, 16)
+        script += 'rec 0\nt 200\n' + settle(201, 16)
+        _, rows = run(script)
+        recording = next(r for r in rows if r['t'] == 116)
+        self.assertEqual(recording['state'], 'listening')
+        self.assertIn(recording['cur'], (10, 11, 12))
+        self.assertEqual(rows[-1]['state'], 'microphone')
+        self.assertEqual(rows[-1]['cur'], 32)
 
     def test_releasing_the_mic_key_goes_back_to_idle(self):
         script = 'mic 1\nt 10\n' + settle(11, count=16)
         script += 'mic 0\nt 3000\n' + settle(3001, count=16)
         _, rows = run(script)
-        self.assertEqual(rows[0]['state'], 'listening')
+        self.assertEqual(rows[0]['state'], 'microphone')
         self.assertEqual(rows[-1]['state'], 'idle')
 
     def test_the_mic_key_sits_between_recording_and_thinking(self):
@@ -216,18 +246,18 @@ class ConversationTest(unittest.TestCase):
             _, rows = run(script)
             return rows[-1]['state']
 
-        self.assertEqual(state(['mic']), 'listening')
+        self.assertEqual(state(['mic']), 'microphone')
         # 本体が自分で録っているならそちらが勝つ。
         self.assertEqual(state(['rec', 'mic']), 'listening')
         self.assertEqual(state(['speak', 'mic']), 'speaking')
-        # 返答を待っている間に PC へ喋り始めたら耳の顔に戻る。
-        self.assertEqual(state(['busy', 'mic']), 'listening')
+        # 返答を待っている間に PC へ喋り始めたらマイクの受付サインに戻る。
+        self.assertEqual(state(['busy', 'mic']), 'microphone')
         self.assertEqual(state(['busy']), 'thinking')
         # カメラより上。
-        self.assertEqual(state(['cam', 'mic']), 'listening')
+        self.assertEqual(state(['cam', 'mic']), 'microphone')
         self.assertEqual(state(['cam']), 'camera')
         # 起動直後の awake より上 (2 秒以内でも聞き取り中)。
-        self.assertEqual(state(['mic'], at=100), 'listening')
+        self.assertEqual(state(['mic'], at=100), 'microphone')
         self.assertEqual(state([], at=100), 'awake')
 
     def test_speaking_frames_never_repeat(self):

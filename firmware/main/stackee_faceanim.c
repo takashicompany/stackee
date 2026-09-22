@@ -5,7 +5,7 @@
 #include <string.h>
 
 const char *const stackee_face_state_names[STACKEE_FACE_STATES] = {
-    "awake", "idle", "listening", "thinking", "speaking", "camera",
+    "awake", "idle", "listening", "thinking", "speaking", "camera", "microphone",
 };
 
 // ---- manifest.json の cases ------------------------------------------------
@@ -133,7 +133,7 @@ static bool state_uses_groups(int state) {
 
 static bool state_uses_frames(int state) {
     return state == STACKEE_FACE_LISTENING || state == STACKEE_FACE_THINKING ||
-           state == STACKEE_FACE_SPEAKING;
+           state == STACKEE_FACE_SPEAKING || state == STACKEE_FACE_MICROPHONE;
 }
 
 static int anim_update(stackee_face_anim_t *a, int state, uint32_t now) {
@@ -141,12 +141,21 @@ static int anim_update(stackee_face_anim_t *a, int state, uint32_t now) {
         a->state = state;
         a->group = -1;
         anim_group(a, now);
+        // 受付サインは毎回1コマ目から。同じ状態の間はグループを選び直さない。
+        if (state == STACKEE_FACE_MICROPHONE) {
+            a->group = 0;
+            a->frame = 0;
+        }
     } else if (state_uses_groups(state) &&
                ticks_diff(now, a->group_at) >= STACKEE_FACE_GROUP_MS) {
         anim_group(a, now);
     } else if (state_uses_frames(state)) {
         int32_t interval = (state == STACKEE_FACE_THINKING) ? STACKEE_FACE_THINKING_MS
                                                             : STACKEE_FACE_FRAME_MS;
+        if (state == STACKEE_FACE_MICROPHONE) {
+            interval = (a->frame == 2) ? STACKEE_FACE_MIC_LAST_MS
+                                       : STACKEE_FACE_MIC_STEP_MS;
+        }
         if (ticks_diff(now, a->frame_at) >= interval) {
             anim_frame(a, now, state != STACKEE_FACE_SPEAKING);
         }
@@ -195,12 +204,9 @@ int stackee_face_pick_state(stackee_face_view_t *v,
     if (in->talk_recording) {
         return STACKEE_FACE_LISTENING;
     }
-    // ★ PC 側のプッシュトゥトークを押している間も「聞き取り中」。
-    //   本体の録音 (talk_recording) より下、考え中 (talk_busy) より上。
-    //   本体が自分で録っているならそちらが勝ち、返答を待っている間に
-    //   人が PC へ喋り始めたら耳の顔に戻る、という並びにしてある。
+    // PC 側はマイクを持つ受付サイン。本体の録音より下、考え中より上。
     if (in->mic_held) {
-        return STACKEE_FACE_LISTENING;
+        return STACKEE_FACE_MICROPHONE;
     }
     if (in->talk_busy) {
         return STACKEE_FACE_THINKING;

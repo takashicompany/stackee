@@ -12,7 +12,7 @@
 
 | ファイル | 中身 | 元データ | 作者 / ライセンス | 作り直し方 |
 |---|---|---|---|---|
-| `faces.bin` | 顔 32 枚。240×240・4bpp の縦長シートを zlib 圧縮 | `src/faces/<状態>/*.png` (800×800、32 枚) | **takashicompany (ユーザー本人)。ライセンス未指定** | `python3 ../tools/import_faces.py` |
+| `faces.bin` | 顔 35 枚。240×240・4bpp の縦長シートを zlib 圧縮 | `src/faces/<状態>/*.png` (既存32枚 + microphone 3枚) | **既存顔: takashicompany。microphone: ユーザー採用の画像生成素材。ライセンス未指定** | `python3 ../tools/import_faces.py` |
 | `changes.bin` | 顔のフレーム間で変わる領域 (差分描画の下ごしらえ) | 同上 | 同上 | 同上 (一緒に出る) |
 | `manifest.json` | 上の 2 つと音声の目録 (寸法・オフセット・SHA-256) | 同上 | — | 同上 (一緒に出る) |
 | `font16.bin` | 字幕用の日本語 16px フォント (7,037 字) | `src/fonts/shinonome/shnmk16.bdf` と `shnm8x16r.bdf` | **東雲フォント / Public Domain** (`src/fonts/shinonome/LICENSE.utf8.txt`) | `python3 ../tools/gen_font16.py` |
@@ -58,6 +58,11 @@ python3 firmware/tools/gen_font16.py  --check      # font16.bin
 として描いたもの。**ライセンスは指定していない。** 変換は
 `../tools/import_faces.py` が、白背景に合成 → 状態ごとに倍率を固定して
 中央基準で 240×240 へ縮小 → 16 階調 (4bpp) へ減色、の順で行う。
+
+PC入力用の `src/faces/microphone/a_00..02.png` は、ユーザーが採用したBの
+画像生成素材から、案11「マイクの呼吸 + 3本線の点滅」をブラウザで描画して
+書き出した1254×1254の3枚。既存の32枚に続く番号32〜34。
+各コマを550 / 550 / 650 msで順送りし、押すたびに先頭から開始する。
 
 ### Material Icons (アイコン)
 

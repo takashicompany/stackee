@@ -234,8 +234,8 @@ class ManifestParseTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_real_manifest(self):
-        # 顔は 32 枚 (manifest の cases が 0..31 を指す)、1 辺 240 px。
-        self.assertIn('v=1 size=240 faces=32 acks=5', self.out)
+        # 顔は 35 枚 (manifest の cases が 0..34 を指す)、1 辺 240 px。
+        self.assertIn('v=1 size=240 faces=35 acks=5', self.out)
 
     def test_edge_cases(self):
         self.assertIn('empty=[0] one=[1] nested=[2] missing=[-1]', self.out)

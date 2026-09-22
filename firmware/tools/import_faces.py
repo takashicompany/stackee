@@ -1,4 +1,4 @@
-"""元絵 (800x800 の PNG 32 枚) から faces.bin / changes.bin / manifest.json を作る。
+"""元絵 (PNG 35 枚) から faces.bin / changes.bin / manifest.json を作る。
 
 **実機に触らない。音も鳴らさない。** 一次回答の音声 (manifest の `acks`) は
 いま出力先にある manifest から読み直して持ち越すだけで、作り直さない。
@@ -10,7 +10,8 @@
   python3 firmware/tools/import_faces.py --check    # 書かずに一致だけ見る
   python3 firmware/tools/import_faces.py <別の元絵> --output <別の置き場>
 
-元絵は `firmware/assets/src/faces/<状態>/*.png`。作者はユーザー本人
+元絵は `firmware/assets/src/faces/<状態>/*.png`。microphone の3枚は
+ユーザー採用の画像生成素材から書き出したもの。それ以外の作者はユーザー本人
 (takashicompany)。Stack-chan の v2 の顔として作ったもので、ライセンスは
 未指定 (くわしくは firmware/assets/README.md)。
 
@@ -28,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ack_lines                                   # noqa: E402
 
 SIZE = 240
-CASES = ('awake', 'idle', 'listening', 'thinking', 'speaking', 'camera')
+CASES = ('awake', 'idle', 'listening', 'thinking', 'speaking', 'camera', 'microphone')
 
 FW = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = FW / 'assets/src/faces'
