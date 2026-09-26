@@ -322,7 +322,8 @@ class Phase4CommandTest(unittest.TestCase):
                      'bench', 'log.burst', 'lcd.status', 'lcd.full',
                      'usb.status', 'touch.status', 'touch.inject',
                      'camera.capture', 'camera.power', 'camera.dump',
-                     'camera.look', 'camera.look_status'):
+                     'camera.look', 'camera.look_status',
+                     'key.cstm', 'key.cstm_status'):
             self.assertIn(name, features, name)
 
     def test_hello_says_which_profile(self):

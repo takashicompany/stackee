@@ -120,6 +120,24 @@ def _mic_alias_entry(n):
 
 TRAILING_CUSTOM_KEYS = tuple(_mic_alias_entry(n) for n in _MIC_ALIAS_F)
 
+# stackee 独自キー CSTM_0〜CSTM_9 (2026-09-27)。押した瞬間に 1 回、サーバへ
+# 「CSTM_n が押された」と送る (POST /key)。何をするかはサーバ次第で、本体は
+# 返ってきた指示どおりに動く (README §17-2c)。
+#
+# ★ **MIC_F1〜F12 のうしろ** (0x7E20〜0x7E29)。番号は保存済みの配列に
+#   入っているので、うしろにしか足さない (CUSTOM_KEYS の上の注記)。
+# ★ C の名前は STK_CSTM_n、VIA / Remap のキーキャップの表示は CSTM_n。
+CSTM_COUNT = 10
+
+
+def _cstm_entry(n):
+    return ('STK_CSTM_%d' % n, None,
+            'CSTM_%d: 押すとサーバーに知らせる (何をするかはサーバー次第)' % n,
+            'CSTM_%d' % n)
+
+
+CSTM_KEYS = tuple(_cstm_entry(n) for n in range(CSTM_COUNT))
+
 # MIC(kc) の本体側の符号 (main/qmk_port/stackee_holdtap.c)。
 #
 # ★ QK_KB (0x7E00〜0x7E3F) は 64 個しかなく、VIA の customKeycodes は
@@ -680,13 +698,22 @@ def render_keycodes_h(ext_mods):
     trailing_base = N_FIXED_CUSTOM + len(ext_mods)
     for index, (name, _kmk, _title, _short) in enumerate(TRAILING_CUSTOM_KEYS):
         lines.append('    %-20s = QK_KB_0 + %d,' % (name, trailing_base + index))
-    last = trailing_base + len(TRAILING_CUSTOM_KEYS) - 1
+    mic_last = trailing_base + len(TRAILING_CUSTOM_KEYS) - 1
+    cstm_base = mic_last + 1
+    for index, (name, _kmk, _title, _short) in enumerate(CSTM_KEYS):
+        lines.append('    %-20s = QK_KB_0 + %d,' % (name, cstm_base + index))
+    last = cstm_base + len(CSTM_KEYS) - 1
     lines += [
         '};',
         '',
         '#define STACKEE_KEYCODE_FIRST QK_KB_0',
         '#define STACKEE_KEYCODE_LAST  (QK_KB_0 + %d)' % last,
         '#define STK_MT_BASE           (QK_KB_0 + %d)' % N_FIXED_CUSTOM,
+        '',
+        '// stackee 独自キー CSTM_0..CSTM_9 (押した瞬間にサーバへ POST /key)。',
+        '// 並びは customKeycodes と同じ順。MIC_F1..F12 のうしろ。',
+        '#define STACKEE_CSTM_FIRST    STK_CSTM_0',
+        '#define STACKEE_CSTM_COUNT    %d' % len(CSTM_KEYS),
         '',
         '// ---------------------------------------------------------------',
         '// MIC(kc) — 押している間だけ顔を「聞き取り中」にする包み',
@@ -710,7 +737,7 @@ def render_keycodes_h(ext_mods):
         '// VIA の名前付きの入口 (MIC_F13..MIC_F24、そのうしろに MIC_F1..MIC_F12)。',
         '// 並びは customKeycodes と同じ順。うしろにしか足さない。',
         '#define STACKEE_MIC_ALIAS_FIRST %s' % ('(QK_KB_0 + %d)' % trailing_base),
-        '#define STACKEE_MIC_ALIAS_LAST  %s' % ('(QK_KB_0 + %d)' % last),
+        '#define STACKEE_MIC_ALIAS_LAST  %s' % ('(QK_KB_0 + %d)' % mic_last),
         '#define STACKEE_MIC_ALIAS_COUNT %d' % len(TRAILING_CUSTOM_KEYS),
         '// 入口 i が送る基本キーコード (i = keycode - STACKEE_MIC_ALIAS_FIRST)。',
         '#define STACKEE_MIC_ALIAS_KEYCODES \\',
@@ -766,6 +793,8 @@ def render_via(keymap_module, ext_mods, kle=None):
         })
     # ★ STK_MT_* のうしろ (番号を動かさないため。CUSTOM_KEYS の上の注記)。
     for name, _kmk, title, short in TRAILING_CUSTOM_KEYS:
+        custom.append({'name': name, 'title': title, 'shortName': short})
+    for name, _kmk, title, short in CSTM_KEYS:
         custom.append({'name': name, 'title': title, 'shortName': short})
 
     return {

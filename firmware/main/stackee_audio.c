@@ -43,6 +43,7 @@ static const char *TAG = "audio";
 #define CSM_TIMEOUT_MS   300
 #define PLAY_CHUNK       512        // 1 回に I2S へ渡すサンプル数
 #define PLAY_DRAIN_MS    200        // 書き終えてから DMA が吐き切るまで
+#define CSTM_REQ_PLAY    0x100      // cstm_req の「鳴らす」印
 
 typedef enum { MODE_OFF = 0, MODE_MIC, MODE_SPK } audio_mode_t;
 
@@ -143,6 +144,11 @@ static struct {
     const uint8_t *look_jpeg;
     size_t   look_len;
     bool     look_play;
+    // CSTM_0〜9 (入力タスク / console → audio タスク)。0 = なし /
+    // (n + 1) | CSTM_REQ_PLAY。鳴らすかどうかも同じ 1 語に入れて、キーと
+    // console が同時に置いても混ざらないようにする。
+    _Atomic int  cstm_req;
+    _Atomic int  cstm_result;       // 0 未処理 / 1 始めた / -1 断った
     uint32_t stat_records, stat_plays;
     uint32_t last_key_events;
 } a;
@@ -1056,6 +1062,25 @@ static void audio_task(void *unused) {
                                             a.look_play);
                 atomic_store(&a.look_result, ok ? 1 : -1);
             }
+            int cstm = atomic_exchange(&a.cstm_req, 0);
+            if (cstm > 0) {
+                // ★ 状態機械が idle でも、音が鳴っている (audio.play を含む)・
+                //   STK_TALK が押されている・talk.inject / 画像の依頼が
+                //   載っている・マイクの自己診断中なら黙って捨てる
+                //   (画像の look_reserve と同じ見方)。
+                int st = atomic_load(&a.selftest_req);
+                bool ok = false;
+                if (a.play_active || atomic_load(&a.talk_pressed) ||
+                    atomic_load(&a.inject_req) >= 0 ||
+                    atomic_load(&a.look_req) != 0 ||
+                    st == 1 || st == 2 || st == 4) {
+                    a.talk->cstm_busy++;
+                } else {
+                    ok = stackee_talk_cstm(a.talk, (cstm & 0xFF) - 1,
+                                           (cstm & CSTM_REQ_PLAY) != 0);
+                }
+                atomic_store(&a.cstm_result, ok ? 1 : -1);
+            }
             stackee_talk_set_pressed(a.talk, atomic_load(&a.talk_pressed));
             stackee_talk_step(a.talk);
             talk_unlock();
@@ -1201,6 +1226,98 @@ static size_t reply_talk_inject(long id, const char *line, char *buf, size_t cap
                id, stackee_talk_state_names[a.talk->state], samples, ms);
 }
 
+// key.cstm {"n":3,"play":0} — キーと同じ流れを起こす。**非同期** (始めたら
+// すぐ返る。進み具合は key.cstm_status)。★ play の既定は 0 = 発話・返答の
+// PCM を受け取り終えたところで止め、一次回答も含めて何も鳴らさない。
+static size_t reply_key_cstm(long id, const char *line, char *buf, size_t cap) {
+    long n = stackee_console_int(line, "n", -1);
+    if (n < 0 || n >= STACKEE_TALK_CSTM_COUNT) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"badn\"}", id);
+    }
+    bool play = stackee_console_bool(line, "play", false);
+    int want = (int)(n + 1) | (play ? CSTM_REQ_PLAY : 0);
+    int expected = 0;
+    atomic_store(&a.cstm_result, 0);
+    if (!atomic_compare_exchange_strong(&a.cstm_req, &expected, want)) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    for (int i = 0; i < 200 && atomic_load(&a.cstm_result) == 0; i++) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    int result = atomic_load(&a.cstm_result);
+    if (result != 1) {
+        // 拾われなかったら取り下げる (拾われて断られたなら既に 0)。
+        atomic_compare_exchange_strong(&a.cstm_req, &want, 0);
+        return put(buf, cap, 0,
+                   "{\"id\":%ld,\"error\":\"busy\",\"state\":\"%s\"}",
+                   id, stackee_talk_state_names[a.talk->state]);
+    }
+    return put(buf, cap, 0,
+               "{\"id\":%ld,\"ok\":1,\"n\":%ld,\"play\":%d,\"seq\":%lu,"
+               "\"state\":\"%s\"}",
+               id, n, play ? 1 : 0, (unsigned long)a.talk->cstm_count,
+               stackee_talk_state_names[a.talk->state]);
+}
+
+// key.cstm_status — 直近の CSTM の流れ (mode / job / 発話 / 最終状態 / 各段の ms)。
+// 終わりの見分け方: active==0 かつ seq (cstm_count) が増えた。
+static size_t reply_cstm_status(long id, char *buf, size_t cap) {
+    if (!talk_lock()) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    const stackee_talk_t *t = a.talk;
+    stackee_http_stats_t http;
+    stackee_http_stats(&http);
+    size_t at = put(buf, cap, 0,
+                    "{\"id\":%ld,\"ok\":1,\"state\":\"%s\",\"active\":%d,"
+                    "\"seq\":%lu,\"n\":%d,\"play\":%d,\"mode\":\"%s\","
+                    "\"final\":\"%s\",\"job_id\":\"",
+                    id, stackee_talk_state_names[t->state], t->cstm_active ? 1 : 0,
+                    (unsigned long)t->cstm_count, t->cstm_n, t->cstm_play ? 1 : 0,
+                    stackee_talk_cstm_mode_names[t->cstm_mode],
+                    t->cstm_final ? t->cstm_final : "");
+    at = put_json_str(buf, cap, at, t->cstm_job);
+    at = put(buf, cap, at,
+             "\",\"job_state\":\"%s\",\"says\":%lu,\"polls\":%d,"
+             "\"inbox_seq\":%lu,\"seq_valid\":%d,\"seq_reused\":%d,"
+             "\"t\":{\"seq\":%lu,\"key\":%lu,\"accepted\":%lu,"
+             "\"reply_ready\":%lu,\"audio_ready\":%lu,\"first_say\":%lu,"
+             "\"end\":%lu},"
+             "\"reply_len\":%d,\"audio_bytes\":%ld,"
+             "\"counts\":{\"count\":%lu,\"done\":%lu,\"ignored\":%lu,"
+             "\"errors\":%lu,\"busy\":%lu},"
+             "\"http_status\":%d,\"null\":%s,\"say\":[",
+             t->cstm_job_state, (unsigned long)t->says, t->inbox_polls,
+             (unsigned long)t->inbox_seq, t->inbox_seq_valid ? 1 : 0,
+             t->cstm_seq_reused ? 1 : 0,
+             (unsigned long)t->cstm_seq_ms, (unsigned long)t->cstm_key_ms,
+             (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
+             (unsigned long)t->audio_ready_ms,
+             (unsigned long)t->cstm_first_say_ms, (unsigned long)t->cstm_end_ms,
+             t->reply_len, (long)t->audio_samples * 2,
+             (unsigned long)t->cstm_count, (unsigned long)t->cstm_done,
+             (unsigned long)t->cstm_ignored, (unsigned long)t->cstm_errors,
+             (unsigned long)t->cstm_busy, http.status,
+             atomic_load(&a.null_out) ? "true" : "false");
+    uint32_t logged = t->says < STACKEE_TALK_SAY_LOG ? t->says : STACKEE_TALK_SAY_LOG;
+    for (uint32_t i = 0; i < logged; i++) {
+        const stackee_talk_say_t *s = &t->say_log[i];
+        at = put(buf, cap, at,
+                 "%s{\"seq\":%lu,\"at\":%lu,\"sub\":%lu,\"pages\":%d,"
+                 "\"audio\":%d,\"audio_bytes\":%lu,\"got\":%lu,"
+                 "\"reply_len\":%lu,\"played\":%d}",
+                 i ? "," : "", (unsigned long)s->seq, (unsigned long)s->at_ms,
+                 (unsigned long)s->sub_bytes, s->sub_pages, s->audio ? 1 : 0,
+                 (unsigned long)s->audio_bytes, (unsigned long)s->audio_got,
+                 (unsigned long)s->reply_len, s->played ? 1 : 0);
+    }
+    at = put(buf, cap, at, "],\"error\":\"");
+    at = put_json_str(buf, cap, at, t->error);
+    at = put(buf, cap, at, "\"}");
+    talk_unlock();
+    return at;
+}
+
 static size_t audio_console(const char *cmd, const char *line, long id,
                             char *buf, size_t cap) {
     if (!a.ready) {
@@ -1327,6 +1444,12 @@ static size_t audio_console(const char *cmd, const char *line, long id,
     if (strcmp(cmd, "talk.status") == 0) {
         return reply_talk_status(id, buf, cap);
     }
+    if (strcmp(cmd, "key.cstm") == 0) {
+        return reply_key_cstm(id, line, buf, cap);
+    }
+    if (strcmp(cmd, "key.cstm_status") == 0) {
+        return reply_cstm_status(id, buf, cap);
+    }
     return 0;
 }
 
@@ -1338,6 +1461,7 @@ esp_err_t stackee_audio_start(const char *post_path) {
     atomic_store(&a.play_req, -1);
     atomic_store(&a.inject_req, -1);
     atomic_store(&a.look_req, 0);
+    atomic_store(&a.cstm_req, 0);
     a.play_ack = -1;
     a.talk_lock = xSemaphoreCreateMutex();
     if (a.talk_lock == NULL) {
@@ -1394,6 +1518,13 @@ static bool talk_busy(void) {
     return a.talk != NULL && stackee_talk_busy(a.talk);
 }
 
+// ★ USB マイクに明け渡すかの判断はこちら。CSTM のコマンドを待っている間
+//   (受け箱のロングポーリング、最大 10 分) は busy だが、音は使わない。
+//   会話・画像の往復は従来どおり (busy と同じ答え)。
+static bool talk_uses_audio(void) {
+    return a.talk != NULL && stackee_talk_uses_audio(a.talk);
+}
+
 bool stackee_audio_busy(void) {
     return a.play_active || a.mode == MODE_MIC || talk_busy();
 }
@@ -1418,7 +1549,7 @@ int stackee_audio_uac_pull(int16_t *dst, int max_samples) {
     if (dst == NULL || max_samples <= 0 || !a.ready) {
         return -1;
     }
-    if (a.play_active || talk_busy() || atomic_load(&a.talk_pressed)) {
+    if (a.play_active || talk_uses_audio() || atomic_load(&a.talk_pressed)) {
         return -1;              // 会話が使っている
     }
     if (a.mode != MODE_MIC) {
@@ -1435,7 +1566,7 @@ int stackee_audio_uac_pull(int16_t *dst, int max_samples) {
 
 // UAC が閉じたときに呼ぶ。会話が使っていなければ I2S を畳む。
 void stackee_audio_uac_release(void) {
-    if (a.mode == MODE_MIC && !a.play_active && !talk_busy() &&
+    if (a.mode == MODE_MIC && !a.play_active && !talk_uses_audio() &&
         !atomic_load(&a.talk_pressed)) {
         enter_off();
     }
@@ -1462,6 +1593,19 @@ const char *stackee_audio_screen(void) {
 }
 
 // ---------------------------------------------------------------------------
+// stackee 独自キー CSTM_0〜CSTM_9 (2026-09-27)
+// ---------------------------------------------------------------------------
+void stackee_audio_cstm_key(int n) {
+    if (!a.ready || n < 0 || n >= STACKEE_TALK_CSTM_COUNT) {
+        return;
+    }
+    // ★ 印を置くだけ (入力タスクを待たせない)。既に 1 つ載っていれば捨てる
+    //   (その CSTM がこれから始まり、こちらは「処理中の押下」になる)。
+    int expected = 0;
+    atomic_compare_exchange_strong(&a.cstm_req, &expected, (n + 1) | CSTM_REQ_PLAY);
+}
+
+// ---------------------------------------------------------------------------
 // 画像を見せる (POST /look、2026-09-26)
 // ---------------------------------------------------------------------------
 int stackee_audio_look_reserve(void) {
@@ -1478,6 +1622,7 @@ int stackee_audio_look_reserve(void) {
     //   マイクの自己診断中、のどれかなら撮らない。
     if (a.play_active || atomic_load(&a.talk_pressed) ||
         atomic_load(&a.inject_req) >= 0 || atomic_load(&a.look_req) != 0 ||
+        atomic_load(&a.cstm_req) != 0 ||
         st == 1 || st == 2 || st == 4) {
         r = STACKEE_TALK_LOOK_BUSY;
     } else {

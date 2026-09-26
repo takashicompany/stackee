@@ -230,6 +230,56 @@
       "name": "MIC_F12",
       "title": "押している間だけ「聞き取り中」の顔にする (キーは F12 を送る)",
       "shortName": "Mic12"
+    },
+    {
+      "name": "STK_CSTM_0",
+      "title": "CSTM_0: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_0"
+    },
+    {
+      "name": "STK_CSTM_1",
+      "title": "CSTM_1: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_1"
+    },
+    {
+      "name": "STK_CSTM_2",
+      "title": "CSTM_2: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_2"
+    },
+    {
+      "name": "STK_CSTM_3",
+      "title": "CSTM_3: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_3"
+    },
+    {
+      "name": "STK_CSTM_4",
+      "title": "CSTM_4: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_4"
+    },
+    {
+      "name": "STK_CSTM_5",
+      "title": "CSTM_5: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_5"
+    },
+    {
+      "name": "STK_CSTM_6",
+      "title": "CSTM_6: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_6"
+    },
+    {
+      "name": "STK_CSTM_7",
+      "title": "CSTM_7: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_7"
+    },
+    {
+      "name": "STK_CSTM_8",
+      "title": "CSTM_8: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_8"
+    },
+    {
+      "name": "STK_CSTM_9",
+      "title": "CSTM_9: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "CSTM_9"
     }
   ]
 }

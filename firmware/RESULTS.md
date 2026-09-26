@@ -1701,3 +1701,94 @@ python3 firmware/tools/check_phase4.py --transport hid --only look
 | **本物のキー (`STK_CAMERA`) を指で押したとき** | キーは `play=1` で鳴らす。無音の約束があるので `camera.look play=0` で代わりに見る (道は同じ `run_look`) |
 | **撮影中の顔が `camera` に描き替わるか** | 電源待ちの 1 秒の間に描く作り。`lcd.crc` で `face.set camera` と突き合わせれば無音で確かめられる |
 | **撮影と Wi-Fi の同時の RAM** | 撮影は TLS の前に畳む順序にしたが、`heap_internal` の実測はまだ |
+
+## stackee 独自キー CSTM_0〜CSTM_9 (POST /key + 受け箱) 2026-09-27 — **予定 (まだ書き込んでいない)**
+
+README §17-2c。`STK_CSTM_n` → `GET /inbox` (seq) → `POST /key` → 未設定 / prompt
+(/look と同じ後半) / command (受け箱の発話を鳴らす)。**実機には書き込んでいない**。
+下の数字はビルドとホストテストだけ。
+
+### ビルド (実機に触らない)
+
+| | dev | full |
+|---|---:|---:|
+| 像 (`stackee.bin`) | 1,406,240 B (ota_0 の 67%) | 1,407,776 B (67%) |
+| 変更前 (HEAD `a0c24d4`) | 1,399,584 B | 1,401,040 B |
+| 増分 | **+6,656 B** | **+6,736 B** |
+| 内蔵 RAM の静的合計 (DIRAM) | 199,620 B (変更前 199,604、**+16**) | 197,844 B (変更前 197,828、**+16**) |
+| うち `.bss` | 78,376 B (**+16**) | 76,600 B (**+16**) |
+
+内蔵に増えたのは audio の受け渡し口 (`cstm_req` / `cstm_result`) だけ。
+状態機械の増分 (送り先 2 つ・発話の記録 8 件・お知らせの帯など約 1 KB) は
+元から PSRAM にある `stackee_talk_t` の中。受け箱の応答の受け皿は返答待ちと
+同じ 16 KB で、通信側が 1 往復ごとに PSRAM に取って返す。
+
+### ホストテスト
+
+**581 件** (`tools/test_*.py` をファイルごとに)。`test_talk_host` 105 → **137**
+(送り先の置き換え・帯の折り返し 2 / 未設定・409・prompt (鳴らす / 鳴らさない)・
+command の say → say (字幕のみ) → empty → done・play=0・返答文からの字幕・
+error・不明な job_state・古い中継の 404 (seq 取得時 / 受け箱)・通信断・
+見た発話の読み飛ばし・音声形式の不一致・660 秒の上限・ロングポーリングの間合い・
+seq の使い回しと 5 分での取り直し・次のコマンドへの seq の持ち越し・
+不正な n / mode / id・Wi-Fi なし・URL の不備 21 / 排他 (会話中・キー押下中・
+撮影の押さえ中・画像の往復中・CSTM 中の CSTM / 会話キー / talk.inject /
+カメラ・発話の再生中・押しっぱなし・CSTM のあとの会話と画像) 11)。
+`test_keyseq_host` 47 → 49 (CSTM_0〜9 が HID に出ず押し離しが届く / 0x7E2A は
+何でもない)。`test_gen_keymap` 22 → 23 (並びと VIA の表示)。
+`test_console_host` は `hello` の features に `key.cstm` / `key.cstm_status`。
+`gen_keymap.py --check` は「生成物は最新」。
+
+### 書き込み後に回す確認 (人手ゼロ・無音)
+
+★ **サーバ側に試験用のキー設定が要る** (例: CSTM_9 を prompt、CSTM_8 を
+command に)。未設定のキーでは `final=ignored` になる (それはそれで
+「未設定」の確認になる)。
+
+```
+python3 firmware/tools/check_phase4.py --transport hid --only cstm --cstm-key 9 --cstm-expect prompt
+python3 firmware/tools/check_phase4.py --transport hid --only cstm --cstm-key 8 --cstm-expect command
+```
+
+check スクリプトは先に `audio.null` を立て、**終わったら元の値に戻す**
+(`CSTM_n audio.null を戻した` の行で確かめる)。手で撃つなら:
+
+```
+{"cmd":"audio.status"}                   -> null の元の値を控える
+{"cmd":"audio.null","on":true}
+{"cmd":"key.cstm","n":9,"play":0}        -> {"ok":1,"n":9,"play":0,"seq":N,...} (すぐ返る)
+{"cmd":"key.cstm_status"}                -> 1 秒おきに。seq が N で active=0 になるまで
+{"cmd":"log.tail"}                       -> [cstm] {...} / [cstm-say] {...}
+{"cmd":"audio.null","on":false}          -> ★ 元が false なら必ず戻す
+```
+
+| 見るもの | 期待値 |
+|---|---|
+| `key.cstm_status.final` | `done` (未設定のキーなら `ignored`) |
+| `mode` | サーバの設定どおり (`prompt` / `command`) |
+| `t.seq` / `t.key` | 初回は `seq` > 0 (GET /inbox)、5 分以内の 2 回目は `seq_reused=1` で `t.seq=0` |
+| prompt: `reply_len` / `audio_bytes` | 0 より大きい (返答文と PCM を受け取った) |
+| command: `says` と `say[]` | 各発話の `seq` が増えていく、`audio=1` のものは `got` > 0、字幕だけのものは `audio=0` |
+| `say[].played` / `audio.status.plays` | **0 / 変わらない** (何も鳴らしていない) |
+| `null` | `true` (確認中)。終わったあと `audio.status.null` が元の値 |
+| 待っている間の `key.inject` の `press_ms` | 中央値 ≤ 2 ms / 最大 ≤ 5 ms |
+| `error` | 空 |
+
+排他の確認 (無音でできるもの。`audio.null` を立てたまま):
+
+| 手順 | 期待値 |
+|---|---|
+| `talk.inject` の直後 (返答待ちの間) に `key.cstm` | `{"error":"busy"}`、`counts.busy` が 1 増える、何も送らない |
+| `key.cstm` の処理中 (`active=1`) に `talk.inject` / `camera.look` / `audio.play` | `busy` / `camera.look_status.phase=ignored` / `busy` |
+| `key.cstm` の処理中にもう一度 `key.cstm` | `{"error":"busy"}` |
+| `wifi.off` のあと `key.cstm` | `final=error`、`error="Wi-Fi 未接続です"`、何も送らない |
+
+### 未確認のまま
+
+| 項目 | なぜ |
+|---|---|
+| **実機で 1 往復通るか** | 書き込んでいない。サーバ側の `/key` と `/inbox` も別の作業者が作っている最中 |
+| **本物のキーを指で押したとき** | キーは `play=1` で鳴らす。無音の約束があるので `key.cstm play=0` で代わりに見る (状態機械の入口は同じ `stackee_talk_cstm`) |
+| **帯の「CSTM_n 未設定」とエラーの見え方** | 帯に置く文字列はホストテストで見た。`lcd.crc` / `ui.status` の字幕で無音のまま確かめられる |
+| **受け箱を待っている間の USB マイク** | full のとき、コマンドの待ち (最大 10 分) では UAC を止めない作りにした。実機の UAC では未確認 |
+| **中継の `&wait=` の扱い** | 本体は `?after=…&wait=25&job=…` の `wait` も見て、その秒数 + 15 秒まで待つ (従来は `?wait=` だけ)。中継が `wait` を読んで握るかはサーバ側次第 |

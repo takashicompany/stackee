@@ -107,6 +107,10 @@ typedef enum {
     //   プッシュトゥトーク (F13) を押している間、本体の顔も「聞き取り中」に
     //   したい、というだけのキー。キーそのものの役目は変えない。
     STACKEE_KEY_MIC,
+    // ★ stackee 独自キー CSTM_0..CSTM_9 (2026-09-27)。押した瞬間に 1 回だけ
+    //   サーバへ知らせる。番号は STACKEE_KEY_CSTM_0 からの連番で渡す。
+    STACKEE_KEY_CSTM_0,
+    STACKEE_KEY_CSTM_LAST = STACKEE_KEY_CSTM_0 + 9,
 } stackee_key_action_t;
 
 const char *stackee_key_action_name(stackee_key_action_t action);

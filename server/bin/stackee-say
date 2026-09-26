@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Let stackee say something: stackee-say "テキスト" / stackee-say --no-voice "テキスト".
+
+The text is queued in the voice server's inbox and the device picks it up and speaks it
+(or, with --no-voice, only shows it as captions). Without a text argument the text is
+read from standard input. The server is STACKEE_SAY_URL, which the server sets for the
+commands it runs for CSTM keys (default http://127.0.0.1:8766/say). Only a process on the
+server's own machine may use it. Exit status is 0 once the utterance is queued, else 1
+(2 for a usage error).
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_URL = "http://127.0.0.1:8766/say"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--no-voice", action="store_true",
+                        help="show captions only, without speaking")
+    parser.add_argument("--url", help="the server's /say (default: $STACKEE_SAY_URL or "
+                        + DEFAULT_URL + ")")
+    parser.add_argument("--timeout", type=float, default=300,
+                        help="seconds to wait for the server to finish synthesis")
+    parser.add_argument("text", nargs="*", help="what to say (default: standard input)")
+    args = parser.parse_args()
+    text = " ".join(args.text) if args.text else sys.stdin.read()
+    if not text.strip():
+        parser.error("nothing to say")
+    url = args.url or os.environ.get("STACKEE_SAY_URL") or DEFAULT_URL
+    body = json.dumps({"text": text, "voice": not args.no_voice}, ensure_ascii=False)
+    request = urllib.request.Request(url, data=body.encode("utf-8"), method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        # Straight to the server on this machine, never through an http_proxy.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=args.timeout) as response:
+            json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(1000).decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("error", detail)
+        except (ValueError, AttributeError):
+            pass
+        print("stackee-say: HTTP %d: %s" % (exc.code, detail), file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        print("stackee-say: %s: %s" % (url, exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

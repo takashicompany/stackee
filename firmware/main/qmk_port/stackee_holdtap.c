@@ -129,6 +129,18 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
         return false;   // 送るのはこちらで済ませた
     }
 
+    // ★ CSTM_0..CSTM_9 — 番号ごと「何をしたいか」に翻訳する (連番)。
+    if (keycode >= STACKEE_CSTM_FIRST &&
+        keycode < STACKEE_CSTM_FIRST + STACKEE_CSTM_COUNT) {
+        if (record->event.pressed) {
+            s_custom_presses++;
+        }
+        stackee_qmk_custom_key(
+            (stackee_key_action_t)(STACKEE_KEY_CSTM_0 + (keycode - STACKEE_CSTM_FIRST)),
+            record->event.pressed);
+        return false;   // ★ HID へは出さない
+    }
+
     // QMK のキーコードを「何をしたいか」に翻訳してからアプリへ渡す。
     // 翻訳表はここ 1 か所だけ (tools/keycodes.md の並びと同じ)。
     static const struct {
@@ -170,6 +182,14 @@ const char *stackee_key_action_name(stackee_key_action_t action) {
         case STACKEE_KEY_CAMERA: return "CAMERA";
         case STACKEE_KEY_TOUCH_SCROLL: return "TOUCH_SCROLL";
         case STACKEE_KEY_MIC: return "MIC_KEY";
-        default: return "?";
+        default: break;
     }
+    if (action >= STACKEE_KEY_CSTM_0 && action <= STACKEE_KEY_CSTM_LAST) {
+        static const char *const names[] = {
+            "CSTM_0", "CSTM_1", "CSTM_2", "CSTM_3", "CSTM_4",
+            "CSTM_5", "CSTM_6", "CSTM_7", "CSTM_8", "CSTM_9",
+        };
+        return names[action - STACKEE_KEY_CSTM_0];
+    }
+    return "?";
 }

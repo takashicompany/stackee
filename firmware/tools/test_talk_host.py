@@ -14,6 +14,9 @@
   * talk.inject は録音の道を通らず、送信から先は同じ道を歩く
   * 画像 (POST /look、image/jpeg) は受理から先が会話と同じ道。撮影の前に
     押さえ、その間と往復の間は会話キーを受け付けない。play=0 は鳴らさない
+  * CSTM_0〜9 (POST /key) は GET /inbox で seq を得てから送る。ignored は
+    音なしで「未設定」、prompt は /look と同じ後半、command は受け箱を回して
+    発話を鳴らす (字幕だけのものは音なし)。会話・画像との排他は同じ
 
   python3 firmware/tools/test_talk_host.py
 """
@@ -1637,6 +1640,586 @@ lookprint
     def test_a_nested_talk_path_looks_next_to_it(self):
         out = run("init /api/talk\nrespdelay 100000\nreserve\nlook 2000 0\nt 10\n")
         self.assertEqual(http_calls(out)[0][1], '/api/look')
+
+
+# ---------------------------------------------------------------------------
+# stackee 独自キー CSTM_0〜CSTM_9 (POST /key + 受け箱、2026-09-27)
+# ---------------------------------------------------------------------------
+def cstm_info(text):
+    """cstmprint の行 (最後のもの) を辞書にする。error= だけは空白を含む。"""
+    rows = re.findall(r'^CSTMINFO (.*)$', text, re.M)
+    assert rows, text
+    head, _, error = rows[-1].partition(' error=')
+    out = {'error': error}
+    for part in head.split(' '):
+        k, _, v = part.partition('=')
+        out[k] = int(v) if re.fullmatch(r'-?\d+', v) else v
+    return out
+
+
+def say_log(text):
+    out = []
+    for row in re.findall(r'^SAY (\d+) (.*)$', text, re.M):
+        item = {}
+        for part in row[1].split(' '):
+            k, _, v = part.partition('=')
+            item[k] = int(v)
+        out.append(item)
+    return out
+
+
+def band(text, cols=15, lines=3):
+    """帯に出る形 (15 字ずつ、最大 3 行、`\\n` 区切り) を Python で作る。"""
+    rows = [text[i:i + cols] for i in range(0, len(text), cols)][:lines]
+    return r'\n'.join(rows)
+
+
+def bodies(text):
+    return re.findall(r'^BODY (.*)$', text, re.M)
+
+
+SEQ7 = '{"state":"empty","seq":7}'
+IGNORED = '{"state":"ignored"}'
+PROMPT_ACCEPT = '{"id":"p1","status_url":"/jobs/p1","mode":"prompt"}'
+PROMPT_DONE = ('{"state":"done","reply":"ボタンの返事なのだ","audio_url":'
+               '"/jobs/p1/audio","sample_rate":16000,"channels":1,'
+               '"sample_width":2,"subtitles":"0\\tボタンの返事なのだ\\n"}')
+CMD_ACCEPT = '{"id":"c1","status_url":"/jobs/c1","mode":"command"}'
+FMT = '"sample_rate":16000,"channels":1,"sample_width":2'
+SAY8 = ('{"state":"say","seq":8,"reply":"はじめるのだ","audio_url":'
+        '"/inbox/8/audio","audio_bytes":16000,%s,'
+        '"subtitles":"0\\tはじめるのだ\\n"}' % FMT)
+SAY9_TEXT = ('{"state":"say","seq":9,"reply":"字幕だけなのだ",%s}' % FMT)
+EMPTY9 = '{"state":"empty","seq":9,"job_state":"processing"}'
+DONE9 = '{"state":"empty","seq":9,"job_state":"done"}'
+
+
+class CstmPathTest(unittest.TestCase):
+    """送り先は /look と同じ規則 (末尾の /talk を置き換える)。"""
+
+    def test_siblings(self):
+        cases = [('/talk key', '/key'), ('/talk inbox', '/inbox'),
+                 ('/api/talk key', '/api/key'), ('/api/talk inbox', '/api/inbox'),
+                 ('/talk look', '/look'), ('/chat key', '-'), ('/talkx key', '-'),
+                 ('/talk/ inbox', '-')]
+        out = run(''.join('sibling %s\n' % c for c, _ in cases))
+        self.assertEqual(re.findall(r'^SIBLING (.*)$', out, re.M),
+                         [want for _, want in cases])
+
+    def test_band_wrapping(self):
+        out = run('wrap 15 3 会話エラー: サーバーが処理中です (HTTP 409)\n'
+                  'wrap 15 3 CSTM_3 未設定\n'
+                  'wrap 3 2 あいうえおかきくけこ\n'
+                  'wrap 15 3 \n')
+        got = re.findall(r'^WRAP (\d+) (.*)$', out, re.M)
+        self.assertEqual(got[0], ('2', band('会話エラー: サーバーが処理中です (HTTP 409)')))
+        self.assertEqual(got[1], ('1', 'CSTM_3 未設定'))
+        self.assertEqual(got[2], ('2', r'あいう\nえおか'))     # 入らない残りは捨てる
+        self.assertEqual(got[3], ('0', '-'))
+
+
+class CstmTest(unittest.TestCase):
+    """CSTM_n を押す → GET /inbox (seq) → POST /key → 3 方式。"""
+
+    def test_ignored_is_silent_and_says_unset_briefly(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 200 %s
+cstm 3 1
+t 200
+cstmprint
+t 3000
+cstmprint
+""" % (SEQ7, IGNORED))
+        self.assertIn('CSTM 1', out)
+        calls = http_calls(out)
+        self.assertEqual([(c[0], c[1]) for c in calls],
+                         [('GET', '/inbox'), ('POST', '/key')])
+        self.assertEqual(bodies(out), ['{"key":"CSTM_3"}'])
+        self.assertEqual([c[0] for c in ctypes(out)], ['application/json'])
+        self.assertIn('SHOW CSTM_3 未設定', out)
+        self.assertNotRegex(out, r'(?m)^(ACK|PLAY) ')      # 音なし
+        # 帯: 考え中 → 「CSTM_3 未設定」を短く → 消える。
+        subs = subtitles(out)
+        self.assertIn('CSTM_3 未設定', subs)
+        self.assertEqual(subs[-1], '-')
+        rows = re.findall(r'^CSTMINFO (.*)$', out, re.M)
+        self.assertIn('notice=1', rows[0])
+        info = cstm_info(out)
+        self.assertEqual((info['final'], info['says'], info['ignored']),
+                         ('ignored', 0, 1))
+        self.assertEqual((info['seq'], info['seqvalid'], info['reused']), (7, 1, 0))
+        self.assertEqual((info['active'], info['talkbusy'], info['notice']), (0, 0, 0))
+        self.assertGreater(info['seq_ms'], 0)
+        self.assertGreaterEqual(info['key_ms'], info['seq_ms'])
+        self.assertEqual(state_names(out), ['idle', 'inbox_seq', 'key', 'idle'])
+
+    def test_a_409_says_the_server_is_busy(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 409 {"error":"busy"}
+cstm 0 1
+t 200
+cstmprint
+""" % SEQ7)
+        self.assertIn('SHOW 会話エラー: サーバーが処理中です (HTTP 409)', out)
+        info = cstm_info(out)
+        self.assertEqual((info['final'], info['errors']), ('error', 1))
+        self.assertIn('サーバーが処理中です', info['error'])
+        # 帯にも短く出る (15 字で折り返す)。
+        self.assertIn(band('会話エラー: サーバーが処理中です (HTTP 409)'),
+                      subtitles(out))
+
+    def test_prompt_is_the_same_second_half_as_look(self):
+        script = """
+ackms 300
+respdelay 20
+resp 200 %s
+resp 202 %s
+resp 200 {"state":"processing"}
+resp 200 %s
+resp 200 PCM:16000
+cstm 2 %%d
+t 8000
+print
+cstmprint
+""" % (SEQ7, PROMPT_ACCEPT, PROMPT_DONE)
+        out = run(script % 1)
+        calls = http_calls(out)
+        self.assertEqual([(c[0], c[1]) for c in calls],
+                         [('GET', '/inbox'), ('POST', '/key'),
+                          ('GET', '/jobs/p1?wait=25'), ('GET', '/jobs/p1?wait=25'),
+                          ('GET', '/jobs/p1/audio')])
+        self.assertEqual(
+            state_names(out),
+            ['idle', 'inbox_seq', 'key', 'poll_wait', 'poll', 'poll_wait', 'poll',
+             'audio', 'play_wait', 'playing', 'idle'])
+        self.assertIn('ACK 300', out)            # /look と同じく一次回答
+        self.assertIn('PLAY 16000', out)
+        self.assertIn('ボタンの返事なのだ', subtitles(out))
+        info = cstm_info(out)
+        self.assertEqual((info['mode'], info['final'], info['job']),
+                         ('prompt', 'done', 'p1'))
+        p = last_print(out)
+        self.assertEqual(p['state'], 'idle')
+        self.assertEqual(p['alloc'], p['release'])
+        # play=0: 一次回答も返答も鳴らさず、PCM は受け取っている。
+        out = run(script % 0)
+        self.assertNotRegex(out, r'(?m)^(ACK|PLAY) ')
+        self.assertEqual(http_calls(out)[-1][1], '/jobs/p1/audio')
+        self.assertEqual(state_names(out)[-3:], ['audio', 'play_wait', 'idle'])
+        self.assertEqual(cstm_info(out)['final'], 'done')
+        self.assertIn('"look":0,"played":0', out)
+
+    COMMAND = """
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 %s
+resp 200 PCM:8000
+resp 200 %s
+resp 200 %s
+resp 200 %s
+cstm 5 %%d
+t 20000
+print
+cstmprint
+saylog
+""" % (SEQ7, CMD_ACCEPT, SAY8, SAY9_TEXT, EMPTY9, DONE9)
+
+    def test_command_plays_says_then_ends_on_done(self):
+        out = run(self.COMMAND % 1)
+        calls = [(c[0], c[1]) for c in http_calls(out)]
+        self.assertEqual(calls, [
+            ('GET', '/inbox'), ('POST', '/key'),
+            ('GET', '/inbox?after=7&wait=25&job=c1'),
+            ('GET', '/inbox/8/audio'),
+            ('GET', '/inbox?after=8&wait=25&job=c1'),
+            ('GET', '/inbox?after=9&wait=25&job=c1'),
+            ('GET', '/inbox?after=9&wait=25&job=c1')])
+        self.assertNotRegex(out, r'(?m)^ACK ')      # コマンドは一次回答なし
+        self.assertEqual(re.findall(r'(?m)^PLAY (\d+)$', out), ['8000'])
+        subs = reply_subs(out)
+        self.assertIn('はじめるのだ', subs)           # 音つき発話の字幕
+        self.assertIn('字幕だけなのだ', subs)         # 音なし発話は字幕だけ
+        self.assertIn(GUIDE_THINK, subtitles(out))   # 発話の合間は考え中
+        self.assertEqual(subtitles(out)[-1], '-')
+        info = cstm_info(out)
+        self.assertEqual((info['mode'], info['final'], info['says'], info['job']),
+                         ('command', 'done', 2, 'c1'))
+        self.assertEqual((info['seq'], info['polls'], info['active']), (9, 4, 0))
+        self.assertEqual(info['jobstate'], 'done')
+        self.assertGreater(info['first_say_ms'], info['key_ms'])
+        self.assertGreaterEqual(info['end_ms'], info['first_say_ms'])
+        log = say_log(out)
+        self.assertEqual(len(log), 2)
+        self.assertEqual((log[0]['seq'], log[0]['audio'], log[0]['played'],
+                          log[0]['audio_bytes'], log[0]['got']),
+                         (8, 1, 1, 16000, 16000))
+        self.assertGreater(log[0]['sub_bytes'], 0)
+        self.assertEqual((log[1]['seq'], log[1]['audio'], log[1]['played'],
+                          log[1]['got']), (9, 0, 0, 0))
+        self.assertGreaterEqual(log[1]['pages'], 1)
+        p = last_print(out)
+        self.assertEqual(p['state'], 'idle')
+        self.assertIn('"final":"done"', out)
+
+    def test_command_with_play_zero_fetches_but_never_plays(self):
+        out = run(self.COMMAND % 0)
+        self.assertNotRegex(out, r'(?m)^(ACK|PLAY) ')
+        self.assertIn(('GET', '/inbox/8/audio'),
+                      [(c[0], c[1]) for c in http_calls(out)])
+        log = say_log(out)
+        self.assertEqual((log[0]['got'], log[0]['played']), (16000, 0))
+        self.assertEqual(cstm_info(out)['final'], 'done')
+
+    def test_a_text_only_say_without_subtitles_is_wrapped_from_the_reply(self):
+        long_reply = 'あ' * 20 + 'い' * 20
+        say = ('{"state":"say","seq":8,"reply":"%s",%s}' % (long_reply, FMT))
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 %s
+resp 200 %s
+cstm 1 1
+t 20000
+cstmprint
+saylog
+""" % (SEQ7, CMD_ACCEPT, say, DONE9.replace('"seq":9', '"seq":8')))
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        # 3 行ぶん (帯 1 枚) は同じ時刻に出るので、まとめて 1 回で出る。
+        self.assertIn(band(long_reply), reply_subs(out))
+        self.assertEqual(say_log(out)[0]['pages'], 3)
+        self.assertEqual(cstm_info(out)['final'], 'done')
+
+    def test_command_error_is_shown_like_a_talk_error(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 {"state":"empty","seq":7,"job_state":"error","error":"コマンドが落ちたのだ"}
+cstm 4 1
+t 3000
+cstmprint
+""" % (SEQ7, CMD_ACCEPT))
+        self.assertIn('SHOW 会話エラー: コマンドが落ちたのだ', out)
+        info = cstm_info(out)
+        self.assertEqual((info['final'], info['error']), ('error', 'コマンドが落ちたのだ'))
+        self.assertIn(band('会話エラー: コマンドが落ちたのだ'), subtitles(out))
+        self.assertNotRegex(out, r'(?m)^(ACK|PLAY) ')
+
+    def test_an_unknown_job_state_ends_with_an_error(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 {"state":"empty","seq":7,"job_state":"lost"}
+cstm 4 1
+t 3000
+cstmprint
+""" % (SEQ7, CMD_ACCEPT))
+        self.assertEqual(cstm_info(out)['final'], 'error')
+        self.assertIn('lost', cstm_info(out)['error'])
+
+    def test_an_old_relay_without_inbox_says_so_and_sends_nothing(self):
+        out = run("""
+respdelay 10
+resp 404 not found
+cstm 3 1
+t 200
+cstmprint
+""")
+        self.assertEqual([(c[0], c[1]) for c in http_calls(out)], [('GET', '/inbox')])
+        self.assertIn('SHOW 会話エラー: 中継が /inbox に対応していません (HTTP 404)', out)
+        info = cstm_info(out)
+        self.assertEqual((info['final'], info['seqvalid']), ('error', 0))
+
+    def test_a_404_while_polling_the_inbox_ends_the_command(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 404 nope
+cstm 3 1
+t 2000
+cstmprint
+""" % (SEQ7, CMD_ACCEPT))
+        self.assertIn('HTTP 404', cstm_info(out)['error'])
+        self.assertEqual(cstm_info(out)['seqvalid'], 0)
+
+    def test_a_broken_connection_while_polling_ends_with_an_error(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resperr
+cstm 3 1
+t 2000
+print
+cstmprint
+""" % (SEQ7, CMD_ACCEPT))
+        self.assertEqual(cstm_info(out)['error'], '通信に失敗しました')
+        self.assertEqual(last_print(out)['state'], 'idle')
+
+    def test_a_say_already_seen_is_skipped(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 {"state":"say","seq":7,"reply":"古いのだ",%s}
+resp 200 %s
+cstm 3 1
+t 5000
+cstmprint
+""" % (SEQ7, CMD_ACCEPT, FMT, DONE9.replace('"seq":9', '"seq":7')))
+        self.assertNotIn('古いのだ', '\n'.join(subtitles(out)))
+        self.assertEqual(cstm_info(out)['says'], 0)
+        self.assertEqual(cstm_info(out)['final'], 'done')
+
+    def test_a_bad_audio_format_in_a_say_is_an_error(self):
+        say = SAY8.replace('"sample_rate":16000', '"sample_rate":8000')
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 %s
+cstm 3 1
+t 2000
+cstmprint
+""" % (SEQ7, CMD_ACCEPT, say))
+        self.assertEqual(cstm_info(out)['error'], '返答の音声形式が違います')
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+
+    def test_the_whole_command_gives_up_after_660_seconds(self):
+        out = run("""
+respdelay 5
+resp 200 %s
+resp 202 %s
+sticky 200 {"state":"empty","seq":7,"job_state":"processing"}
+cstm 3 1
+t 30000
+cstmprint
+t 640000
+print
+cstmprint
+""" % (SEQ7, CMD_ACCEPT))
+        rows = re.findall(r'^CSTMINFO (.*)$', out, re.M)
+        self.assertIn('active=1', rows[0])
+        self.assertIn('uses_audio=0', rows[0])     # 待っている間は USB マイクを止めない
+        self.assertIn('talkbusy=1', rows[0])
+        info = cstm_info(out)
+        self.assertEqual(info['final'], 'error')
+        self.assertIn('タイムアウト', info['error'])
+        self.assertEqual(last_print(out)['state'], 'idle')
+
+    def test_a_long_poll_that_takes_seconds_is_reissued_without_a_gap(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+respdelay 3000
+resp 200 %s
+resp 200 %s
+cstm 3 1
+t 10000
+print
+""" % (SEQ7, CMD_ACCEPT, EMPTY9, DONE9))
+        # 2 本目は 1 本目が返った直後に撃っている (1 秒あけない)。
+        stamps = [int(ms) for s, ms in states(out) if s == 'inbox']
+        self.assertEqual(len(stamps), 2)
+        self.assertLess(stamps[1] - stamps[0], 3000 + 50)
+
+    def test_the_seq_is_reused_and_refreshed_after_the_ttl(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 200 %s
+resp 200 %s
+resp 200 {"state":"empty","seq":20}
+resp 200 %s
+cstm 1 1
+t 3000
+cstm 2 1
+t 3000
+cstmprint
+t 300000
+cstm 3 1
+t 3000
+cstmprint
+""" % (SEQ7, IGNORED, IGNORED, IGNORED))
+        calls = [(c[0], c[1]) for c in http_calls(out)]
+        self.assertEqual(calls, [('GET', '/inbox'), ('POST', '/key'),
+                                 ('POST', '/key'),
+                                 ('GET', '/inbox'), ('POST', '/key')])
+        rows = re.findall(r'^CSTMINFO (.*)$', out, re.M)
+        self.assertIn('reused=1', rows[0])
+        self.assertIn('seq_ms=0', rows[0])
+        self.assertIn('reused=0', rows[1])
+        self.assertIn('seq=20', rows[1])
+
+    def test_the_last_seen_seq_carries_over_to_the_next_command(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 {"state":"empty","seq":12,"job_state":"done"}
+resp 202 {"id":"c2","status_url":"/jobs/c2","mode":"command"}
+resp 200 {"state":"empty","seq":12,"job_state":"done"}
+cstm 1 1
+t 3000
+cstm 1 1
+t 3000
+""" % (SEQ7, CMD_ACCEPT))
+        self.assertIn(('GET', '/inbox?after=12&wait=25&job=c2'),
+                      [(c[0], c[1]) for c in http_calls(out)])
+
+    def test_bad_n_is_refused(self):
+        out = run('cstm 10 1\ncstm -1 1\n')
+        self.assertEqual(re.findall(r'^CSTM (\d)$', out, re.M), ['0', '0'])
+        self.assertEqual(http_calls(out), [])
+
+    def test_no_wifi_and_no_url_are_errors_without_sending(self):
+        out = run('net 0\ncstm 3 1\nt 10\ncstmprint\n')
+        self.assertIn('SHOW 会話エラー: Wi-Fi 未接続です', out)
+        self.assertEqual(http_calls(out), [])
+        self.assertEqual(cstm_info(out)['final'], 'error')
+        out = run('init /chat\ncstm 3 1\nt 10\n')
+        self.assertIn('SHOW 会話エラー: STACKEE_TALK_URL が /talk で終わっていません', out)
+        self.assertEqual(http_calls(out), [])
+
+    def test_unknown_mode_and_bad_id_are_errors(self):
+        for accept, why in (
+                ('{"id":"c1","status_url":"/jobs/c1","mode":"magic"}', 'mode'),
+                ('{"id":"c 1","status_url":"/jobs/c1","mode":"command"}', 'id'),
+                ('{"state":"done"}', None)):
+            status = 200 if why is None else 202
+            out = run("""
+respdelay 10
+resp 200 %s
+resp %d %s
+cstm 3 1
+t 200
+cstmprint
+""" % (SEQ7, status, accept))
+            info = cstm_info(out)
+            self.assertEqual(info['final'], 'error', accept)
+            if why:
+                self.assertIn(why, info['error'])
+
+
+class CstmExclusionTest(unittest.TestCase):
+    """会話キー・カメラ・CSTM は同時に 1 つ。処理中の CSTM は黙って無視。"""
+
+    HOLD = """
+respdelay 100000
+resp 200 %s
+cstm 3 1
+t 10
+""" % SEQ7
+
+    def test_a_cstm_while_talking_is_ignored_silently(self):
+        out = run("mic 40\npress\nt 100\ncstm 3 1\nt 10\ncstmprint\n")
+        self.assertIn('CSTM 0', out)
+        info = cstm_info(out)
+        self.assertEqual((info['busy'], info['count']), (1, 0))
+        self.assertNotIn('/key', out)
+        self.assertNotIn('未設定', out)
+
+    def test_a_cstm_while_the_talk_key_is_down_is_ignored(self):
+        self.assertIn('CSTM 0', run('press\ncstm 3 1\n'))
+
+    def test_a_cstm_while_reserved_for_the_camera_is_ignored(self):
+        self.assertIn('CSTM 0', run('reserve\ncstm 3 1\n'))
+
+    def test_a_cstm_while_a_look_is_running_is_ignored(self):
+        out = run("respdelay 100000\nreserve\nlook 2000 0\nt 10\ncstm 3 1\n")
+        self.assertIn('CSTM 0', out)
+
+    def test_a_cstm_during_a_cstm_is_ignored(self):
+        out = run(self.HOLD + 'cstm 4 1\ncstmprint\n')
+        self.assertEqual(re.findall(r'^CSTM (\d)$', out, re.M), ['1', '0'])
+        info = cstm_info(out)
+        self.assertEqual((info['n'], info['busy'], info['count']), (3, 1, 1))
+
+    def test_the_talk_key_is_ignored_during_a_cstm(self):
+        out = run('mic 40\n' + self.HOLD + 'press\nt 500\nrelease\nt 100\n')
+        self.assertNotIn('REC begin', out)
+
+    def test_inject_and_the_camera_are_refused_during_a_cstm(self):
+        out = run(self.HOLD + 'inject 16000\nreserve\n')
+        self.assertIn('INJECT 0', out)
+        self.assertIn('RESERVE 1', out)
+
+    def test_the_camera_is_refused_while_a_command_speaks(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 202 %s
+resp 200 %s
+resp 200 PCM:80000
+cstm 5 1
+t 1500
+reserve
+inject 16000
+print
+""" % (SEQ7, CMD_ACCEPT, SAY8))
+        self.assertEqual(last_print(out)['state'], 'playing')
+        self.assertIn('RESERVE 1', out)
+        self.assertIn('INJECT 0', out)
+
+    def test_a_key_held_through_a_cstm_does_not_start_recording_after_it(self):
+        out = run("""
+respdelay 10
+resp 200 %s
+resp 200 %s
+mic 40
+cstm 3 1
+t 5
+press
+t 3000
+print
+""" % (SEQ7, IGNORED))
+        self.assertNotIn('REC begin', out)
+        self.assertEqual(last_print(out)['state'], 'idle')
+
+    def test_talk_and_look_still_work_after_a_cstm(self):
+        out = run("""
+ackms 0
+respdelay 5
+resp 200 %s
+resp 200 %s
+resp 202 %s
+resp 200 %s
+resp 200 PCM:1600
+resp 202 %s
+resp 200 %s
+resp 200 PCM:1600
+cstm 3 1
+t 3000
+mic 40
+press
+t 400
+release
+t 3000
+reserve
+look 2000 0
+t 3000
+print
+lookprint
+""" % (SEQ7, IGNORED, ACCEPT_BODY, DONE_BODY, LOOK_ACCEPT, LOOK_DONE))
+        posts = [c[1] for c in http_calls(out) if c[0] == 'POST']
+        self.assertEqual(posts, ['/key', '/talk', '/look'])
+        self.assertEqual([c[0] for c in ctypes(out)],
+                         ['application/json', 'audio/wav', 'image/jpeg'])
+        self.assertIn('PLAY 1600', out)
+        info = look_info(out)
+        self.assertEqual((info['look'], info['done']), (1, 1))
+        p = last_print(out)
+        self.assertEqual(p['alloc'], p['release'])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

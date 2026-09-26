@@ -218,7 +218,7 @@ python3 tools/flash.py --rollback           # CircuitPython の像を書き戻�
 |---|---|
 | 基本 | `hello` `status` `reset` `bootloader` |
 | ログ | `log.tail` `log.burst` |
-| キー | `key.inject` `hid.switch` `hid.set` |
+| キー | `key.inject` `hid.switch` `hid.set` `key.cstm` `key.cstm_status` |
 | BLE | `ble.refresh` `ble.clear_bonds` `ble.drop_cccd` `ble.svc_changed` |
 | 画面 | `lcd.crc` `lcd.dump` `lcd.status` `lcd.full` `face.set` `face.auto` `bar.set` `bar.auto` `ui.selftest` `ui.status` `ui.assets` `ui.subtitle` |
 | Wi-Fi | `wifi.scan` `wifi.list` `wifi.add` `wifi.remove` `wifi.connect` `wifi.status` `wifi.off` `wifi.on` |
@@ -299,6 +299,7 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | タッチパッド | **段階 4**。FT6336 を 5 ms 周期で読み、なぞり = ポインタ / タップ = クリック / `STK_TOUCH_SCROLL` 中はスクロール。Report ID 2 で USB・BLE 両方に出る |
 | カメラ | **段階 4**。GC0308 を ALDO3 で起こして撮り、software で JPEG に畳む。`camera.*` と `STK_CAMERA` キー |
 | カメラ → AI | **2026-09-26**。`STK_CAMERA` で撮った JPEG を `POST /look` で見せ、返答を会話と同じく音声 + 字幕で鳴らす。撮影中の顔は `camera`、返答待ちは `thinking` (§17-2b) |
+| 独自キー CSTM_0〜9 | **2026-09-27**。`STK_CSTM_0`〜`STK_CSTM_9` (VIA の表示は `CSTM_0`〜`CSTM_9`)。押した瞬間に `POST /key` で「CSTM_n が押された」と送り、サーバの返事どおりに動く (未設定 / 返答を鳴らす / コマンドの発話を受け箱から取って鳴らす)。会話・カメラと排他 (§17-2c) |
 | USB マイク (UAC) | **段階 4 / full プロファイルのみ**。16 kHz モノラル。会話が優先で、録音中は無音を送る |
 | Raw HID コンソール | **段階 4**。VIA の独自 command id 0xC0〜。**dev でも有効** (CDC と同じバイト列を両方へ流す) |
 | FAT への書き込み | **段階 4**。`settings.set` と `fs.put`。書くときだけ読み書き可能で付け直す |
@@ -778,7 +779,18 @@ python3 firmware/kmk/tools/stackee_console_client.py status
 NVS に保存されている**。途中に足すとうしろが 1 つずつずれ、保存済みの配列の
 意味が黙って変わる。置き場は `tools/gen_keymap.py` の
 `TRAILING_CUSTOM_KEYS` (2026-09-21 の `MIC_F13`〜`MIC_F24`、そのあとに
-足した `MIC_F1`〜`MIC_F12` がそれ。`STK_MT_0` = `0x7E07` は動かしていない)。
+足した `MIC_F1`〜`MIC_F12` がそれ。`STK_MT_0` = `0x7E07` は動かしていない)
+と、そのうしろの `CSTM_KEYS` (2026-09-27 の `STK_CSTM_0`〜`STK_CSTM_9` =
+`0x7E20`〜`0x7E29`)。
+
+| 並び | 名前 (VIA の表示) | 中身 |
+|---|---|---|
+| 0〜6 | `STK_TALK` (Talk) `STK_VOLUP` `STK_VOLDN` `STK_HID_SWITCH` `STK_BLE_REFRESH` `STK_CAMERA` (Cam) `STK_TOUCH_SCROLL` | 会話 / 音量 / 送信先 / BLE / カメラ → AI / スクロール |
+| 7 | `STK_MT_0` | 修飾つきタップの HoldTap |
+| 8〜31 | `MIC_F13`〜`MIC_F24`、`MIC_F1`〜`MIC_F12` | 押している間だけ顔を「聞き取り中」に (§10-1) |
+| 32〜41 | `STK_CSTM_0`〜`STK_CSTM_9` (`CSTM_0`〜`CSTM_9`) | 押した瞬間にサーバへ知らせる (§17-2c) |
+
+一覧の正は `tools/keycodes.md`。
 
 ★ **既定配列を変えたら「移行」を足す。** 書き換えた本体は保存済みの配列で
 動くので、**新しい既定は黙って無視される**。
@@ -2237,6 +2249,74 @@ python3 tools/check_phase4.py --transport hid --only look
 `key.inject` を回して打鍵の遅延も見る。合否は RESULTS.md の「予定」。
 
 ★ `STACKEE_CAMERA_PATH` / `/image` は使わなくなった (送り先は `/look` に決まった)。
+
+### 17-2c. stackee 独自キー CSTM_0〜CSTM_9 (2026-09-27)
+
+`STK_CSTM_n` (VIA / Remap の `Custom` タブでは `CSTM_n`) を押した瞬間に 1 回、
+サーバへ「CSTM_n が押された」と送る。**何をするかはサーバ次第**で、本体は
+返ってきた指示どおりに動く。離したときには何も送らない。
+
+| 決まり (サーバとの取り決め) | 値 |
+|---|---|
+| 送り先 | `/look` と同じ規則。`STACKEE_TALK_URL` の末尾 `/talk` を `/key` / `/inbox` にしたもの。Bearer と HTTPS も同じ |
+| 押した直後 | **送る前に** `GET /inbox` → `{"state":"empty","seq":N}` で「最後に見た seq」を得る。覚えておき、5 分以内の次の押下では使い回す (TLS の握手を 1 回省く)。受け箱の応答で seq が分かるたびに覚え直す |
+| 送信 | `POST /key`、`Content-Type: application/json`、本文 `{"key":"CSTM_3"}` |
+| `200 {"state":"ignored"}` | 未設定。**音なし**で、帯に「CSTM_3 未設定」を 2.5 秒出して終わる |
+| `409` | 「会話エラー: サーバーが処理中です (HTTP 409)」 |
+| `202 {id, status_url, mode:"prompt"}` | **/look と完全に同じ後半** (返答待ち → 一次回答 → 音声 + 字幕)。状態機械の同じ道を歩く |
+| `202 {id, status_url, mode:"command"}` | 受け箱を回す: `GET /inbox?after=<seq>&wait=25&job=<id>` を繰り返す |
+| 受け箱 `state:"say"` | 発話 1 件 (`/talk` の done と同じ形)。`GET <audio_url>` の PCM を字幕つきで鳴らす (会話の再生と同じ部品)。**`audio_url` が無ければ字幕だけ** (音なし。字幕の本文が無ければ返答文を 15 字ずつに割って出す)。seq を進めてまた聞く |
+| 受け箱 `state:"empty"` | `job_state` が無い / `processing` → そのまま聞き直す。`done` → 終わり (音なし)。`error` → `error` の文を「会話エラー: …」で出して終わり |
+| 全体の上限 | コマンドを受理してから **660 秒** (サーバの時間切れ最大 600 秒 + 余裕) |
+| `GET /inbox` が 200 以外 | 「会話エラー: 中継が /inbox に対応していません (HTTP 404)」などを出して終わる (古い中継) |
+
+エラーは会話と同じく `status.screen` に「会話エラー: …」を出し、**帯にも
+2.5 秒** (15 字 x 3 行に折って) 出す。
+
+**顔と帯**: 押下直後から終わりまで、会話の返答待ちと同じ `thinking` の顔と
+「考えています…」の帯。発話を鳴らしている間は `speaking` と字幕。
+**顔の絵は 1 画素も描き直していない** (状態を渡しているだけ)。
+
+**排他** (カメラと同じ流儀。本体側):
+
+| いつ | 何が起きる |
+|---|---|
+| 会話中 (録音 / 送信 / 返答待ち / 再生、一次回答が鳴っている、`STK_TALK` を押している)・撮影中・画像の往復中・他の CSTM の処理中に `STK_CSTM_n` | **黙って無視** (画面にも何も出さない。`key.cstm_status` の `counts.busy` が増える) |
+| CSTM の処理中 (発話の再生中を含む) に `STK_TALK` / `STK_CAMERA` | 受け付けない (録音しない / 撮らない) |
+| 同じ間の `talk.inject` / `audio.play` / `audio.selftest` | `busy` で断る |
+
+★ **USB マイク (UAC、full) は、コマンドの受け箱を待っている間は止めない**
+(最大 10 分あるため)。発話を鳴らしている間と、prompt 方式の返答待ちは
+会話と同じく無音を送る。
+
+**打鍵**: キーは印を 1 つ置くだけ (入力タスクは待たない)。送信は audio
+タスクの会話の状態機械、通信は http タスク。
+
+**第 2 段への備え**: 受け箱の取得と発話 1 件の再生 (`INBOX_WAIT` →
+`INBOX` → `say` → 再生 / 字幕 → `INBOX_WAIT`) はキー押下に縛られない形に
+してある。暇なときの常時ポーリングは `job` なしで同じ状態に入れればよい
+(今回は入れていない)。
+
+#### console (人手ゼロ・無音で確かめる)
+
+| コマンド | 中身 |
+|---|---|
+| `key.cstm` `{"n":3,"play":0}` | キーと同じ流れを起こす。**非同期** (すぐ返る)。**`play` の既定は 0** = 発話・返答の PCM を受け取り終えたところで止め、**一次回答も含めて何も鳴らさない**。`play:1` でキーと同じく鳴らす。処理中なら `busy` |
+| `key.cstm_status` | `state` `active` `seq` (押下の回数) `n` `play` `mode` (`prompt` / `command`) `final` (`done` / `ignored` / `error`) `job_id` `job_state` `says` `polls` `inbox_seq` `seq_valid` `seq_reused`、`t:{seq, key, accepted, reply_ready, audio_ready, first_say, end}` (押下からの ms)、`reply_len` `audio_bytes`、`counts:{count, done, ignored, errors, busy}`、`http_status` `null`、`say:[{seq, at, sub, pages, audio, audio_bytes, got, reply_len, played}]` (先頭 8 件)、`error` |
+
+終わりの見分け方: `seq` が増えて `active == 0`。ログには 1 回ごとに
+`[cstm] {…}`、発話ごとに `[cstm-say] {…}`。
+
+```
+python3 tools/check_phase4.py --only cstm --cstm-key 9                    # 鳴らさない
+python3 tools/check_phase4.py --transport hid --only cstm --cstm-key 9 --cstm-expect command
+```
+
+`--only cstm` を書いたときだけ走る (サーバに仕事を 1 件投げるので既定の組には
+入れていない)。**サーバ側に `--cstm-key` のキーの試験用の設定が要る**
+(未設定なら `ignored` で NG)。先に `audio.null` を立て、`key.cstm play=0` で
+流し、待っている間は `key.inject` を回して打鍵の遅延も見る。**終わったら
+`audio.null` を元の値に戻す** (立てたままだと返答が鳴らなくなる)。
 
 ### 17-3. Raw HID の上のコンソール
 

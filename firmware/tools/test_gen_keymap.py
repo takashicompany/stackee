@@ -182,7 +182,9 @@ class ViaDefinitionTest(unittest.TestCase):
         self.assertEqual(names.index('MIC_F13'), 8)       # 0x7E08 からうしろへ
         self.assertEqual(names.index('MIC_F24'), 19)      # 0x7E13
         self.assertEqual(names.index('MIC_F1'), 20)       # 0x7E14 (あとで足した)
-        self.assertEqual(names[-1], 'MIC_F12')            # 0x7E1F
+        self.assertEqual(names.index('MIC_F12'), 31)      # 0x7E1F
+        self.assertEqual(names.index('STK_CSTM_0'), 32)   # 0x7E20 (2026-09-27)
+        self.assertEqual(names[-1], 'STK_CSTM_9')         # 0x7E29
         # ヘッダの enum と VIA の並びが 1 つずつ同じか。
         for index, name in enumerate(names):
             self.assertIn('%-20s = QK_KB_0 + %d,' % (name, index), self.header)
@@ -202,6 +204,21 @@ class ViaDefinitionTest(unittest.TestCase):
                 self.assertIn(entry['name'][4:], entry['title'])
                 self.assertEqual(entry['shortName'],
                                  'Mic' + entry['name'][5:])
+
+    def test_the_cstm_keys_come_last_and_show_as_cstm_n(self):
+        """CSTM_0〜9 は MIC_F1〜F12 のうしろ。VIA のキーキャップは CSTM_n。"""
+        entries = self.via['customKeycodes']
+        cstm = [e for e in entries if e['name'].startswith('STK_CSTM_')]
+        self.assertEqual([e['name'] for e in cstm],
+                         ['STK_CSTM_%d' % n for n in range(10)])
+        self.assertEqual(entries[-10:], cstm)
+        for n, entry in enumerate(cstm):
+            self.assertEqual(entry['shortName'], 'CSTM_%d' % n)
+            self.assertTrue(entry['title'].startswith('CSTM_%d' % n))
+        self.assertIn('#define STACKEE_CSTM_FIRST    STK_CSTM_0', self.header)
+        self.assertIn('#define STACKEE_CSTM_COUNT    10', self.header)
+        # MIC の入口の範囲は動いていない (CSTM を足しても 0x7E08..0x7E1F)。
+        self.assertIn('#define STACKEE_MIC_ALIAS_LAST  (QK_KB_0 + 31)', self.header)
 
     def test_the_mic_range_does_not_touch_the_other_custom_keys(self):
         """MIC(kc) は QK_USER 側。QK_KB の独自キーと重ならない。"""
@@ -270,6 +287,8 @@ class KeycodesDocTest(unittest.TestCase):
             doc = handle.read()
         for name, _kmk, _title, _short in gen_keymap.CUSTOM_KEYS:
             self.assertIn(name, doc, '%s が keycodes.md に無い' % name)
+        self.assertIn('STK_CSTM_0', doc)
+        self.assertIn('STK_CSTM_9', doc)
 
 
 if __name__ == '__main__':

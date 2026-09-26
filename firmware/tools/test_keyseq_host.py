@@ -149,6 +149,7 @@ POS_MIC = (3, 9)        # レイヤー 0: STK_MIC_KEY (F13 を送る独自キー
 STK_TALK = 'TALK'
 STK_VOLDN = 'VOLDN'
 STK_MIC = 'MIC_KEY'
+CSTM_0 = 0x7E20          # STK_CSTM_0 (MIC_F12 = 0x7E1F のうしろ)
 KC_F13 = 0x68
 KC_A = 0x04
 # MIC(kc) = 0x7F00 | kc (main/qmk_port/stackee_keycodes.h)。
@@ -392,8 +393,23 @@ class CustomKeyTest(unittest.TestCase):
         self.assertFalse([l for l in out if l.startswith('CUSTOM ')])
 
     def test_the_slot_after_the_last_alias_is_not_wrapped(self):
-        # 入口の 1 つうしろ (0x7E20) はまだ何でもない。
+        # 入口の 1 つうしろ (0x7E20) は MIC ではない (2026-09-27 から CSTM_0)。
         lines = run('kc 3 9 0x%04X\n' % (MIC_ALIAS_F13 + len(MIC_ALIAS_INNER))
+                    + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        out = after(lines, 'z')
+        self.assertNotIn('CUSTOM %s 1' % STK_MIC, out)
+        self.assertFalse([l for l in out if l.startswith('KB ')])
+
+    def test_cstm_keys_do_not_reach_hid(self):
+        """CSTM_0〜9 (0x7E20..0x7E29) は押し離しが独自キーとして届き、HID に出ない。"""
+        for n in range(10):
+            lines = run('kc 3 9 0x%04X\n' % (CSTM_0 + n)
+                        + 't 100\nmark c\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+            self.assertEqual(after(lines, 'c'), ['CUSTOM CSTM_%d 1' % n,
+                                                 'CUSTOM CSTM_%d 0' % n], n)
+
+    def test_the_slot_after_cstm_9_is_nothing(self):
+        lines = run('kc 3 9 0x%04X\n' % (CSTM_0 + 10)
                     + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         self.assertEqual(after(lines, 'z'), [])
 

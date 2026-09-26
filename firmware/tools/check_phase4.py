@@ -40,6 +40,18 @@
      撮影中は key.inject を回して打鍵の遅延も見る。先に `audio.null` も立てる。
      ★ サーバ (STACKEE_TALK_URL の /look) に 1 件の仕事を投げる。
 
+  6. stackee 独自キー CSTM_n (--only cstm を書いたときだけ。**既定では走らない**)
+     `key.cstm n=<--cstm-key> play=0` でキー押下と同じ流れ (GET /inbox →
+     POST /key → prompt なら返答待ち → PCM / command なら受け箱 → 発話の PCM)
+     を起こし、**鳴らす直前で止める**。`key.cstm_status` で mode / job id /
+     発話の数・各発話の seq / 字幕長 / audio_bytes / 最終状態 / 各段の ms を読む。
+     返答待ちの間は key.inject を回して打鍵の遅延も見る。先に `audio.null` を
+     立て、終わったら**必ず元に戻す**。
+     ★ サーバ側にそのキーの試験用の設定が要る (未設定なら ignored で NG)。
+
+  python3 firmware/tools/check_phase4.py --only cstm --cstm-key 9
+  python3 firmware/tools/check_phase4.py --only cstm --cstm-key 9 --cstm-expect command
+
 ★ 音は鳴らさない。ここが触るのは**マイク側だけ**で、スピーカーには 1 度も
   触らない (camera も touch も音とは無関係)。
 """
@@ -78,6 +90,8 @@ LEGACY_LOOP = ['loop.stats', 'loop.detail', 'loop.gc',
 CAMERA_TIMEOUT_S = 40.0
 # 画像を見せる: 返答待ちの上限 (390 秒) + 撮影 + 受信の余裕。
 LOOK_TIMEOUT_S = 450.0
+# コマンドの時間切れは最大 600 秒 (本体側の上限は 660 秒)。それより少し長く待つ。
+CSTM_TIMEOUT_S = 700.0
 INJECT_KEY = 'F24'          # ホスト側で何も起きないキー (check_phase2 と同じ)
 # 打鍵の遅延の合否 (DESIGN.md §3。撮影中も同じ基準)。
 KEY_MED_MS = 2.0
@@ -259,6 +273,108 @@ def _check_look_body(client, result, warmup, verbose):
 
 
 # ---------------------------------------------------------------------------
+# 6. stackee 独自キー CSTM_n (POST /key)。★ 鳴らさない (play=0 + audio.null)
+# ---------------------------------------------------------------------------
+def check_cstm(client, result, key, verbose=True):
+    # ★★ audio.null は終わったら**必ず元に戻す** (check_look と同じ。立てた
+    #   ままだと、そのあと人が話しかけても返答が鳴らない。2026-09-26 に踏んだ)。
+    was_null = client.request('audio.status', timeout=5.0).get('null') is True
+    result['cstm_null'] = client.request('audio.null', timeout=5.0, on=True)
+    try:
+        _check_cstm_body(client, result, key, verbose)
+    finally:
+        if not was_null:
+            result['cstm_null_restored'] = client.request(
+                'audio.null', timeout=5.0, on=False)
+
+
+def _check_cstm_body(client, result, key, verbose):
+    before = client.request('key.cstm_status', timeout=5.0)
+    result['cstm_before'] = before
+    seq0 = before.get('seq', 0) or 0
+    start = client.request('key.cstm', timeout=5.0, n=key, play=0)
+    result['cstm_start'] = start
+    if start.get('error'):
+        return
+    if verbose:
+        print('  CSTM_%d → /key → (返答 / 受け箱) 待ち (鳴らさない)...' % key)
+    lat = []
+    last = {}
+    t0 = time.time()
+    while time.time() - t0 < CSTM_TIMEOUT_S:
+        last = client.request('key.cstm_status', timeout=5.0)
+        if (last.get('seq', 0) or 0) > seq0 and not last.get('active'):
+            break
+        ms = inject_ms(client)              # 待っている間の打鍵
+        if ms is not None:
+            lat.append(ms)
+        time.sleep(1.0)
+    result['cstm_status'] = last
+    result['cstm_elapsed_s'] = round(time.time() - t0, 1)
+    result['cstm_key_ms'] = lat
+
+
+def cstm_verdicts(result, args, out):
+    start = result.get('cstm_start')
+    if start is None:
+        return
+    key = args.cstm_key
+    if start.get('error'):
+        out.append(('CSTM key.cstm', False, '%s' % start.get('error')))
+        return
+    st = result.get('cstm_status') or {}
+    mine = (st.get('seq', 0) or 0) > ((result.get('cstm_before') or {}).get('seq', 0) or 0)
+    final = st.get('final')
+    mode = st.get('mode')
+    says = st.get('say') or []
+    detail = ('final=%s mode=%s job=%s says=%s job_state=%s 各段 %s / %s 秒 / '
+              'error="%s"' % (final, mode, st.get('job_id'), st.get('says'),
+                              st.get('job_state'),
+                              json.dumps(st.get('t', {}), ensure_ascii=False),
+                              result.get('cstm_elapsed_s'), st.get('error')))
+    if final == 'ignored':
+        out.append(('CSTM_%d サーバーの応答' % key, False,
+                    'ignored (サーバー側に CSTM_%d の試験用の設定が要る) %s'
+                    % (key, detail)))
+        return
+    ok = (mine and not st.get('active') and final == 'done' and
+          not st.get('error') and st.get('play') == 0 and st.get('n') == key)
+    if args.cstm_expect != 'any':
+        ok = ok and mode == args.cstm_expect
+    if mode == 'prompt':
+        ok = ok and (st.get('reply_len', 0) or 0) > 0 and \
+            (st.get('audio_bytes', 0) or 0) > 0
+    out.append(('CSTM_%d /key → 最後まで' % key, ok, detail))
+    for i, say in enumerate(says):
+        out.append(('CSTM_%d 発話 %d' % (key, i + 1),
+                    (not say.get('audio')) or
+                    (say.get('got', 0) or 0) > 0,
+                    'seq=%s 字幕 %s B / %s 頁 audio=%s 申告 %s B / 受信 %s B '
+                    'played=%s (%s ms)'
+                    % (say.get('seq'), say.get('sub'), say.get('pages'),
+                       say.get('audio'), say.get('audio_bytes'), say.get('got'),
+                       say.get('played'), say.get('at'))))
+    played = [s for s in says if s.get('played')]
+    out.append(('CSTM_%d 鳴らしていない' % key,
+                st.get('play') == 0 and st.get('null') is True and not played,
+                'play=%s null=%s 鳴らした発話 %d 件'
+                % (st.get('play'), st.get('null'), len(played))))
+    restored = result.get('cstm_null_restored')
+    if restored is not None:
+        out.append(('CSTM_%d audio.null を戻した' % key,
+                     restored.get('null') is False, 'null=%s' % restored.get('null')))
+    lat = result.get('cstm_key_ms') or []
+    if lat:
+        import statistics
+        med = statistics.median(lat)
+        worst = max(lat)
+        out.append(('CSTM_%d 待ち中の打鍵' % key, med <= KEY_MED_MS and
+                    worst <= KEY_MAX_MS,
+                    '中央値 %.3f ms / 最大 %.3f ms / %d 回 (合否 ≤%.0f / ≤%.0f ms)'
+                    % (med, worst, len(lat), KEY_MED_MS, KEY_MAX_MS)))
+
+
+# ---------------------------------------------------------------------------
 # 3. コンソールの残り
 # ---------------------------------------------------------------------------
 def check_console(client, result, timeout):
@@ -369,6 +485,9 @@ def collect(args):
         # ★ 画像はサーバに仕事を投げるので、書いたときだけ (既定の組に入れない)。
         if args.only and 'look' in args.only:
             check_look(client, result, args.warmup, verbose=not args.json)
+        # ★ CSTM もサーバに仕事を投げるので、書いたときだけ。
+        if args.only and 'cstm' in args.only:
+            check_cstm(client, result, args.cstm_key, verbose=not args.json)
         result['status_after'] = client.request('status', timeout=args.timeout)
     finally:
         client.close()
@@ -509,6 +628,9 @@ def verdicts(result, args):
                 out.append(('画像 撮影中の打鍵', None,
                             '撮影中に key.inject を撃てなかった'))
 
+    # ---- 6. stackee 独自キー CSTM_n ---------------------------------------
+    cstm_verdicts(result, args, out)
+
     # ---- 3. コンソール --------------------------------------------------
     features = hello.get('features') or []
     missing = [f for f in LEGACY_FEATURES if f not in features]
@@ -640,10 +762,19 @@ def main():
     parser.add_argument('--record', action='store_true',
                         help='UAC で 1 秒録る (sox か ffmpeg が要る)')
     parser.add_argument('--only', nargs='*',
-                        choices=('touch', 'camera', 'console', 'uac', 'look'),
+                        choices=('touch', 'camera', 'console', 'uac', 'look',
+                                 'cstm'),
                         help='一部だけ見る')
+    parser.add_argument('--cstm-key', type=int, choices=range(10),
+                        help='--only cstm で押す CSTM_n の n (サーバ側に試験用の'
+                             '設定が要る)')
+    parser.add_argument('--cstm-expect', default='any',
+                        choices=('any', 'prompt', 'command'),
+                        help='--only cstm でサーバが返すはずの mode')
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args()
+    if args.only and 'cstm' in args.only and args.cstm_key is None:
+        parser.error('--only cstm には --cstm-key N (0..9) が要る')
 
     result = collect(args)
     checks = verdicts(result, args)

@@ -92,11 +92,15 @@ bool stackee_http_has_token(void) {
     return h.token[0] != '\0';
 }
 
-// この 1 本に許す時間 [ms]。URL に "?wait=<秒>" が付いていれば、その秒数を
-// 足したぶんだけ待つ (ロングポーリング)。ほかの要求は従来どおり 30 秒。
+// この 1 本に許す時間 [ms]。URL に "?wait=<秒>" (受け箱では "&wait=<秒>")
+// が付いていれば、その秒数を足したぶんだけ待つ (ロングポーリング)。
+// ほかの要求は従来どおり 30 秒。
 // ★ ここで見るのは会話の状態機械が組み立てた自分の URL だけ。
 static int timeout_for(const char *url) {
     const char *at = strstr(url, "?wait=");
+    if (at == NULL) {
+        at = strstr(url, "&wait=");     // GET /inbox?after=<seq>&wait=25&job=
+    }
     if (at == NULL) {
         return TIMEOUT_MS;
     }

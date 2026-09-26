@@ -34,6 +34,11 @@
 //   lookpath <path>   "/talk" → "/look" の置き換えだけを聞く。LOOKPATH <結果|->
 //   lookprint         画像の往復の様子 (LOOKINFO …)
 //   init <path>       STACKEE_TALK_URL のパスを変えて作り直す (空 = 未設定)
+//   cstm <n> <play>   CSTM_n を押したのと同じ流れ (stackee_talk_cstm)。CSTM <0|1>
+//   cstmprint         CSTM の様子 (CSTMINFO …)
+//   saylog            受け取った発話の記録 (SAY …、1 件 1 行)
+//   sibling <path> <name>  "/talk" → "/<name>" の置き換え。SIBLING <結果|->
+//   wrap <cols> <lines> <text>  帯の折り返し。WRAP <行数> <\n で繋いだ結果>
 //
 // 出てくる行: STATE / SHOW / HTTP / CTYPE / ACK / PLAY / REC / TIME / SUB
 #include <stdio.h>
@@ -210,6 +215,9 @@ static bool ops_http_start(const char *method, const char *path,
         }
         printf("CTYPE %s %02x%02x %u\n", content_type,
                body_len > 0 ? b[0] : 0, body_len > 1 ? b[1] : 0, sum);
+        if (strcmp(content_type, "application/json") == 0) {
+            printf("BODY %.*s\n", (int)body_len, (const char *)body);
+        }
     }
     g_http_busy = true;
     g_http_done_at = g_now + g_resp_delay;
@@ -507,6 +515,68 @@ int main(void) {
                    (unsigned)g_talk.looks_unplayed,
                    (unsigned)g_talk.complete_ms, (unsigned)g_talk.audio_ready_ms,
                    g_talk.error[0] ? g_talk.error : "-");
+        } else if (strcmp(line, "cstm") == 0) {
+            int n = arg ? atoi(arg) : 0;
+            char *second = arg ? strchr(arg, ' ') : NULL;
+            bool play = second ? atoi(second + 1) != 0 : true;
+            printf("CSTM %d\n", stackee_talk_cstm(&g_talk, n, play) ? 1 : 0);
+        } else if (strcmp(line, "cstmprint") == 0) {
+            printf("CSTMINFO active=%d n=%d play=%d mode=%s final=%s job=%s "
+                   "jobstate=%s says=%u polls=%d seq=%u seqvalid=%d reused=%d "
+                   "busy=%u count=%u done=%u ignored=%u errors=%u "
+                   "seq_ms=%u key_ms=%u first_say_ms=%u end_ms=%u "
+                   "loop=%d uses_audio=%d talkbusy=%d notice=%d error=%s\n",
+                   g_talk.cstm_active ? 1 : 0, g_talk.cstm_n,
+                   g_talk.cstm_play ? 1 : 0,
+                   g_talk.cstm_mode ? stackee_talk_cstm_mode_names[g_talk.cstm_mode] : "-",
+                   g_talk.cstm_final ? g_talk.cstm_final : "-",
+                   g_talk.cstm_job[0] ? g_talk.cstm_job : "-",
+                   g_talk.cstm_job_state[0] ? g_talk.cstm_job_state : "-",
+                   (unsigned)g_talk.says, g_talk.inbox_polls,
+                   (unsigned)g_talk.inbox_seq, g_talk.inbox_seq_valid ? 1 : 0,
+                   g_talk.cstm_seq_reused ? 1 : 0, (unsigned)g_talk.cstm_busy,
+                   (unsigned)g_talk.cstm_count, (unsigned)g_talk.cstm_done,
+                   (unsigned)g_talk.cstm_ignored, (unsigned)g_talk.cstm_errors,
+                   (unsigned)g_talk.cstm_seq_ms, (unsigned)g_talk.cstm_key_ms,
+                   (unsigned)g_talk.cstm_first_say_ms, (unsigned)g_talk.cstm_end_ms,
+                   g_talk.inbox_loop ? 1 : 0,
+                   stackee_talk_uses_audio(&g_talk) ? 1 : 0,
+                   stackee_talk_busy(&g_talk) ? 1 : 0, g_talk.notice_on ? 1 : 0,
+                   g_talk.error[0] ? g_talk.error : "-");
+        } else if (strcmp(line, "saylog") == 0) {
+            uint32_t n = g_talk.says < STACKEE_TALK_SAY_LOG ? g_talk.says
+                                                             : STACKEE_TALK_SAY_LOG;
+            for (uint32_t i = 0; i < n; i++) {
+                const stackee_talk_say_t *s = &g_talk.say_log[i];
+                printf("SAY %u seq=%u pages=%d sub_bytes=%u audio_bytes=%u "
+                       "got=%u reply_len=%u audio=%d played=%d at=%u\n",
+                       (unsigned)i, (unsigned)s->seq, s->sub_pages,
+                       (unsigned)s->sub_bytes, (unsigned)s->audio_bytes,
+                       (unsigned)s->audio_got, (unsigned)s->reply_len,
+                       s->audio ? 1 : 0, s->played ? 1 : 0, (unsigned)s->at_ms);
+            }
+        } else if (strcmp(line, "sibling") == 0) {
+            char *name = arg ? strchr(arg, ' ') : NULL;
+            if (name) { *name++ = '\0'; }
+            char out[STACKEE_TALK_PATH_MAX];
+            bool ok = stackee_talk_sibling_path(arg ? arg : "", name ? name : "",
+                                                out, sizeof(out));
+            printf("SIBLING %s\n", ok ? out : "-");
+        } else if (strcmp(line, "wrap") == 0) {
+            char *second = arg ? strchr(arg, ' ') : NULL;
+            if (second) { *second++ = '\0'; }
+            char *text = second ? strchr(second, ' ') : NULL;
+            if (text) { *text++ = '\0'; }
+            char out[STACKEE_TALK_SUB_BAND_MAX];
+            int lines = stackee_talk_wrap(text ? text : "", arg ? atoi(arg) : 15,
+                                          second ? atoi(second) : 3,
+                                          out, sizeof(out));
+            printf("WRAP %d ", lines);
+            if (out[0] == '\0') { printf("-"); }
+            for (const char *p = out; *p != '\0'; p++) {
+                if (*p == '\n') { printf("\\n"); } else { putchar(*p); }
+            }
+            printf("\n");
         } else if (strcmp(line, "print") == 0) {
             printf("NOW %u STATE %s POLLS %d ALLOC %d RELEASE %d "
                    "PAGES %d PAGE %d DROPPED %d SUBBYTES %u SRC %s "

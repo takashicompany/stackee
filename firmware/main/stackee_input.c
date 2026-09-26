@@ -82,6 +82,12 @@ void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed) {
     if (!pressed) {
         return;             // 残りはどれも「押した瞬間」だけ効く
     }
+    // ★ CSTM_0..CSTM_9。ここでは送らない。印を 1 つ置くだけ (TLS の握手は
+    //   秒単位かかる)。実際の送信は audio タスクが会話の状態機械で進める。
+    if (action >= STACKEE_KEY_CSTM_0 && action <= STACKEE_KEY_CSTM_LAST) {
+        stackee_audio_cstm_key((int)(action - STACKEE_KEY_CSTM_0));
+        return;
+    }
     switch (action) {
         case STACKEE_KEY_VOLUP:
             // ★ NVS へ書くのはここではない (入力タスクを止めない)。

@@ -9,6 +9,11 @@
 const char *const stackee_talk_state_names[STACKEE_TALK_STATES] = {
     "idle", "recording", "upload", "poll_wait", "poll", "subs", "audio",
     "play_wait", "playing",
+    "inbox_seq", "key", "inbox_wait", "inbox", "say_text",
+};
+
+const char *const stackee_talk_cstm_mode_names[STACKEE_TALK_CSTM_MODES] = {
+    "", "prompt", "command",
 };
 
 const char *const stackee_talk_sub_src_names[STACKEE_TALK_SUB_SRCS] = {
@@ -324,6 +329,15 @@ void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
     if (!stackee_talk_look_path(t->path, t->look_path, sizeof(t->look_path))) {
         t->look_path[0] = '\0';    // 画像は送れない (reserve が理由を出す)
     }
+    // CSTM の送り先も同じ規則 (作れなければ押下のときに理由を出す)。
+    if (!stackee_talk_sibling_path(t->path, "key", t->key_path,
+                                   sizeof(t->key_path)) ||
+        !stackee_talk_sibling_path(t->path, "inbox", t->inbox_path,
+                                   sizeof(t->inbox_path))) {
+        t->key_path[0] = '\0';
+        t->inbox_path[0] = '\0';
+    }
+    t->say_cur = -1;
     t->page_shown = -1;
     t->state = STACKEE_TALK_IDLE;
     t->since = ops->now_ms();
@@ -461,6 +475,7 @@ static void begin_turn(stackee_talk_t *t, bool look) {
     t->audio_samples = 0;
     t->audio_duration_ms = 0;
     t->look = look;
+    t->cstm = false;            // CSTM は stackee_talk_cstm() が立て直す
 }
 
 static void finish_recording(stackee_talk_t *t) {
@@ -553,6 +568,67 @@ static void start_audio(stackee_talk_t *t) {
     to(t, STACKEE_TALK_AUDIO);
 }
 
+// done の JSON (と受け箱の発話 "say") から返答を読み取る。
+// 戻り値: 1 = audio_url があり audio_path に入れた / 0 = 音が無い (字幕だけ) /
+//         -1 = 失敗 (fail 済み)。
+// ★ close_http はしない (json は呼び手が閉じるまで有効)。
+// ★ need_audio (会話の done) では、音声形式 → audio_url の順に確かめる
+//   (受け箱の発話で分けるまで 1 か所に書いてあった手順そのまま)。
+static int take_reply(stackee_talk_t *t, const char *json, bool need_audio) {
+    char audio[STACKEE_TALK_PATH_MAX];
+    bool has_audio = stackee_json_str(json, "audio_url", audio, sizeof(audio));
+    if (need_audio || has_audio) {
+        long rate = 0, channels = 0, width = 0;
+        if (!stackee_json_int(json, "sample_rate", &rate) ||
+            !stackee_json_int(json, "channels", &channels) ||
+            !stackee_json_int(json, "sample_width", &width) ||
+            rate != STACKEE_TALK_RATE || channels != 1 || width != 2) {
+            fail(t, "返答の音声形式が違います");
+            return -1;
+        }
+        if (!has_audio || !valid_path(audio)) {
+            fail(t, "返答の audio_url が不正です");
+            return -1;
+        }
+    }
+    // ★ 字幕は「本文が混ざっていればそれを使う。無ければ取りに行く」。
+    //   旧サーバにはどちらも無いので、そのときは今までと 1 手も変わらない。
+    t->subs_path[0] = '\0';
+    char subs[STACKEE_TALK_PATH_MAX];
+    if (stackee_json_str(json, "subtitles_url", subs, sizeof(subs)) &&
+        valid_path(subs)) {
+        snprintf(t->subs_path, sizeof(t->subs_path), "%s", subs);
+    }
+    subtitle_clear(t);      // 前の往復の名残を捨てる (帯は既に消えている)
+    // ★ done の JSON に混ざってきた本文。別 GET は実機で約 8 秒かかる
+    //   (要求ごとに TLS を張り直す) ので、あるならそれを使うほうが
+    //   喋り始めがその 8 秒ぶん早い。json は close_http まで有効。
+    const char *inline_at = NULL;
+    size_t inline_len = 0;
+    if (stackee_json_raw(json, "subtitles", &inline_at, &inline_len) &&
+        inline_len >= 2 && inline_at[0] == '"') {
+        int pages = stackee_talk_parse_subtitles_json(t, inline_at, inline_len);
+        if (pages > 0) {
+            t->sub_src = STACKEE_TALK_SUB_INLINE;
+            t->subs_ok++;
+        } else {
+            t->subs_failed++;
+        }
+        logf_(t, "[talk-subtitles] {\"src\":\"inline\",\"pages\":%d,"
+                 "\"bytes\":%lu,\"dropped\":%d}",
+              pages, (unsigned long)t->sub_bytes, t->sub_dropped);
+    }
+    t->reply[0] = '\0';
+    stackee_json_str(json, "reply", t->reply, sizeof(t->reply));
+    t->reply_len = (int)strlen(t->reply);
+    t->reply_ready_ms = since_ms(t, t->turn_started);
+    if (!has_audio) {
+        return 0;
+    }
+    snprintf(t->audio_path, sizeof(t->audio_path), "%s", audio);
+    return 1;
+}
+
 static void handle_poll_done(stackee_talk_t *t, const char *json) {
     char state[24];
     if (!stackee_json_str(json, "state", state, sizeof(state))) {
@@ -561,51 +637,9 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
     }
     // json はこの関数を抜けるまでだけ有効 (close_http で無効になる)。
     if (strcmp(state, "done") == 0) {
-        long rate = 0, channels = 0, width = 0;
-        if (!stackee_json_int(json, "sample_rate", &rate) ||
-            !stackee_json_int(json, "channels", &channels) ||
-            !stackee_json_int(json, "sample_width", &width) ||
-            rate != STACKEE_TALK_RATE || channels != 1 || width != 2) {
-            fail(t, "返答の音声形式が違います");
+        if (take_reply(t, json, true) < 0) {
             return;
         }
-        char audio[STACKEE_TALK_PATH_MAX];
-        if (!stackee_json_str(json, "audio_url", audio, sizeof(audio)) ||
-            !valid_path(audio)) {
-            fail(t, "返答の audio_url が不正です");
-            return;
-        }
-        // ★ 字幕は「本文が混ざっていればそれを使う。無ければ取りに行く」。
-        //   旧サーバにはどちらも無いので、そのときは今までと 1 手も変わらない。
-        t->subs_path[0] = '\0';
-        char subs[STACKEE_TALK_PATH_MAX];
-        if (stackee_json_str(json, "subtitles_url", subs, sizeof(subs)) &&
-            valid_path(subs)) {
-            snprintf(t->subs_path, sizeof(t->subs_path), "%s", subs);
-        }
-        subtitle_clear(t);      // 前の往復の名残を捨てる (帯は既に消えている)
-        // ★ done の JSON に混ざってきた本文。別 GET は実機で約 8 秒かかる
-        //   (要求ごとに TLS を張り直す) ので、あるならそれを使うほうが
-        //   喋り始めがその 8 秒ぶん早い。json は close_http まで有効。
-        const char *inline_at = NULL;
-        size_t inline_len = 0;
-        if (stackee_json_raw(json, "subtitles", &inline_at, &inline_len) &&
-            inline_len >= 2 && inline_at[0] == '"') {
-            int pages = stackee_talk_parse_subtitles_json(t, inline_at, inline_len);
-            if (pages > 0) {
-                t->sub_src = STACKEE_TALK_SUB_INLINE;
-                t->subs_ok++;
-            } else {
-                t->subs_failed++;
-            }
-            logf_(t, "[talk-subtitles] {\"src\":\"inline\",\"pages\":%d,"
-                     "\"bytes\":%lu,\"dropped\":%d}",
-                  pages, (unsigned long)t->sub_bytes, t->sub_dropped);
-        }
-        stackee_json_str(json, "reply", t->reply, sizeof(t->reply));
-        t->reply_len = (int)strlen(t->reply);
-        t->reply_ready_ms = since_ms(t, t->turn_started);
-        snprintf(t->audio_path, sizeof(t->audio_path), "%s", audio);
         close_http(t);
         show(t, t->reply);
         // 本文が混ざっていなかった (か、1 ページも採れなかった) ときだけ
@@ -630,6 +664,11 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
         cleanup(t);
         to(t, STACKEE_TALK_IDLE);
         show(t, message);
+        // CSTM の prompt 方式なら、流れとしては失敗 (帯にも短く出す)。
+        if (t->cstm_active) {
+            snprintf(t->error, sizeof(t->error), "%s", message);
+            t->cstm_final = "error";
+        }
         return;
     }
     close_http(t);
@@ -639,6 +678,501 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
     //   中継が古くて即返る場合は従来どおり 1 秒あける。
     t->poll_took = since_ms(t, t->poll_sent);
     to(t, STACKEE_TALK_POLL_WAIT);
+}
+
+// ---------------------------------------------------------------------------
+// 帯の文字 (字幕の頁とお知らせ)
+// ---------------------------------------------------------------------------
+// UTF-8 の 1 字の長さ (先頭バイトから)。壊れた並びは 1 バイトずつ進める。
+static size_t utf8_len(const unsigned char *p) {
+    size_t n = 1;
+    if (p[0] >= 0xF0 && p[0] <= 0xF7) {
+        n = 4;
+    } else if (p[0] >= 0xE0) {
+        n = 3;
+    } else if (p[0] >= 0xC0) {
+        n = 2;
+    }
+    for (size_t i = 1; i < n; i++) {
+        if ((p[i] & 0xC0u) != 0x80u) {
+            return 1;           // 途中で切れている / 壊れている
+        }
+    }
+    return n;
+}
+
+// *pp から 1 行 (cols 字まで、改行で切る) を dst に写す。写したバイト数。
+// ★ 字の途中では切らない。dst に入らない字は次の行へ回す。
+static size_t take_line(const char **pp, int cols, char *dst, size_t cap) {
+    const unsigned char *p = (const unsigned char *)*pp;
+    size_t fill = 0;
+    int used = 0;
+    while (*p != '\0' && *p != '\n' && used < cols) {
+        size_t n = utf8_len(p);
+        if (fill + n + 1 > cap) {
+            break;
+        }
+        memcpy(dst + fill, p, n);
+        fill += n;
+        p += n;
+        used++;
+    }
+    if (*p == '\n') {
+        p++;
+    }
+    dst[fill] = '\0';
+    *pp = (const char *)p;
+    return fill;
+}
+
+int stackee_talk_wrap(const char *text, int cols, int lines, char *out, size_t cap) {
+    if (out == NULL || cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (text == NULL || cols <= 0) {
+        return 0;
+    }
+    size_t at = 0;
+    int got = 0;
+    const char *p = text;
+    while (*p != '\0' && got < lines) {
+        char line[STACKEE_TALK_SUB_TEXT_MAX];
+        size_t n = take_line(&p, cols, line, sizeof(line));
+        if (n == 0) {
+            continue;           // 空の行は置かない
+        }
+        size_t need = n + ((got > 0) ? 1u : 0u);
+        if (at + need + 1 > cap) {
+            break;
+        }
+        if (got > 0) {
+            out[at++] = '\n';
+        }
+        memcpy(out + at, line, n + 1);
+        at += n;
+        got++;
+    }
+    return got;
+}
+
+// 帯に短く出すお知らせ。★ idle のときにだけ置く (帯の持ち主が居ない)。
+// 消すのは stackee_talk_step の notice_step。
+static void notice(stackee_talk_t *t, const char *text) {
+    stackee_talk_wrap(text, STACKEE_TALK_BAND_COLS, STACKEE_TALK_SUB_LINES,
+                      t->notice, sizeof(t->notice));
+    if (t->notice[0] == '\0') {
+        return;
+    }
+    t->notice_on = true;
+    t->notice_since = now(t);
+    subtitle(t, t->notice);
+}
+
+static void notice_step(stackee_talk_t *t) {
+    if (!t->notice_on) {
+        return;
+    }
+    if (t->state != STACKEE_TALK_IDLE) {
+        t->notice_on = false;   // 次の往復が帯を持った (案内が上書きしている)
+        return;
+    }
+    if (since_ms(t, t->notice_since) < STACKEE_TALK_NOTICE_MS) {
+        return;
+    }
+    t->notice_on = false;
+    // ★ そのあいだに別の音 (audio.play の字幕) が帯を持ったなら触らない。
+    if (t->ops->ack_active() || t->ops->play_active()) {
+        return;
+    }
+    subtitle(t, NULL);
+}
+
+// 返答文を 15 字ずつの頁にする (字幕の本文が無い、音の無い発話のため)。
+// 3 行 (= 帯 1 枚) ごとに STACKEE_TALK_SAY_PAGE_MS ずつずらす。
+static void pages_from_text(stackee_talk_t *t, const char *text) {
+    subtitles_begin(t);
+    const char *p = text;
+    while (*p != '\0' && t->page_count < STACKEE_TALK_SUB_PAGES) {
+        stackee_talk_page_t *page = &t->pages[t->page_count];
+        if (take_line(&p, STACKEE_TALK_BAND_COLS, page->text,
+                      sizeof(page->text)) == 0) {
+            continue;
+        }
+        page->start_ms = (uint32_t)(t->page_count / STACKEE_TALK_SUB_LINES) *
+                         STACKEE_TALK_SAY_PAGE_MS;
+        t->page_count++;
+    }
+    t->sub_bytes = (uint32_t)strlen(text);
+}
+
+// 再生位置 ms の頁を帯に出す (変わったときだけ)。返答の再生と字幕だけの
+// 発話の両方がここを通る。
+static void show_page_at(stackee_talk_t *t, uint32_t ms) {
+    if (t->page_count <= 0) {
+        return;
+    }
+    int want = stackee_talk_page_at(t, ms);
+    if (want == t->page_shown) {
+        return;
+    }
+    t->page_shown = want;
+    if (want < 0) {
+        subtitle(t, NULL);
+        return;
+    }
+    // ★ 帯には「その頁のここまで」を積んで渡す。3 行が埋まった次のページで
+    //   頁がめくれる (band が 1 行だけを返すのがその印)。
+    char band[STACKEE_TALK_SUB_BAND_MAX];
+    stackee_talk_band(t, want, band, sizeof(band));
+    subtitle(t, band);
+}
+
+// ---------------------------------------------------------------------------
+// 受け箱 (GET /inbox) と発話 1 件の再生
+// ---------------------------------------------------------------------------
+// ★ **キー押下に縛られない部品。** 入口は「受け箱を回す状態 (INBOX_WAIT) に
+//   入る」ことだけで、発話 (state:"say") が来たら
+//     音あり … GET <audio_url> → PLAY_WAIT → PLAYING (会話の再生と同じ部品)
+//     音なし … SAY_TEXT (字幕だけ)
+//   を通って INBOX_WAIT に戻る。いまは CSTM のコマンド方式だけが入口
+//   (job= 付き、job_state が done / error で終わる)。第 2 段の常時ポーリングは
+//   job を空にして同じ INBOX_WAIT に入れればよい。
+
+// 1 往復の名残の数字 (押下からの ms)。0 は「まだ」の意味に使うので 1 に寄せる。
+static uint32_t mark_ms(const stackee_talk_t *t, uint32_t from) {
+    uint32_t ms = since_ms(t, from);
+    return ms ? ms : 1;
+}
+
+static void inbox_note_seq(stackee_talk_t *t, uint32_t seq) {
+    t->inbox_seq = seq;
+    t->inbox_seq_valid = true;
+    t->inbox_seq_at = now(t);
+}
+
+// id は受け箱の URL (job=) にそのまま載せるので、使える字を絞る。
+static bool job_id_ok(const char *id) {
+    if (id == NULL || id[0] == '\0') {
+        return false;
+    }
+    for (const char *p = id; *p; p++) {
+        bool ok = (*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z') ||
+                  (*p >= 'A' && *p <= 'Z') || *p == '-' || *p == '_' || *p == '.';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 200 以外の応答。409 は会話と同じ文言。古い中継の 404 はそれと分かるように。
+static void fail_status(stackee_talk_t *t, int status, bool inbox) {
+    char why[96];
+    if (status == 409) {
+        snprintf(why, sizeof(why), "サーバーが処理中です (HTTP 409)");
+    } else if (inbox && status == 404) {
+        snprintf(why, sizeof(why), "中継が /inbox に対応していません (HTTP 404)");
+    } else {
+        snprintf(why, sizeof(why), "サーバー HTTP %d", status);
+    }
+    fail(t, why);
+}
+
+// 次の GET /inbox?after=<seq>&wait=25[&job=<id>] を撃つ。
+static void inbox_poll_start(stackee_talk_t *t) {
+    char path[STACKEE_TALK_PATH_MAX + STACKEE_TALK_JOB_ID_MAX + 48];
+    int n;
+    if (t->cstm_job[0] != '\0' && t->cstm_mode == STACKEE_TALK_CSTM_MODE_COMMAND) {
+        n = snprintf(path, sizeof(path), "%s?after=%lu&wait=%d&job=%s",
+                     t->inbox_path, (unsigned long)t->inbox_seq,
+                     STACKEE_TALK_INBOX_WAIT_S, t->cstm_job);
+    } else {
+        n = snprintf(path, sizeof(path), "%s?after=%lu&wait=%d",
+                     t->inbox_path, (unsigned long)t->inbox_seq,
+                     STACKEE_TALK_INBOX_WAIT_S);
+    }
+    if (n < 0 || (size_t)n >= sizeof(path)) {
+        fail(t, "受け箱の URL が長すぎます");
+        return;
+    }
+    t->poll_sent = now(t);
+    if (!t->ops->http_start("GET", path, NULL, 0, STACKEE_TALK_POLL_LIMIT, NULL)) {
+        fail(t, "受け箱の取得を始められません");
+        return;
+    }
+    t->http_open = true;
+    t->inbox_polls++;
+    to(t, STACKEE_TALK_INBOX);
+}
+
+// 発話を 1 件扱い終えた (鳴らした / 鳴らさず止めた / 字幕を出し終えた)。
+// ★ 受信バッファ (PCM) を返し、帯を消してから次を聞きに行く。
+static void say_finished(stackee_talk_t *t, bool played) {
+    if (t->say_cur >= 0) {
+        t->say_log[t->say_cur].played = played;
+    }
+    logf_(t, "[cstm-say] {\"n\":%lu,\"seq\":%lu,\"audio_bytes\":%ld,"
+             "\"sub_pages\":%d,\"played\":%d}",
+          (unsigned long)t->says, (unsigned long)t->inbox_seq,
+          (long)t->audio_samples * 2, t->page_count, played ? 1 : 0);
+    t->say_cur = -1;
+    cleanup(t);
+    if (!t->inbox_loop) {
+        to(t, STACKEE_TALK_IDLE);
+        return;
+    }
+    // 次はすぐ聞く (発話のあいだに次が溜まっているかもしれない)。
+    t->polled = now(t);
+    t->poll_took = STACKEE_TALK_POLL_MS;
+    to(t, STACKEE_TALK_INBOX_WAIT);
+}
+
+// 発話 1 件 ({"state":"say", …}) を受け取った。json は close_http まで有効。
+static void take_say(stackee_talk_t *t, const char *json) {
+    t->says++;
+    t->say_cur = (t->says <= STACKEE_TALK_SAY_LOG) ? (int)t->says - 1 : -1;
+    if (t->cstm_first_say_ms == 0) {
+        t->cstm_first_say_ms = mark_ms(t, t->cstm_started);
+    }
+    t->audio_samples = 0;
+    t->audio_duration_ms = 0;
+    int got = take_reply(t, json, false);
+    if (got < 0) {
+        return;                 // 形式が違う / audio_url が不正 (fail 済み)
+    }
+    long declared = 0;
+    if (!stackee_json_int(json, "audio_bytes", &declared) || declared < 0) {
+        declared = 0;
+    }
+    if (t->say_cur >= 0) {
+        stackee_talk_say_t *say = &t->say_log[t->say_cur];
+        memset(say, 0, sizeof(*say));
+        say->seq = t->inbox_seq;
+        say->at_ms = mark_ms(t, t->cstm_started);
+        say->sub_bytes = t->sub_bytes;
+        say->sub_pages = t->page_count;
+        say->audio_bytes = (uint32_t)declared;
+        say->reply_len = (uint32_t)t->reply_len;
+        say->audio = (got == 1);
+    }
+    close_http(t);
+    if (t->reply[0] != '\0') {
+        show(t, t->reply);
+    }
+    if (got == 1) {
+        // 音あり。会話の done と同じ手順 (字幕の別 GET → PCM → 再生)。
+        if (t->page_count == 0 && t->subs_path[0] != '\0' &&
+            t->ops->http_start("GET", t->subs_path, NULL, 0,
+                               STACKEE_TALK_SUB_BYTES, NULL)) {
+            t->http_open = true;
+            to(t, STACKEE_TALK_SUBS);
+            return;
+        }
+        start_audio(t);
+        return;
+    }
+    // 音なし。字幕だけ出す (本文が無ければ返答文を割って出す)。
+    if (t->page_count == 0) {
+        pages_from_text(t, t->reply);
+        if (t->say_cur >= 0) {
+            t->say_log[t->say_cur].sub_pages = t->page_count;
+        }
+    }
+    if (t->page_count == 0) {
+        say_finished(t, false);         // 出すものが無い
+        return;
+    }
+    t->say_until = t->pages[t->page_count - 1].start_ms + STACKEE_TALK_SAY_HOLD_MS;
+    to(t, STACKEE_TALK_SAY_TEXT);
+}
+
+// GET /inbox (seq を取る) と GET /inbox?after= の応答。
+static void handle_inbox(stackee_talk_t *t, int status, const char *json) {
+    if (status != 200) {
+        if (status == 404) {
+            t->inbox_seq_valid = false;     // 次の押下で取り直す
+        }
+        fail_status(t, status, true);
+        return;
+    }
+    char state[16];
+    if (!stackee_json_str(json, "state", state, sizeof(state))) {
+        fail(t, "受け箱の応答が不正です");
+        return;
+    }
+    long seq = -1;
+    bool has_seq = stackee_json_int(json, "seq", &seq) && seq >= 0;
+    if (t->state == STACKEE_TALK_INBOX_SEQ) {
+        if (!has_seq) {
+            fail(t, "受け箱の応答に seq がありません");
+            return;
+        }
+        inbox_note_seq(t, (uint32_t)seq);
+        t->cstm_seq_ms = mark_ms(t, t->cstm_started);
+        close_http(t);
+        // ★ 最後に見た seq が分かったので、ここで初めてキーを送る。
+        if (!t->ops->http_start("POST", t->key_path, t->key_body,
+                                strlen(t->key_body), 8192,
+                                STACKEE_TALK_CTYPE_JSON)) {
+            fail(t, "送信を始められません");
+            return;
+        }
+        t->http_open = true;
+        to(t, STACKEE_TALK_KEY);
+        return;
+    }
+    // ---- GET /inbox?after= の応答 ----
+    t->polled = now(t);
+    t->poll_took = since_ms(t, t->poll_sent);
+    if (strcmp(state, "say") == 0) {
+        if (!has_seq) {
+            fail(t, "受け箱の発話に seq がありません");
+            return;
+        }
+        if (t->inbox_seq_valid && (uint32_t)seq <= t->inbox_seq) {
+            close_http(t);              // 見たことのある発話。飛ばして次を聞く
+            to(t, STACKEE_TALK_INBOX_WAIT);
+            return;
+        }
+        inbox_note_seq(t, (uint32_t)seq);
+        take_say(t, json);
+        return;
+    }
+    if (strcmp(state, "empty") != 0) {
+        fail(t, "受け箱の state が不明です");
+        return;
+    }
+    // ★ 空のときの seq にはいつも合わせる (サーバが再起動して巻き戻った
+    //   ときも、ほかの仕事の発話で進んだときも、それが「いまの最後」)。
+    if (has_seq) {
+        inbox_note_seq(t, (uint32_t)seq);
+    }
+    char job_state[16] = "";
+    stackee_json_str(json, "job_state", job_state, sizeof(job_state));
+    snprintf(t->cstm_job_state, sizeof(t->cstm_job_state), "%s", job_state);
+    if (job_state[0] == '\0' || strcmp(job_state, "processing") == 0) {
+        close_http(t);
+        to(t, STACKEE_TALK_INBOX_WAIT);
+        return;
+    }
+    if (strcmp(job_state, "done") == 0) {
+        close_http(t);
+        t->cstm_final = "done";
+        cleanup(t);
+        to(t, STACKEE_TALK_IDLE);       // 音なしで終わる
+        return;
+    }
+    char why[STACKEE_TALK_TEXT_MAX];
+    if (strcmp(job_state, "error") == 0) {
+        if (!stackee_json_str(json, "error", why, sizeof(why)) || why[0] == '\0') {
+            snprintf(why, sizeof(why), "コマンドが失敗しました");
+        }
+    } else {
+        snprintf(why, sizeof(why), "コマンドの状態が不明です (%s)", job_state);
+    }
+    close_http(t);
+    fail(t, why);
+}
+
+// ---------------------------------------------------------------------------
+// stackee 独自キー CSTM_0〜CSTM_9 (POST /key)
+// ---------------------------------------------------------------------------
+static void handle_key(stackee_talk_t *t, int status, const char *json) {
+    t->cstm_key_ms = mark_ms(t, t->cstm_started);
+    if (status == 200) {
+        char state[16];
+        if (stackee_json_str(json, "state", state, sizeof(state)) &&
+            strcmp(state, "ignored") == 0) {
+            // 未設定。音も出さず、短く知らせて終わる (cstm_finish が帯に出す)。
+            close_http(t);
+            t->cstm_final = "ignored";
+            cleanup(t);
+            to(t, STACKEE_TALK_IDLE);
+            char text[48];
+            snprintf(text, sizeof(text), "CSTM_%d 未設定", t->cstm_n);
+            show(t, text);
+            return;
+        }
+        fail(t, "/key の応答が不正です");
+        return;
+    }
+    if (status != 202) {
+        fail_status(t, status, false);
+        return;
+    }
+    char mode[16] = "";
+    stackee_json_str(json, "mode", mode, sizeof(mode));
+    char id[STACKEE_TALK_JOB_ID_MAX];
+    bool has_id = stackee_json_str(json, "id", id, sizeof(id)) && job_id_ok(id);
+    if (mode[0] == '\0' || strcmp(mode, "prompt") == 0) {
+        // ★ /look と**完全に同じ**後半 (status_url の返答待ち → 音声 + 字幕)。
+        t->cstm_mode = STACKEE_TALK_CSTM_MODE_PROMPT;
+        if (has_id) {
+            snprintf(t->cstm_job, sizeof(t->cstm_job), "%s", id);
+        }
+        handle_upload_done(t, json);
+        // 一次回答も /look と同じく返事を待つ前に鳴らす (play=0 では鳴らさない)。
+        if (t->state == STACKEE_TALK_POLL_WAIT && t->cstm_play) {
+            t->ops->ack_begin();
+            face(t);
+        }
+        return;
+    }
+    if (strcmp(mode, "command") != 0) {
+        char why[64];
+        snprintf(why, sizeof(why), "/key の mode が不明です (%.16s)", mode);
+        fail(t, why);
+        return;
+    }
+    if (!has_id) {
+        fail(t, "コマンドの id が不正です");
+        return;
+    }
+    snprintf(t->cstm_job, sizeof(t->cstm_job), "%s", id);
+    t->cstm_mode = STACKEE_TALK_CSTM_MODE_COMMAND;
+    close_http(t);
+    t->accepted_ms = since_ms(t, t->turn_started);
+    t->cstm_cmd_started = now(t);
+    t->inbox_loop = true;
+    t->say_play = t->cstm_play;
+    t->polled = now(t);
+    t->poll_sent = t->polled;
+    t->poll_took = STACKEE_TALK_POLL_MS;    // 最初の 1 回はすぐ聞く
+    to(t, STACKEE_TALK_INBOX_WAIT);
+    show(t, "コマンドを実行中…");
+}
+
+// CSTM の流れが idle に戻った。数え、帯に短く知らせ、ログに残す。
+// ★ update_guide のあとに呼ぶ (案内の後始末で帯が消されないように)。
+static void cstm_finish(stackee_talk_t *t) {
+    t->cstm_active = false;
+    t->inbox_loop = false;
+    t->say_cur = -1;
+    t->cstm_end_ms = mark_ms(t, t->cstm_started);
+    if (t->cstm_final == NULL) {
+        t->cstm_final = (t->error[0] != '\0') ? "error" : "done";
+    }
+    char text[STACKEE_TALK_TEXT_MAX + 24];
+    if (strcmp(t->cstm_final, "ignored") == 0) {
+        t->cstm_ignored++;
+        snprintf(text, sizeof(text), "CSTM_%d 未設定", t->cstm_n);
+        notice(t, text);
+    } else if (strcmp(t->cstm_final, "error") == 0) {
+        t->cstm_errors++;
+        snprintf(text, sizeof(text), "会話エラー: %s", t->error);
+        notice(t, text);
+    } else {
+        t->cstm_done++;
+    }
+    logf_(t, "[cstm] {\"n\":%d,\"mode\":\"%s\",\"final\":\"%s\",\"says\":%lu,"
+             "\"polls\":%d,\"seq_ms\":%lu,\"seq_reused\":%d,\"key_ms\":%lu,"
+             "\"first_say_ms\":%lu,\"end_ms\":%lu,\"play\":%d}",
+          t->cstm_n, stackee_talk_cstm_mode_names[t->cstm_mode], t->cstm_final,
+          (unsigned long)t->says, t->inbox_polls,
+          (unsigned long)t->cstm_seq_ms, t->cstm_seq_reused ? 1 : 0,
+          (unsigned long)t->cstm_key_ms, (unsigned long)t->cstm_first_say_ms,
+          (unsigned long)t->cstm_end_ms, t->cstm_play ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -679,6 +1213,18 @@ static void step_http(stackee_talk_t *t) {
         fail(t, "通信に失敗しました");
         return;
     }
+    // CSTM と受け箱。★ 応答の読み方 (200 / 202 / 409 / 404) が会話と違うので
+    //   ここで分ける。body の NUL 終端は通信側が保証する。
+    if (t->state == STACKEE_TALK_KEY || t->state == STACKEE_TALK_INBOX_SEQ ||
+        t->state == STACKEE_TALK_INBOX) {
+        const char *json = (body == NULL) ? "{}" : (const char *)body;
+        if (t->state == STACKEE_TALK_KEY) {
+            handle_key(t, status, json);
+        } else {
+            handle_inbox(t, status, json);
+        }
+        return;
+    }
     if (status != 200 && status != 202) {
         char why[96];
         if (status == 409) {
@@ -705,6 +1251,9 @@ static void step_http(stackee_talk_t *t) {
         t->audio_duration_ms =
             (int)((int64_t)t->audio_samples * 1000 / STACKEE_TALK_RATE);
         t->audio_ready_ms = since_ms(t, t->turn_started);
+        if (t->inbox_loop && t->say_cur >= 0) {
+            t->say_log[t->say_cur].audio_got = (uint32_t)len;
+        }
         to(t, STACKEE_TALK_PLAY_WAIT);
         return;
     }
@@ -810,10 +1359,22 @@ static void talk_step_inner(stackee_talk_t *t) {
             return;
 
         case STACKEE_TALK_PLAY_WAIT:
+            // ★ 受け箱の発話で play=0 (検証) なら、PCM を受け取り終えた
+            //   ここで止めて次を聞きに行く。音は 1 つも出さない。
+            if (t->inbox_loop && !t->say_play) {
+                if (t->audio == NULL || t->audio_samples <= 0) {
+                    fail(t, "返答の PCM が無い");
+                    return;
+                }
+                say_finished(t, false);
+                return;
+            }
             // ★ 画像の検証 (play=0) は**ここで止める**。PCM は受け取り終えて
             //   いる (audio_samples が数えてある) ので、鳴らす直前まで
             //   全部の段を通ったことになる。音は 1 つも出さない。
-            if (t->look && !t->look_play) {
+            //   CSTM の prompt 方式の play=0 も同じ (/look と同じ後半)。
+            if (!t->inbox_loop && ((t->look && !t->look_play) ||
+                                   (t->cstm && !t->cstm_play))) {
                 if (t->audio == NULL || t->audio_samples <= 0) {
                     fail(t, "返答の PCM が無い");
                     return;
@@ -821,8 +1382,10 @@ static void talk_step_inner(stackee_talk_t *t) {
                 t->complete_ms = since_ms(t, t->turn_started);
                 log_turn_timing(t, false);
                 t->turns++;
-                t->looks_done++;
-                t->looks_unplayed++;
+                if (t->look) {
+                    t->looks_done++;
+                    t->looks_unplayed++;
+                }
                 cleanup(t);
                 to(t, STACKEE_TALK_IDLE);
                 return;
@@ -851,22 +1414,16 @@ static void talk_step_inner(stackee_talk_t *t) {
                 //   サンプル数ではない (先読みで最大 192 ms 進んでいて、
                 //   字幕だけが音より先に出てしまう)。playing に入った時刻が
                 //   そのまま play_begin の時刻なので、引き算だけで出る。
-                if (t->page_count > 0) {
-                    int want = stackee_talk_page_at(t, since_ms(t, t->since));
-                    if (want != t->page_shown) {
-                        t->page_shown = want;
-                        if (want < 0) {
-                            subtitle(t, NULL);
-                        } else {
-                            // ★ 帯には「その頁のここまで」を積んで渡す。
-                            //   3 行が埋まった次のページで頁がめくれる
-                            //   (band が 1 行だけを返すのがその印)。
-                            char band[STACKEE_TALK_SUB_BAND_MAX];
-                            stackee_talk_band(t, want, band, sizeof(band));
-                            subtitle(t, band);
-                        }
-                    }
+                show_page_at(t, since_ms(t, t->since));
+                return;
+            }
+            // 受け箱の発話は鳴り終わったら次を聞きに行く (idle には戻らない)。
+            if (t->inbox_loop) {
+                if (t->ops->play_failed()) {
+                    fail(t, "音声再生またはマイク復帰に失敗しました");
+                    return;
                 }
+                say_finished(t, true);
                 return;
             }
             t->complete_ms = since_ms(t, t->turn_started);
@@ -882,10 +1439,41 @@ static void talk_step_inner(stackee_talk_t *t) {
             }
             return;
 
+        case STACKEE_TALK_INBOX_WAIT:
+            // ★ 全体の上限はコマンド方式のときだけ (起点は受理した時刻)。
+            if (t->cstm_active && t->cstm_mode == STACKEE_TALK_CSTM_MODE_COMMAND &&
+                since_ms(t, t->cstm_cmd_started) > STACKEE_TALK_CSTM_TIMEOUT_MS) {
+                fail(t, "コマンドの応答待ちがタイムアウトしました");
+                return;
+            }
+            {
+                // 返答待ちと同じ間合い: ロングポーリングが効いていれば
+                // (1 往復が 1 秒以上なら) すぐ、即返る中継なら 1 秒あける。
+                uint32_t gap = (t->poll_took >= STACKEE_TALK_POLL_MS)
+                                   ? 0 : STACKEE_TALK_POLL_MS;
+                if (since_ms(t, t->polled) < gap) {
+                    return;
+                }
+            }
+            inbox_poll_start(t);
+            return;
+
+        case STACKEE_TALK_SAY_TEXT: {
+            uint32_t at = since_ms(t, t->since);
+            show_page_at(t, at);
+            if (at >= t->say_until) {
+                say_finished(t, false);
+            }
+            return;
+        }
+
         case STACKEE_TALK_UPLOAD:
         case STACKEE_TALK_POLL:
         case STACKEE_TALK_SUBS:
         case STACKEE_TALK_AUDIO:
+        case STACKEE_TALK_INBOX_SEQ:
+        case STACKEE_TALK_KEY:
+        case STACKEE_TALK_INBOX:
             step_http(t);
             return;
 
@@ -914,7 +1502,7 @@ static int guide_want(const stackee_talk_t *t) {
     if (t->page_shown >= 0) {
         return STACKEE_TALK_GUIDE_HELD;
     }
-    if (t->state == STACKEE_TALK_PLAYING) {
+    if (t->state == STACKEE_TALK_PLAYING || t->state == STACKEE_TALK_SAY_TEXT) {
         // ★ 字幕を持っているなら触らない。1 ページ目が出るまでの 1 周で
         //   帯が黒くちらつかないように、**ページがあるかどうか**で見る
         //   (page_shown はまだ -1 でも、次の周で出る)。
@@ -969,10 +1557,103 @@ void stackee_talk_step(stackee_talk_t *t) {
     }
     talk_step_inner(t);
     update_guide(t);
+    // ★ 案内の後始末 (帯を消す) のあとで知らせを置く。順が逆だと消される。
+    if (t->cstm_active && t->state == STACKEE_TALK_IDLE) {
+        cstm_finish(t);
+    }
+    notice_step(t);
 }
 
 bool stackee_talk_busy(const stackee_talk_t *t) {
     return t->state != STACKEE_TALK_IDLE || t->look_reserved;
+}
+
+bool stackee_talk_uses_audio(const stackee_talk_t *t) {
+    switch (t->state) {
+        case STACKEE_TALK_IDLE:
+        case STACKEE_TALK_INBOX_SEQ:
+        case STACKEE_TALK_KEY:
+        case STACKEE_TALK_INBOX_WAIT:
+        case STACKEE_TALK_INBOX:
+        case STACKEE_TALK_SAY_TEXT:
+            // 音を使わない待ち。撮影のために押さえている間だけは従来どおり。
+            return t->look_reserved;
+        default:
+            return true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// stackee 独自キー CSTM_0〜CSTM_9 の入口
+// ---------------------------------------------------------------------------
+bool stackee_talk_cstm(stackee_talk_t *t, int n, bool play) {
+    if (n < 0 || n >= STACKEE_TALK_CSTM_COUNT) {
+        return false;
+    }
+    // ★ 会話・画像・他の CSTM の途中は黙って無視する (カメラと同じ約束)。
+    if (t->state != STACKEE_TALK_IDLE || t->look_reserved || t->pressed ||
+        t->ops->ack_active()) {
+        t->cstm_busy++;
+        return false;
+    }
+    begin_turn(t, false);
+    t->cstm = true;
+    t->cstm_active = true;
+    t->cstm_play = play;
+    t->cstm_n = n;
+    t->cstm_mode = STACKEE_TALK_CSTM_MODE_NONE;
+    t->cstm_job[0] = '\0';
+    t->cstm_job_state[0] = '\0';
+    t->cstm_final = NULL;
+    t->cstm_started = now(t);
+    t->cstm_cmd_started = 0;
+    t->cstm_seq_ms = t->cstm_key_ms = 0;
+    t->cstm_first_say_ms = t->cstm_end_ms = 0;
+    t->cstm_seq_reused = false;
+    t->cstm_count++;
+    t->inbox_loop = false;
+    t->inbox_polls = 0;
+    t->says = 0;
+    t->say_cur = -1;
+    t->say_play = play;
+    memset(t->say_log, 0, sizeof(t->say_log));
+    t->error[0] = '\0';
+    t->notice_on = false;       // 前の知らせは案内 (考えています…) が上書きする
+    snprintf(t->key_body, sizeof(t->key_body), "{\"key\":\"CSTM_%d\"}", n);
+    if (t->key_path[0] == '\0') {
+        fail(t, valid_path(t->path) ? "STACKEE_TALK_URL が /talk で終わっていません"
+                                    : "STACKEE_TALK_URL が未設定です");
+        return true;
+    }
+    if (!t->ops->net_ready()) {
+        fail(t, "Wi-Fi 未接続です");
+        return true;
+    }
+    char text[48];
+    snprintf(text, sizeof(text), "CSTM_%d を送信中…", n);
+    // ★ 覚えている seq が新しければ使い回す (GET /inbox の握手を 1 回省く)。
+    if (t->inbox_seq_valid &&
+        since_ms(t, t->inbox_seq_at) < STACKEE_TALK_INBOX_SEQ_TTL_MS) {
+        t->cstm_seq_reused = true;
+        if (!t->ops->http_start("POST", t->key_path, t->key_body,
+                                strlen(t->key_body), 8192,
+                                STACKEE_TALK_CTYPE_JSON)) {
+            fail(t, "送信を始められません");
+            return true;
+        }
+        t->http_open = true;
+        to(t, STACKEE_TALK_KEY);
+        show(t, text);
+        return true;
+    }
+    if (!t->ops->http_start("GET", t->inbox_path, NULL, 0, 2048, NULL)) {
+        fail(t, "送信を始められません");
+        return true;
+    }
+    t->http_open = true;
+    to(t, STACKEE_TALK_INBOX_SEQ);
+    show(t, text);
+    return true;
 }
 
 bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
@@ -1023,21 +1704,29 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
 // ---------------------------------------------------------------------------
 // ★ 受理より後ろ (ポーリング・done・/audio・字幕・再生) は会話と 1 行も
 //   違わない。ここにあるのは「送る前」だけ。
-bool stackee_talk_look_path(const char *talk_path, char *out, size_t cap) {
+bool stackee_talk_sibling_path(const char *talk_path, const char *name,
+                               char *out, size_t cap) {
     static const char TAIL[] = "/talk";
     const size_t tail = sizeof(TAIL) - 1;
-    if (talk_path == NULL || out == NULL || cap == 0) {
+    if (talk_path == NULL || name == NULL || out == NULL || cap == 0) {
         return false;
     }
     out[0] = '\0';
     size_t len = strlen(talk_path);
-    if (len < tail || len + 1 > cap || !valid_path(talk_path) ||
-        strcmp(talk_path + len - tail, TAIL) != 0) {
+    size_t nlen = strlen(name);
+    if (len < tail || !valid_path(talk_path) ||
+        strcmp(talk_path + len - tail, TAIL) != 0 ||
+        nlen == 0 || (len - tail) + 1 + nlen + 1 > cap) {
         return false;
     }
     memcpy(out, talk_path, len - tail);
-    memcpy(out + len - tail, "/look", tail + 1);
+    out[len - tail] = '/';
+    memcpy(out + len - tail + 1, name, nlen + 1);
     return true;
+}
+
+bool stackee_talk_look_path(const char *talk_path, char *out, size_t cap) {
+    return stackee_talk_sibling_path(talk_path, "look", out, cap);
 }
 
 // 送れないと分かっている理由を残す。★ fail() と違ってマイクにも通信にも

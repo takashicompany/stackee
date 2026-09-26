@@ -108,7 +108,7 @@ ESP32-S3 は IN エンドポイントが EP0 を含めて 5 本まで（docs.esp
   現行 CircuitPython 版の配列まで変わってしまう。ネイティブ版にしか無い
   独自キーは、位置とキーの結び付けをこちら側に置く。
 - **マウスキーは有効**（`MOUSEKEY_ENABLE` / `MOUSE_ENABLE`、`quantum/mousekey.c` を取り込み）。現行 CircuitPython 版も KMK の MouseKeys を入れている（code.py が `keyboard.modules.append(MouseKeys())`）ので、同じように使える状態にしておく。動作モードは QMK 既定（加速つき）。キーコードは標準の `MS_UP` / `MS_DOWN` / `MS_LEFT` / `MS_RGHT` / `MS_BTN1`〜 / `MS_WHLU` / `MS_WHLD` / `MS_ACL0`〜2。レポートは既存の Report ID 2 のコレクションで送る（USB・BLE 共通。将来のタッチパッドと同じ送信キューを通る）。VIA 定義 JSON は標準キーコードなので変更不要（2026-09-16 決定）。keymap.py 側に `KC.MS_*` / `KC.MB_*` / `KC.MW_*` があれば生成時に対応する QMK キーコードへ変換する（対応表は tools/keycodes.md）。
-- 独自キー（VIA の customKeycodes で表示）: STK_TALK、STK_VOLUP、STK_VOLDN、STK_HID_SWITCH、STK_BLE_REFRESH、STK_CAMERA、STK_TOUCH_SCROLL、および上記の STK_MT_n。**QK_KB_0（0x7E00）以降**に割り当て、process_record_kb で処理して false を返す（HID には出さない）。QMK の SAFE_RANGE（= QK_USER = 0x7E40）ではないのは、**VIA の customKeycodes が QK_KB_0 から順に対応づく約束**のため。並び順が実装とずれると VIA 上で別のキーとして表示されるので、生成時に機械照合する（2026-09-16 決定）。
+- 独自キー（VIA の customKeycodes で表示）: STK_TALK、STK_VOLUP、STK_VOLDN、STK_HID_SWITCH、STK_BLE_REFRESH、STK_CAMERA、STK_TOUCH_SCROLL、および上記の STK_MT_n、MIC_F13〜F24・MIC_F1〜F12、STK_CSTM_0〜9 (2026-09-27、押した瞬間にサーバへ POST /key。README §17-2c)。**QK_KB_0（0x7E00）以降**に割り当て、process_record_kb で処理して false を返す（HID には出さない）。QMK の SAFE_RANGE（= QK_USER = 0x7E40）ではないのは、**VIA の customKeycodes が QK_KB_0 から順に対応づく約束**のため。並び順が実装とずれると VIA 上で別のキーとして表示されるので、生成時に機械照合する（2026-09-16 決定）。
 - VIA 定義 JSON: firmware/via/stackee.json（layouts は keymap.py の KLE 定義から生成）。VID/PID は現行の USB 記述子と同じ値を使い、Remap のカタログ登録は行わない（定義 JSON の手動読み込みで使う）。
 - 保存: QMK の eeconfig / dynamic_keymap を NVS 上のブロブに載せる（lucky65 の eeprom.c と同じ方式。書き込みは遅延して input タスクを止めない）。
 

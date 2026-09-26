@@ -43,11 +43,26 @@ enum stackee_keycodes {
     MIC_F10              = QK_KB_0 + 29,
     MIC_F11              = QK_KB_0 + 30,
     MIC_F12              = QK_KB_0 + 31,
+    STK_CSTM_0           = QK_KB_0 + 32,
+    STK_CSTM_1           = QK_KB_0 + 33,
+    STK_CSTM_2           = QK_KB_0 + 34,
+    STK_CSTM_3           = QK_KB_0 + 35,
+    STK_CSTM_4           = QK_KB_0 + 36,
+    STK_CSTM_5           = QK_KB_0 + 37,
+    STK_CSTM_6           = QK_KB_0 + 38,
+    STK_CSTM_7           = QK_KB_0 + 39,
+    STK_CSTM_8           = QK_KB_0 + 40,
+    STK_CSTM_9           = QK_KB_0 + 41,
 };
 
 #define STACKEE_KEYCODE_FIRST QK_KB_0
-#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 31)
+#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 41)
 #define STK_MT_BASE           (QK_KB_0 + 7)
+
+// stackee 独自キー CSTM_0..CSTM_9 (押した瞬間にサーバへ POST /key)。
+// 並びは customKeycodes と同じ順。MIC_F1..F12 のうしろ。
+#define STACKEE_CSTM_FIRST    STK_CSTM_0
+#define STACKEE_CSTM_COUNT    10
 
 // ---------------------------------------------------------------
 // MIC(kc) — 押している間だけ顔を「聞き取り中」にする包み

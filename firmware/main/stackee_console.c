@@ -356,6 +356,7 @@ static void reply_hello(long id) {
                 "\"touch.status\",\"touch.inject\",\"touch.scroll\","
                 "\"camera.capture\",\"camera.power\",\"camera.dump\","
                 "\"camera.status\",\"camera.look\",\"camera.look_status\","
+                "\"key.cstm\",\"key.cstm_status\","
                 "\"app.info\",\"app.boot_factory\",\"ota.begin\",\"ota.status\","
                 "\"ota.end\",\"ota.commit\",\"ota.abort\"],"
                 "\"profile\":\"%s\",\"cdc\":%s}",

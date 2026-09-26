@@ -44,6 +44,21 @@
   #message { margin-top: 10px; padding: 8px 10px; border-radius: 6px; border: 1px solid #8886; min-height: 1.6em; }
   #message[data-tone=ok] { border-color: #2a8; background: #2a81; }
   #message[data-tone=ng] { border-color: #d55; background: #d551; }
+  .key { border-top: 1px solid #8883; padding-top: 8px; margin-top: 8px; }
+  .key:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+  .key-head { display: flex; gap: 8px; align-items: center; }
+  .key-head strong { min-width: 5.5em; font-family: ui-monospace, monospace; }
+  .key-head select { width: auto; flex: 0 1 12em; }
+  .key textarea { min-height: 4.5em; margin-top: 4px; }
+  .key input.command { font-family: ui-monospace, monospace; font-size: 13px; margin-top: 4px; }
+  .key .timeout { display: flex; gap: 6px; align-items: center; margin-top: 4px; font-size: 13px; }
+  .key .timeout input { width: 6em; padding: 4px 6px; font: inherit; border: 1px solid #8886;
+    border-radius: 6px; background: transparent; color: inherit; }
+  #presses { margin: 0; padding: 0; list-style: none; }
+  [hidden] { display: none !important; }
+  #keys-message { margin-top: 10px; padding: 8px 10px; border-radius: 6px; border: 1px solid #8886; min-height: 1.6em; }
+  #keys-message[data-tone=ok] { border-color: #2a8; background: #2a81; }
+  #keys-message[data-tone=ng] { border-color: #d55; background: #d551; }
 </style>
 </head>
 <body>
@@ -59,6 +74,8 @@
     <dt>Codex 会話</dt><dd><span id="s-codex">-</span><span class="reset" id="reset-codex"></span></dd>
     <dt>Claude 会話</dt><dd><span id="s-claude">-</span><span class="reset" id="reset-claude"></span></dd>
     <dt>作業場所</dt><dd id="s-cwd">-</dd>
+    <dt>受け箱</dt><dd id="s-inbox">-</dd>
+    <dt>直近のキー</dt><dd><ol id="presses"></ol><span id="s-presses">(なし)</span></dd>
   </dl>
 </section>
 
@@ -101,6 +118,23 @@
     上の「会話をリセット」はその種別の会話だけを捨て、次の発話から新しい会話を始めます。
   </p>
   <div id="message" role="status" aria-live="polite"></div>
+</section>
+
+<section id="keys-section">
+  <h2>独自キー (CSTM_0〜CSTM_9)</h2>
+  <div id="keys"></div>
+  <div class="actions" style="margin-top: 10px">
+    <button type="button" id="save-keys">キー設定を保存</button>
+  </div>
+  <p class="note">
+    保存するとすぐ有効になります (次の押下から)。
+    プロンプト: その文を会話エージェントに送り、返答を stackee が話します (写真を見せる時と同じ会話)。
+    コマンド: このサーバーで <code>/bin/sh -c</code> で実行します。作業場所は会話エージェントと同じフォルダ、
+    環境変数 <code>STACKEE_KEY</code> に押したキー名が入ります。
+    話させたい時はコマンドの中で <code>stackee-say "テキスト"</code> (字幕だけなら <code>stackee-say --no-voice "テキスト"</code>) を呼びます。
+    コマンドが終わるまで次の会話・キーは受け付けません。時間切れは最大600秒です。
+  </p>
+  <div id="keys-message" role="status" aria-live="polite"></div>
 </section>
 
 <script>
@@ -230,8 +264,9 @@
     return fetch("/admin/api/state", {cache: "no-store"})
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        showKeys(data);
         var dirty = edited.codex !== null || edited.claude !== null;
-        if (document.activeElement && document.activeElement.tagName === "TEXTAREA") { dirty = true; }
+        if (document.activeElement === $("instructions")) { dirty = true; }
         if (dirty && state) { showStatus(data.status, data.busy); state.status = data.status; return; }
         render(data, false);
       })
@@ -302,6 +337,161 @@
     run(function () {
       return save().then(function () { return request("POST", "/admin/api/apply", "{}", "application/json"); });
     }, "保存して反映しました。");
+  });
+
+  // ---- CSTM keys: saved on their own, independent of the agent settings above ----
+  var keyNames = ["CSTM_0", "CSTM_1", "CSTM_2", "CSTM_3", "CSTM_4",
+                  "CSTM_5", "CSTM_6", "CSTM_7", "CSTM_8", "CSTM_9"];
+  var modeNames = {none: "未設定", prompt: "プロンプト", command: "コマンド"};
+  var resultNames = {ignored: "未設定", busy: "処理中で拒否", processing: "実行中",
+                     done: "完了", error: "失敗"};
+  var keysDirty = false;
+  var keysBuilt = false;
+  var keysSaving = false;
+
+  function keySay(text, tone) {
+    var box = $("keys-message");
+    box.textContent = text;
+    if (tone) { box.setAttribute("data-tone", tone); } else { box.removeAttribute("data-tone"); }
+  }
+
+  function buildKeys(maxTimeout) {
+    var box = $("keys");
+    box.textContent = "";
+    keyNames.forEach(function (key) {
+      var row = document.createElement("div");
+      row.className = "key";
+      row.id = "key-" + key;
+      var head = document.createElement("div");
+      head.className = "key-head";
+      var name = document.createElement("strong");
+      name.textContent = key;
+      var select = document.createElement("select");
+      select.className = "mode";
+      select.setAttribute("aria-label", key + " の方式");
+      Object.keys(modeNames).forEach(function (mode) {
+        var option = document.createElement("option");
+        option.value = mode;
+        option.textContent = modeNames[mode];
+        select.appendChild(option);
+      });
+      head.appendChild(name);
+      head.appendChild(select);
+      var prompt = document.createElement("textarea");
+      prompt.className = "prompt";
+      prompt.placeholder = "エージェントに送る文";
+      prompt.setAttribute("aria-label", key + " のプロンプト");
+      var command = document.createElement("input");
+      command.type = "text";
+      command.className = "command";
+      command.placeholder = "例: stackee-say \"$(date +%H時%M分)です\"";
+      command.setAttribute("aria-label", key + " のコマンドライン");
+      command.setAttribute("autocapitalize", "off");
+      command.setAttribute("autocomplete", "off");
+      command.spellcheck = false;
+      var timeout = document.createElement("label");
+      timeout.className = "timeout";
+      timeout.textContent = "時間切れ";
+      var seconds = document.createElement("input");
+      seconds.type = "number";
+      seconds.min = "1";
+      seconds.max = String(maxTimeout || 600);
+      seconds.step = "1";
+      seconds.className = "seconds";
+      timeout.appendChild(seconds);
+      timeout.appendChild(document.createTextNode("秒"));
+      row.appendChild(head);
+      row.appendChild(prompt);
+      row.appendChild(command);
+      row.appendChild(timeout);
+      box.appendChild(row);
+      select.addEventListener("change", function () { showKeyMode(key); });
+    });
+    box.addEventListener("input", function () { keysDirty = true; });
+    box.addEventListener("change", function () { keysDirty = true; });
+    keysBuilt = true;
+  }
+
+  function keyRow(key) { return $("key-" + key); }
+
+  function showKeyMode(key) {
+    var row = keyRow(key);
+    var mode = row.querySelector(".mode").value;
+    row.querySelector(".prompt").hidden = mode !== "prompt";
+    row.querySelector(".command").hidden = mode !== "command";
+    row.querySelector(".timeout").hidden = mode !== "command";
+  }
+
+  function renderKeys(keys) {
+    keyNames.forEach(function (key) {
+      var entry = (keys && keys[key]) || {mode: "none", prompt: "", command: "", timeout: 300};
+      var row = keyRow(key);
+      row.querySelector(".mode").value = entry.mode;
+      row.querySelector(".prompt").value = entry.prompt;
+      row.querySelector(".command").value = entry.command;
+      row.querySelector(".seconds").value = String(entry.timeout);
+      showKeyMode(key);
+    });
+  }
+
+  function collectKeys() {
+    var keys = {};
+    keyNames.forEach(function (key) {
+      var row = keyRow(key);
+      var seconds = Number(row.querySelector(".seconds").value);
+      keys[key] = {
+        mode: row.querySelector(".mode").value,
+        prompt: row.querySelector(".prompt").value,
+        command: row.querySelector(".command").value,
+        timeout: seconds
+      };
+    });
+    return keys;
+  }
+
+  function showKeyStatus(data) {
+    var inbox = data.inbox || {};
+    $("s-inbox").textContent = (inbox.count || 0) + " 件 (最新 seq " + (inbox.seq || 0) + ")";
+    var list = $("presses");
+    list.textContent = "";
+    (data.key_presses || []).forEach(function (press) {
+      var item = document.createElement("li");
+      item.textContent = press.at.slice(11) + " " + press.key + " " + (modeNames[press.mode] || press.mode)
+        + " → " + (resultNames[press.result] || press.result) + (press.error ? " (" + press.error + ")" : "");
+      list.appendChild(item);
+    });
+    $("s-presses").hidden = list.childNodes.length > 0;
+  }
+
+  function showKeys(data) {
+    if (data.keys === undefined || (data.keys === null && !data.keys_error)) {
+      $("keys-section").hidden = true;
+      return;
+    }
+    showKeyStatus(data);
+    if (!keysBuilt) { buildKeys(data.choices && data.choices.key_timeout_max); }
+    var focused = document.activeElement && $("keys").contains(document.activeElement);
+    if (keysDirty || focused || keysSaving) { return; }
+    renderKeys(data.keys);
+    if (data.keys_error) { keySay("keys.json を読めません: " + data.keys_error, "ng"); }
+  }
+
+  $("save-keys").addEventListener("click", function () {
+    if (keysSaving || !keysBuilt) { return; }
+    keysSaving = true;
+    $("save-keys").disabled = true;
+    keySay("送信中…", null);
+    request("PUT", "/admin/api/keys", JSON.stringify(collectKeys()), "application/json")
+      .then(function (data) {
+        keysDirty = false;
+        renderKeys(data.keys);
+        keySay("保存しました。次の押下から使われます。", "ok");
+      })
+      .catch(function (error) { keySay("失敗: " + error.message, "ng"); })
+      .then(function () {
+        keysSaving = false;
+        $("save-keys").disabled = false;
+      });
   });
 
   showResets();
