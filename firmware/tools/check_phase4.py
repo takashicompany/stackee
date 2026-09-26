@@ -210,7 +210,19 @@ def inject_ms(client, timeout=5.0):
 
 def check_look(client, result, warmup, verbose=True):
     # ★ 二重の守り。play=0 で再生の直前に止まるが、ヌル出力も立てておく。
+    #   ★★ 終わったら元に戻す。立てたままだと、そのあと人が話しかけても
+    #   AI の返答が鳴らない (字幕だけ出る)。2026-09-26 に実際に踏んだ。
+    was_null = client.request('audio.status', timeout=5.0).get('null') is True
     result['look_null'] = client.request('audio.null', timeout=5.0, on=True)
+    try:
+        _check_look_body(client, result, warmup, verbose)
+    finally:
+        if not was_null:
+            result['look_null_restored'] = client.request(
+                'audio.null', timeout=5.0, on=False)
+
+
+def _check_look_body(client, result, warmup, verbose):
     before = client.request('camera.look_status', timeout=5.0)
     result['look_before'] = before
     seq0 = before.get('seq', 0)
