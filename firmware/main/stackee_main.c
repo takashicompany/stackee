@@ -21,6 +21,7 @@
 #include "stackee_assets.h"
 #include "stackee_audio.h"
 #include "stackee_board.h"
+#include "stackee_heapdiag.h"
 #include "stackee_http.h"
 #include "stackee_settings.h"
 #include "stackee_talksm.h"
@@ -219,6 +220,8 @@ void app_main(void) {
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    // heap.info (内蔵 RAM の内訳) と、起動おわりの目印。
+    stackee_heapdiag_start();
 
     // 10. メインループ。キーは専用タスク (CPU1・最優先) が見ているので、
     //    ここはコンソールの面倒を見るだけ。

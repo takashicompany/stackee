@@ -39,6 +39,14 @@
 //   saylog            受け取った発話の記録 (SAY …、1 件 1 行)
 //   sibling <path> <name>  "/talk" → "/<name>" の置き換え。SIBLING <結果|->
 //   wrap <cols> <lines> <text>  帯の折り返し。WRAP <行数> <\n で繋いだ結果>
+//   watch <0|1> [play]  暇なときに受け箱を見る (常時ポーリング) の入り切り
+//   warm <0|1>        使い回せる接続があることにする (既定 1)
+//   watchok <0|1>     外の都合 (OTA など) で回してよいか (既定 1)
+//   watchprint        常時ポーリングの様子 (WATCHINFO …)
+//   audiobusy         AUDIOBUSY <busy> <audio_busy> <uses_audio>
+//
+// ★ 通信中の要求を閉じた (打ち切った) ときは HABORT が出る。
+//   録音を始めたときに先に張ろうとすると PREWARM <path> が出る。
 //
 // 出てくる行: STATE / SHOW / HTTP / CTYPE / ACK / PLAY / REC / TIME / SUB
 #include <stdio.h>
@@ -262,6 +270,9 @@ static int ops_http_poll(int *status, const uint8_t **body, size_t *len) {
 }
 
 static void ops_http_close(void) {
+    if (g_http_busy && g_http_body == NULL && !g_http_fail) {
+        printf("HABORT %u\n", (unsigned)g_now);      // 応答の前に閉じた = 打ち切り
+    }
     g_http_busy = false;
     g_http_fail = false;
     free(g_http_body);
@@ -299,6 +310,15 @@ static void ops_subtitle(const char *text) {
     printf("\n");
 }
 
+static bool g_warm = true;
+static bool g_watch_ok = true;
+static bool ops_http_warm(void) { return g_warm; }
+static bool ops_http_prewarm(const char *path) {
+    printf("PREWARM %s\n", path);
+    return true;
+}
+static bool ops_watch_ok(void) { return g_watch_ok; }
+
 static void ops_face(bool recording, bool busy, bool speaking) {
     (void)recording;
     (void)busy;
@@ -326,6 +346,9 @@ static const stackee_talk_ops_t OPS = {
     .log = ops_log,
     .face = ops_face,
     .subtitle = ops_subtitle,
+    .http_warm = ops_http_warm,
+    .watch_ok = ops_watch_ok,
+    .http_prewarm = ops_http_prewarm,
 };
 
 static int g_last_state = -1;
@@ -577,6 +600,36 @@ int main(void) {
                 if (*p == '\n') { printf("\\n"); } else { putchar(*p); }
             }
             printf("\n");
+        } else if (strcmp(line, "watch") == 0) {
+            int on = arg ? atoi(arg) : 1;
+            char *second = arg ? strchr(arg, ' ') : NULL;
+            bool play = second ? atoi(second + 1) != 0 : true;
+            stackee_talk_watch_enable(&g_talk, on != 0, play);
+        } else if (strcmp(line, "warm") == 0) {
+            g_warm = arg && atoi(arg) != 0;
+        } else if (strcmp(line, "watchok") == 0) {
+            g_watch_ok = arg && atoi(arg) != 0;
+        } else if (strcmp(line, "watchprint") == 0) {
+            printf("WATCHINFO on=%d play=%d phase=%s http=%d long=%d seqknown=%d "
+                   "seq=%u say=%d polls=%u received=%u played=%u aborts=%u "
+                   "fails=%u skipped=%u status=%d backoff=%u next_in=%d "
+                   "busy=%d error=%s\n",
+                   g_talk.watch_on ? 1 : 0, g_talk.watch_play ? 1 : 0,
+                   stackee_talk_watch_phase_names[g_talk.watch_phase],
+                   g_talk.watch_http ? 1 : 0, g_talk.watch_long ? 1 : 0,
+                   g_talk.watch_seq_known ? 1 : 0, (unsigned)g_talk.inbox_seq,
+                   g_talk.watch_say ? 1 : 0, (unsigned)g_talk.watch_polls,
+                   (unsigned)g_talk.watch_received, (unsigned)g_talk.watch_played,
+                   (unsigned)g_talk.watch_aborts, (unsigned)g_talk.watch_fails,
+                   (unsigned)g_talk.watch_skipped, g_talk.watch_status,
+                   (unsigned)g_talk.watch_backoff,
+                   (int)(g_talk.watch_next - g_now),
+                   stackee_talk_busy(&g_talk) ? 1 : 0,
+                   g_talk.watch_error[0] ? g_talk.watch_error : "-");
+        } else if (strcmp(line, "audiobusy") == 0) {
+            printf("AUDIOBUSY %d %d %d\n", stackee_talk_busy(&g_talk) ? 1 : 0,
+                   stackee_talk_audio_busy(&g_talk) ? 1 : 0,
+                   stackee_talk_uses_audio(&g_talk) ? 1 : 0);
         } else if (strcmp(line, "print") == 0) {
             printf("NOW %u STATE %s POLLS %d ALLOC %d RELEASE %d "
                    "PAGES %d PAGE %d DROPPED %d SUBBYTES %u SRC %s "

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "esp_coexist.h"
+#include "esp_heap_caps.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -37,7 +38,7 @@ static const char *TAG = "wifi";
 #define STORE_MAX        2560
 #define SCAN_RECORDS     24
 
-static struct {
+typedef struct {
     bool started;
     bool driver_up;
     bool radio_on;
@@ -58,7 +59,12 @@ static struct {
     // ★ 状態機械は net タスクが進め、console タスクが kick / suspend で
     //   割り込む。同じ構造体を 2 つのタスクが書き換えるので錠をかける。
     SemaphoreHandle_t lock;
-} w;
+} wifi_ctx_t;
+// ★ 5 KB (走査結果 24 件が大半)。触るのは net / console / イベントの
+//   タスクだけなので PSRAM に取る (2026-09-27、README §24-5)。取るのは
+//   stackee_wifi_start の最初。それより前の問い合わせは「off」と答える。
+static wifi_ctx_t *s_w;
+#define w (*s_w)
 
 static bool sm_lock(void) {
     return w.lock != NULL && xSemaphoreTake(w.lock, pdMS_TO_TICKS(2000)) == pdTRUE;
@@ -651,6 +657,15 @@ static void net_task(void *unused) {
 }
 
 esp_err_t stackee_wifi_start(void) {
+    if (s_w == NULL) {
+        s_w = heap_caps_calloc(1, sizeof(*s_w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_w == NULL) {
+            s_w = heap_caps_calloc(1, sizeof(*s_w), MALLOC_CAP_8BIT);
+        }
+        if (s_w == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
     if (w.started) {
         return ESP_OK;
     }
@@ -713,29 +728,29 @@ esp_err_t stackee_wifi_start(void) {
 }
 
 bool stackee_wifi_connected(void) {
-    return w.started && stackee_wifi_sm_connected(&w.sm);
+    return s_w != NULL && w.started && stackee_wifi_sm_connected(&w.sm);
 }
 
 const char *stackee_wifi_state_name(void) {
-    return w.started ? stackee_wifi_sm_state_name(&w.sm) : "off";
+    return (s_w != NULL && w.started) ? stackee_wifi_sm_state_name(&w.sm) : "off";
 }
 
 const char *stackee_wifi_ssid(void) {
-    return w.sm.ssid;
+    return s_w ? w.sm.ssid : "";
 }
 
 const char *stackee_wifi_ip(void) {
-    return w.sm.ip;
+    return s_w ? w.sm.ip : "";
 }
 
 int stackee_wifi_net_count(void) {
-    return w.sm.nets.count;
+    return s_w ? w.sm.nets.count : 0;
 }
 
 uint32_t stackee_wifi_connect_ms(void) {
-    return w.sm.connect_ms;
+    return s_w ? w.sm.connect_ms : 0;
 }
 
 uint32_t stackee_wifi_up_ms(void) {
-    return w.sm.up_at_ms;
+    return s_w ? w.sm.up_at_ms : 0;
 }

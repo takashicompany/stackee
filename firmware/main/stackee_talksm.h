@@ -32,6 +32,15 @@
 //   ★ 受け箱と発話の再生 (inbox_*) はキー押下に縛られない形にしてある
 //     (第 2 段で「暇なときに常に回す」ときに同じ部品を使う)。
 //
+// 暇なときに受け箱を見る (常時ポーリング、2026-09-27、inbox.status):
+//   会話・写真・CSTM のどれもしておらず、Wi-Fi が上がっている間
+//   GET /inbox (起動時・再接続時。最新 seq を得るだけで、それより前は鳴らさない)
+//   GET /inbox?after=<seq>&wait=25   を回し続ける。"say" が来たら
+//   CSTM のコマンドと同じ部品で 1 件鳴らす / 字幕を出す。
+//   ★ 待っている間は状態機械は idle のまま (busy ではない)。キーは最優先で、
+//     押した瞬間に待ちを打ち切る (通信側がソケットを shutdown して起こす)。
+//     断るのは発話を扱っている間だけ。
+//
 // ★ ESP-IDF に依存しない。録音・再生・通信・画面は ops で外から差し込む。
 //   hostbuild (tools/test_talk_host.py) が偽の ops を挿して、タイムアウト・
 //   ポーリング間隔・一次回答と最終回答の排他を時刻つきで確かめる。
@@ -154,6 +163,27 @@ typedef enum {
 // key.cstm_status に残す発話の記録 (先頭からこの数まで。数は says に全部)。
 #define STACKEE_TALK_SAY_LOG         8
 #define STACKEE_TALK_JOB_ID_MAX      64
+
+// ---- 暇なときに受け箱を見る (常時ポーリング、2026-09-27) --------------------
+// 失敗したら 5 秒 → 10 → 20 → 40 → 60 秒 (上限) あけて聞き直す。
+#define STACKEE_TALK_WATCH_BACKOFF_MIN_MS 5000
+#define STACKEE_TALK_WATCH_BACKOFF_MAX_MS 60000
+// 中継が /inbox を知らない (404)。10 分は聞かない (静かに休む)。
+#define STACKEE_TALK_WATCH_404_MS    600000
+// ロングポーリングが効いていない (1 秒未満で空が返る) ときの間合い。
+#define STACKEE_TALK_WATCH_QUICK_MS  5000
+
+typedef enum {
+    STACKEE_TALK_WATCH_OFF = 0, // 無効 (inbox.enable {"on":0})
+    STACKEE_TALK_WATCH_WAIT,    // 撃てる時を待っている (暇でない・間合い・休み)
+    STACKEE_TALK_WATCH_SEQ,     // GET /inbox (最新 seq を得る)
+    STACKEE_TALK_WATCH_POLL,    // GET /inbox?after=
+    STACKEE_TALK_WATCH_SAY,     // 受けた発話を扱っている (この間は busy)
+    STACKEE_TALK_WATCH_SLEEP,   // 中継が古い (404)。しばらく聞かない
+    STACKEE_TALK_WATCH_PHASES,
+} stackee_talk_watch_phase_t;
+
+extern const char *const stackee_talk_watch_phase_names[STACKEE_TALK_WATCH_PHASES];
 
 typedef enum {
     STACKEE_TALK_CSTM_MODE_NONE = 0,    // まだ分からない (受理の前)
@@ -320,6 +350,18 @@ typedef struct {
     // 字幕の帯に出す 1 行。NULL / 空で帯を消す。無くてもよい (NULL 可)。
     // ★ ページが変わった時にだけ呼ぶ (毎周は呼ばない)。
     void (*subtitle)(const char *text);
+
+    // ---- 常時ポーリング (2026-09-27)。どちらも NULL 可 ----
+    // 使い回せる接続があるか。無ければ最初の 1 本は待たない要求にする
+    // (張っている最中にキーで打ち切られても、その接続を次の要求に回せる)。
+    // NULL なら「ある」とみなす。
+    bool (*http_warm)(void);
+    // 外の都合で受け箱を回してはいけないとき false (OTA の書き込み中・
+    // マイクの自己診断中など)。NULL なら常に true。
+    bool (*watch_ok)(void);
+    // 接続が無ければ、返事を捨てる短い GET (path) で先に張っておく。会話キーの
+    // 録音中に TLS の握手を済ませるため。NULL 可。
+    bool (*http_prewarm)(const char *path);
 } stackee_talk_ops_t;
 
 typedef struct {
@@ -445,6 +487,30 @@ typedef struct {
     bool     notice_on;
     uint32_t notice_since;
     char     notice[STACKEE_TALK_SUB_BAND_MAX];
+
+    // ---- 暇なときに受け箱を見る (常時ポーリング、2026-09-27) ----
+    // ★ 待っているあいだ state は IDLE のまま。通信は watch_http で持つ
+    //   (http_open は会話の往復のもの)。発話を受けたら状態機械に渡す
+    //   (watch_say)。その間だけ busy。
+    bool     watch_on;          // 有効 (既定は audio が立てる。NVS には残さない)
+    bool     watch_play;        // 受けた発話を鳴らす (false = 数えるだけ、検証用)
+    int      watch_phase;       // stackee_talk_watch_phase_t
+    bool     watch_http;        // 受け箱の要求を持っている
+    bool     watch_long;        // それは wait= 付き (ロングポーリング)
+    bool     watch_seq_known;   // 最新 seq を知っている (起動・再接続で false)
+    bool     watch_say;         // いま扱っている発話は常時ポーリングから
+    bool     watch_net;         // 前の周で Wi-Fi が上がっていたか
+    uint32_t watch_next;        // 次に撃ってよい時刻
+    uint32_t watch_backoff;     // 失敗の間合い [ms] (0 = 失敗していない)
+    uint32_t watch_sent;        // いまの要求を撃った時刻
+    uint32_t watch_polls;       // 撃った数 (seq を含む)
+    uint32_t watch_received;    // 受けた発話の数
+    uint32_t watch_played;      // そのうち鳴らした / 字幕を出した数
+    uint32_t watch_aborts;      // キーなどで待ちを打ち切った数
+    uint32_t watch_fails;       // 失敗の数 (通信・応答の不正・発話の扱い)
+    uint32_t watch_skipped;     // 見たことのある seq で飛ばした数
+    int      watch_status;      // 直近の HTTP の status
+    char     watch_error[96];   // 直近のエラー
 } stackee_talk_t;
 
 // 再生位置 [ms] に出すページの番号。無ければ -1。
@@ -550,6 +616,17 @@ bool stackee_talk_sibling_path(const char *talk_path, const char *name,
 // ★ URL 未設定や Wi-Fi なしで始められないときは、会話と同じ「会話エラー: …」を
 //   出して true を返す (流れとしては始まって、すぐ error で終わった)。
 bool stackee_talk_cstm(stackee_talk_t *t, int n, bool play);
+
+// ---- 暇なときに受け箱を見る (常時ポーリング) ---------------------------------
+// on / play を切り替える (inbox.enable)。off にすると待っている要求を打ち切る。
+// 呼ぶのは錠を持った console か audio タスク。
+void stackee_talk_watch_enable(stackee_talk_t *t, bool on, bool play);
+
+// 発話の扱いを含めて「音を使っている」か (stackee_audio_busy に使う)。
+// ★ 常時ポーリングの待ちと、受けた発話の PCM を取っている間は false。
+//   鳴らしている (PLAY_WAIT / PLAYING) 間だけ true。会話・画像・CSTM は
+//   従来どおり busy と同じ答え。
+bool stackee_talk_audio_busy(const stackee_talk_t *t);
 
 // 字幕の帯に出すため、UTF-8 の文を 1 行 cols 字 (コードポイント数) で割る。
 // 最大 lines 行。入らない残りは捨てる。戻り値は行数。

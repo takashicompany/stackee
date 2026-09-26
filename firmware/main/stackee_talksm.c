@@ -16,6 +16,10 @@ const char *const stackee_talk_cstm_mode_names[STACKEE_TALK_CSTM_MODES] = {
     "", "prompt", "command",
 };
 
+const char *const stackee_talk_watch_phase_names[STACKEE_TALK_WATCH_PHASES] = {
+    "off", "wait", "seq", "poll", "say", "sleep",
+};
+
 const char *const stackee_talk_sub_src_names[STACKEE_TALK_SUB_SRCS] = {
     "none", "inline", "url",
 };
@@ -297,7 +301,21 @@ static void cleanup(stackee_talk_t *t) {
     t->count = 0;
 }
 
+static void watch_backoff(stackee_talk_t *t, const char *why);
+
 static void fail(stackee_talk_t *t, const char *why) {
+    if (t->watch_say) {
+        // ★ 常時ポーリングで受けた発話の失敗。ユーザーが頼んだものではない
+        //   ので「会話エラー」は出さず、ログと inbox.status にだけ残して
+        //   間合いをあける。マイクは開けていないので record_end も呼ばない
+        //   (呼ぶと USB マイクが使っている I2S を畳んでしまう)。
+        logf_(t, "[inbox] 発話を扱えませんでした: %s", why);
+        cleanup(t);
+        t->watch_say = false;
+        to(t, STACKEE_TALK_IDLE);
+        watch_backoff(t, why);
+        return;
+    }
     snprintf(t->error, sizeof(t->error), "%s", why);
     t->errors++;
     // マイクの復帰は必ず試す (stackee_halfduplex の 7..9 段と同じ気持ち)。
@@ -339,6 +357,11 @@ void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
     }
     t->say_cur = -1;
     t->page_shown = -1;
+    // 常時ポーリングは既定で止めておく (立てるのは audio。hostbuild の
+    // 台本は `watch 1` を書いたときだけ受け箱を回す)。
+    t->watch_on = false;
+    t->watch_play = true;
+    t->watch_phase = STACKEE_TALK_WATCH_OFF;
     t->state = STACKEE_TALK_IDLE;
     t->since = ops->now_ms();
     t->guide_rec = STACKEE_TALK_GUIDE_RECORDING;
@@ -356,6 +379,24 @@ void stackee_talk_set_pressed(stackee_talk_t *t, bool pressed) {
 // ---------------------------------------------------------------------------
 // 録音
 // ---------------------------------------------------------------------------
+static void watch_abort(stackee_talk_t *t, bool count);
+
+// 接続が無ければ先に張る (返事は捨てる短い GET)。受け箱の URL が作れる
+// ときだけ (中継が古くても 404 が返るだけで、TLS は張れる)。
+static void prewarm(stackee_talk_t *t) {
+    if (t->ops->http_prewarm == NULL || t->inbox_path[0] == '\0') {
+        return;
+    }
+    char path[STACKEE_TALK_PATH_MAX + 24];
+    if (t->inbox_seq_valid) {
+        snprintf(path, sizeof(path), "%s?after=%lu", t->inbox_path,
+                 (unsigned long)t->inbox_seq);
+    } else {
+        snprintf(path, sizeof(path), "%s", t->inbox_path);
+    }
+    t->ops->http_prewarm(path);
+}
+
 static bool start_recording(stackee_talk_t *t) {
     // ★ 押下 → 最初のサンプルまでを測る起点。マイクを開ける前に取る。
     t->rec_request = now(t);
@@ -383,6 +424,11 @@ static bool start_recording(stackee_talk_t *t) {
     t->error[0] = '\0';
     to(t, STACKEE_TALK_RECORDING);
     show(t, "録音中… 離すと送信");
+    // ★ 録音を始めてから (押下 → 録音開始を 1 µs も遅らせない)、受け箱の
+    //   待ちを打ち切り、録音の数秒のあいだに接続を張っておく。離したあとの
+    //   POST が TLS の握手 (実機で約 4.5 秒) を待たずに済む。
+    watch_abort(t, true);
+    prewarm(t);
     return true;
 }
 
@@ -912,10 +958,21 @@ static void say_finished(stackee_talk_t *t, bool played) {
     if (t->say_cur >= 0) {
         t->say_log[t->say_cur].played = played;
     }
-    logf_(t, "[cstm-say] {\"n\":%lu,\"seq\":%lu,\"audio_bytes\":%ld,"
-             "\"sub_pages\":%d,\"played\":%d}",
-          (unsigned long)t->says, (unsigned long)t->inbox_seq,
-          (long)t->audio_samples * 2, t->page_count, played ? 1 : 0);
+    if (t->watch_say) {
+        if (played) {
+            t->watch_played++;
+        }
+        logf_(t, "[inbox-say] {\"seq\":%lu,\"audio_bytes\":%ld,"
+                 "\"sub_pages\":%d,\"played\":%d,\"received\":%lu}",
+              (unsigned long)t->inbox_seq, (long)t->audio_samples * 2,
+              t->page_count, played ? 1 : 0, (unsigned long)t->watch_received);
+        t->watch_say = false;
+    } else {
+        logf_(t, "[cstm-say] {\"n\":%lu,\"seq\":%lu,\"audio_bytes\":%ld,"
+                 "\"sub_pages\":%d,\"played\":%d}",
+              (unsigned long)t->says, (unsigned long)t->inbox_seq,
+              (long)t->audio_samples * 2, t->page_count, played ? 1 : 0);
+    }
     t->say_cur = -1;
     cleanup(t);
     if (!t->inbox_loop) {
@@ -930,10 +987,15 @@ static void say_finished(stackee_talk_t *t, bool played) {
 
 // 発話 1 件 ({"state":"say", …}) を受け取った。json は close_http まで有効。
 static void take_say(stackee_talk_t *t, const char *json) {
-    t->says++;
-    t->say_cur = (t->says <= STACKEE_TALK_SAY_LOG) ? (int)t->says - 1 : -1;
-    if (t->cstm_first_say_ms == 0) {
-        t->cstm_first_say_ms = mark_ms(t, t->cstm_started);
+    // ★ 常時ポーリングの発話は CSTM の記録 (key.cstm_status) に混ぜない。
+    if (!t->watch_say) {
+        t->says++;
+        t->say_cur = (t->says <= STACKEE_TALK_SAY_LOG) ? (int)t->says - 1 : -1;
+        if (t->cstm_first_say_ms == 0) {
+            t->cstm_first_say_ms = mark_ms(t, t->cstm_started);
+        }
+    } else {
+        t->say_cur = -1;
     }
     t->audio_samples = 0;
     t->audio_duration_ms = 0;
@@ -957,7 +1019,8 @@ static void take_say(stackee_talk_t *t, const char *json) {
         say->audio = (got == 1);
     }
     close_http(t);
-    if (t->reply[0] != '\0') {
+    // ★ 常時ポーリングの play=0 (数えるだけ) は画面の 1 行にも出さない。
+    if (t->reply[0] != '\0' && !(t->watch_say && !t->say_play)) {
         show(t, t->reply);
     }
     if (got == 1) {
@@ -973,6 +1036,11 @@ static void take_say(stackee_talk_t *t, const char *json) {
         return;
     }
     // 音なし。字幕だけ出す (本文が無ければ返答文を割って出す)。
+    // ★ 常時ポーリングの play=0 (数えるだけ) は帯にも出さない。
+    if (t->watch_say && !t->say_play) {
+        say_finished(t, false);
+        return;
+    }
     if (t->page_count == 0) {
         pages_from_text(t, t->reply);
         if (t->say_cur >= 0) {
@@ -1175,6 +1243,261 @@ static void cstm_finish(stackee_talk_t *t) {
           (unsigned long)t->cstm_end_ms, t->cstm_play ? 1 : 0);
 }
 
+
+// ---------------------------------------------------------------------------
+// 暇なときに受け箱を見る (常時ポーリング、2026-09-27)
+// ---------------------------------------------------------------------------
+// ★ 待っている間は state を IDLE のまま動かさない。だから会話キー・カメラ・
+//   CSTM・talk.inject はいつでも入れて、入った瞬間にこちらの待ちを打ち切る
+//   (watch_abort)。USB マイク・音量の保存・Wi-Fi の走査の「後回し」も
+//   待っているだけでは発動しない (どれも busy を見ている)。
+// ★ 発話 ("say") を受けたら、CSTM のコマンドと同じ部品 (take_say →
+//   字幕の GET → PCM の GET → 再生 / 字幕だけ) に渡す。その間だけ busy。
+
+// 撃ってよいか (暇で、外の都合も許す)。
+static bool watch_can_run(stackee_talk_t *t) {
+    return t->state == STACKEE_TALK_IDLE && !t->look_reserved && !t->pressed &&
+           !t->cstm_active && t->inbox_path[0] != '\0' &&
+           !t->ops->ack_active() && !t->ops->play_active() &&
+           (t->ops->watch_ok == NULL || t->ops->watch_ok()) &&
+           t->ops->net_ready();
+}
+
+// 待っている要求を打ち切る (キーが押された・止められた)。通信中なら
+// 通信側がソケットを shutdown して起こし、次の要求はすぐ受け付けられる。
+static void watch_abort(stackee_talk_t *t, bool count) {
+    if (!t->watch_http) {
+        return;
+    }
+    t->ops->http_close();
+    t->watch_http = false;
+    if (count) {
+        t->watch_aborts++;
+    }
+    if (t->watch_phase == STACKEE_TALK_WATCH_SEQ ||
+        t->watch_phase == STACKEE_TALK_WATCH_POLL) {
+        t->watch_phase = STACKEE_TALK_WATCH_WAIT;
+    }
+    // ★ 取りこぼしは無い (seq で続きから聞く)。暇に戻ったらすぐ聞き直す。
+    t->watch_next = now(t);
+}
+
+static void watch_backoff(stackee_talk_t *t, const char *why) {
+    t->watch_fails++;
+    snprintf(t->watch_error, sizeof(t->watch_error), "%s", why);
+    t->watch_backoff = (t->watch_backoff == 0)
+                           ? STACKEE_TALK_WATCH_BACKOFF_MIN_MS
+                           : t->watch_backoff * 2;
+    if (t->watch_backoff > STACKEE_TALK_WATCH_BACKOFF_MAX_MS) {
+        t->watch_backoff = STACKEE_TALK_WATCH_BACKOFF_MAX_MS;
+    }
+    t->watch_next = now(t) + t->watch_backoff;
+    t->watch_phase = STACKEE_TALK_WATCH_WAIT;
+    logf_(t, "[inbox] %s (次は %lu ms 後)", why, (unsigned long)t->watch_backoff);
+}
+
+void stackee_talk_watch_enable(stackee_talk_t *t, bool on, bool play) {
+    t->watch_play = play;
+    if (on == t->watch_on) {
+        return;
+    }
+    t->watch_on = on;
+    if (!on) {
+        watch_abort(t, false);
+        t->watch_phase = STACKEE_TALK_WATCH_OFF;
+        return;
+    }
+    t->watch_phase = STACKEE_TALK_WATCH_WAIT;
+    t->watch_backoff = 0;
+    t->watch_next = now(t);
+}
+
+// 受け箱の応答。★ body は通信側の受信バッファ。使い終えたら閉じる。
+static void watch_handle(stackee_talk_t *t, int status, const char *json) {
+    t->watch_status = status;
+    bool was_seq = (t->watch_phase == STACKEE_TALK_WATCH_SEQ);
+    if (status == 404) {
+        // 古い中継。しばらく聞かない (静かに休む)。
+        t->ops->http_close();
+        snprintf(t->watch_error, sizeof(t->watch_error),
+                 "中継が /inbox に対応していません (HTTP 404)");
+        t->watch_phase = STACKEE_TALK_WATCH_SLEEP;
+        t->watch_next = now(t) + STACKEE_TALK_WATCH_404_MS;
+        logf_(t, "[inbox] 中継が /inbox に対応していない (404)。%lu 秒休む",
+              (unsigned long)(STACKEE_TALK_WATCH_404_MS / 1000));
+        return;
+    }
+    if (status != 200) {
+        t->ops->http_close();
+        char why[48];
+        snprintf(why, sizeof(why), "サーバー HTTP %d", status);
+        watch_backoff(t, why);
+        return;
+    }
+    char state[16];
+    long seq = -1;
+    bool has_state = stackee_json_str(json, "state", state, sizeof(state));
+    bool has_seq = stackee_json_int(json, "seq", &seq) && seq >= 0;
+    if (!has_state) {
+        t->ops->http_close();
+        watch_backoff(t, "受け箱の応答が不正です");
+        return;
+    }
+    if (was_seq) {
+        t->ops->http_close();
+        if (!has_seq) {
+            watch_backoff(t, "受け箱の応答に seq がありません");
+            return;
+        }
+        // ★ いまの最後を覚えるだけ。これより前の発話は鳴らさない。
+        inbox_note_seq(t, (uint32_t)seq);
+        t->watch_seq_known = true;
+        t->watch_backoff = 0;
+        t->watch_error[0] = '\0';
+        t->watch_phase = STACKEE_TALK_WATCH_WAIT;
+        t->watch_next = now(t);
+        return;
+    }
+    uint32_t took = since_ms(t, t->watch_sent);
+    if (strcmp(state, "say") == 0) {
+        if (!has_seq) {
+            t->ops->http_close();
+            watch_backoff(t, "受け箱の発話に seq がありません");
+            return;
+        }
+        t->watch_backoff = 0;
+        t->watch_error[0] = '\0';
+        t->watch_next = now(t);
+        t->watch_phase = STACKEE_TALK_WATCH_WAIT;
+        if (t->inbox_seq_valid && (uint32_t)seq <= t->inbox_seq) {
+            t->ops->http_close();       // 見たことのある発話
+            t->watch_skipped++;
+            return;
+        }
+        inbox_note_seq(t, (uint32_t)seq);
+        t->watch_received++;
+        logf_(t, "[inbox] 発話を受けた (seq %ld, play=%d)", seq,
+              t->watch_play ? 1 : 0);
+        // 状態機械に渡す。★ 通信 (受信バッファ) の持ち主もここで移る。
+        t->watch_say = true;
+        t->watch_phase = STACKEE_TALK_WATCH_SAY;
+        t->look = false;
+        t->cstm = false;
+        t->inbox_loop = false;
+        t->say_play = t->watch_play;
+        t->error[0] = '\0';
+        t->turn_started = now(t);
+        t->http_open = true;
+        take_say(t, json);
+        return;
+    }
+    t->ops->http_close();
+    if (strcmp(state, "empty") != 0) {
+        watch_backoff(t, "受け箱の state が不明です");
+        return;
+    }
+    if (has_seq) {
+        inbox_note_seq(t, (uint32_t)seq);
+    }
+    t->watch_backoff = 0;
+    t->watch_error[0] = '\0';
+    t->watch_phase = STACKEE_TALK_WATCH_WAIT;
+    // ★ ロングポーリングなのに 1 秒未満で空が返った = 中継が握ってくれない。
+    //   毎秒撃たないよう間合いをあける。張り直しの最初の 1 本 (待たない
+    //   要求) なら、すぐロングポーリングに移る。
+    // ★ 待たない要求のあとで接続が残らなかった (相手が Connection: close を
+    //   返す中継) ときも間合いをあける。あけないと握手を休みなく繰り返す。
+    bool warm = (t->ops->http_warm == NULL) || t->ops->http_warm();
+    bool quick = t->watch_long ? (took < STACKEE_TALK_POLL_MS) : !warm;
+    t->watch_next = now(t) + (quick ? STACKEE_TALK_WATCH_QUICK_MS : 0);
+}
+
+static void watch_start(stackee_talk_t *t) {
+    char path[STACKEE_TALK_PATH_MAX + 48];
+    bool warm = (t->ops->http_warm == NULL) || t->ops->http_warm();
+    int n;
+    if (!t->watch_seq_known) {
+        n = snprintf(path, sizeof(path), "%s", t->inbox_path);
+        t->watch_long = false;
+    } else if (warm) {
+        n = snprintf(path, sizeof(path), "%s?after=%lu&wait=%d", t->inbox_path,
+                     (unsigned long)t->inbox_seq, STACKEE_TALK_INBOX_WAIT_S);
+        t->watch_long = true;
+    } else {
+        // ★ 接続が無い (張り直し)。最初の 1 本は待たない要求にする。握手の
+        //   最中にキーで打ち切られても、張れた接続をそのまま次の要求 (会話の
+        //   POST など) に回せる。
+        n = snprintf(path, sizeof(path), "%s?after=%lu", t->inbox_path,
+                     (unsigned long)t->inbox_seq);
+        t->watch_long = false;
+    }
+    if (n < 0 || (size_t)n >= sizeof(path)) {
+        watch_backoff(t, "受け箱の URL が長すぎます");
+        return;
+    }
+    if (!t->ops->http_start("GET", path, NULL, 0, STACKEE_TALK_POLL_LIMIT, NULL)) {
+        watch_backoff(t, "受け箱の取得を始められません");
+        return;
+    }
+    t->watch_http = true;
+    t->watch_sent = now(t);
+    t->watch_polls++;
+    t->watch_phase = t->watch_seq_known ? STACKEE_TALK_WATCH_POLL
+                                        : STACKEE_TALK_WATCH_SEQ;
+}
+
+static void watch_step(stackee_talk_t *t) {
+    if (!t->watch_on) {
+        watch_abort(t, false);
+        t->watch_phase = STACKEE_TALK_WATCH_OFF;
+        return;
+    }
+    // 発話を扱い終えて idle に戻った (fail / say_finished が watch_say を
+    // 下ろす)。
+    if (t->watch_phase == STACKEE_TALK_WATCH_SAY && !t->watch_say &&
+        t->state == STACKEE_TALK_IDLE) {
+        t->watch_phase = STACKEE_TALK_WATCH_WAIT;
+    }
+    // ★ Wi-Fi が落ちたら、上がったときに最新 seq から聞き直す
+    //   (落ちていた間の発話は鳴らさない)。
+    bool net = t->ops->net_ready();
+    if (!net) {
+        t->watch_seq_known = false;
+    }
+    t->watch_net = net;
+    if (t->watch_http) {
+        if (!watch_can_run(t)) {
+            watch_abort(t, true);       // キーが押された・OTA が始まった など
+            return;
+        }
+        int status = 0;
+        const uint8_t *body = NULL;
+        size_t len = 0;
+        int got = t->ops->http_poll(&status, &body, &len);
+        if (got == 0) {
+            return;
+        }
+        t->watch_http = false;
+        if (got < 0) {
+            t->ops->http_close();
+            watch_backoff(t, "通信に失敗しました");
+            return;
+        }
+        watch_handle(t, status, (body == NULL) ? "{}" : (const char *)body);
+        return;
+    }
+    if (t->watch_say || !watch_can_run(t)) {
+        return;
+    }
+    if ((int32_t)(now(t) - t->watch_next) < 0) {
+        return;
+    }
+    if (t->watch_phase == STACKEE_TALK_WATCH_SLEEP) {
+        t->watch_phase = STACKEE_TALK_WATCH_WAIT;   // 休み明け
+    }
+    watch_start(t);
+}
+
 // ---------------------------------------------------------------------------
 // 1 周
 // ---------------------------------------------------------------------------
@@ -1361,7 +1684,7 @@ static void talk_step_inner(stackee_talk_t *t) {
         case STACKEE_TALK_PLAY_WAIT:
             // ★ 受け箱の発話で play=0 (検証) なら、PCM を受け取り終えた
             //   ここで止めて次を聞きに行く。音は 1 つも出さない。
-            if (t->inbox_loop && !t->say_play) {
+            if ((t->inbox_loop || t->watch_say) && !t->say_play) {
                 if (t->audio == NULL || t->audio_samples <= 0) {
                     fail(t, "返答の PCM が無い");
                     return;
@@ -1373,7 +1696,8 @@ static void talk_step_inner(stackee_talk_t *t) {
             //   いる (audio_samples が数えてある) ので、鳴らす直前まで
             //   全部の段を通ったことになる。音は 1 つも出さない。
             //   CSTM の prompt 方式の play=0 も同じ (/look と同じ後半)。
-            if (!t->inbox_loop && ((t->look && !t->look_play) ||
+            if (!t->inbox_loop && !t->watch_say &&
+                ((t->look && !t->look_play) ||
                                    (t->cstm && !t->cstm_play))) {
                 if (t->audio == NULL || t->audio_samples <= 0) {
                     fail(t, "返答の PCM が無い");
@@ -1418,7 +1742,8 @@ static void talk_step_inner(stackee_talk_t *t) {
                 return;
             }
             // 受け箱の発話は鳴り終わったら次を聞きに行く (idle には戻らない)。
-            if (t->inbox_loop) {
+            // 常時ポーリングの発話は idle に戻り、受け箱の見張りに返す。
+            if (t->inbox_loop || t->watch_say) {
                 if (t->ops->play_failed()) {
                     fail(t, "音声再生またはマイク復帰に失敗しました");
                     return;
@@ -1462,7 +1787,9 @@ static void talk_step_inner(stackee_talk_t *t) {
             uint32_t at = since_ms(t, t->since);
             show_page_at(t, at);
             if (at >= t->say_until) {
-                say_finished(t, false);
+                // 字幕だけの発話は「出し終えた」を played に数えるのは
+                // 常時ポーリングだけ (CSTM の記録は従来どおり音の有無)。
+                say_finished(t, t->watch_say && t->say_play);
             }
             return;
         }
@@ -1490,6 +1817,12 @@ static void talk_step_inner(stackee_talk_t *t) {
 //   いないときだけ出す。持ち主が居るときは **触らない** (消しもしない)。
 static int guide_want(const stackee_talk_t *t) {
     if (t->state == STACKEE_TALK_IDLE) {
+        return STACKEE_TALK_GUIDE_NONE;
+    }
+    // ★ 常時ポーリングで届いた発話は「考えています…」ではない (頼まれて
+    //   考えているのではなく、知らせが届いた)。字幕が出るまで帯は空。
+    if (t->watch_say && t->page_shown < 0 &&
+        !(t->state == STACKEE_TALK_PLAYING || t->state == STACKEE_TALK_SAY_TEXT)) {
         return STACKEE_TALK_GUIDE_NONE;
     }
     if (t->state == STACKEE_TALK_RECORDING) {
@@ -1556,6 +1889,7 @@ void stackee_talk_step(stackee_talk_t *t) {
         show(t, text);
     }
     talk_step_inner(t);
+    watch_step(t);
     update_guide(t);
     // ★ 案内の後始末 (帯を消す) のあとで知らせを置く。順が逆だと消される。
     if (t->cstm_active && t->state == STACKEE_TALK_IDLE) {
@@ -1568,7 +1902,23 @@ bool stackee_talk_busy(const stackee_talk_t *t) {
     return t->state != STACKEE_TALK_IDLE || t->look_reserved;
 }
 
+bool stackee_talk_audio_busy(const stackee_talk_t *t) {
+    if (!stackee_talk_busy(t)) {
+        return false;
+    }
+    if (t->watch_say) {
+        return t->state == STACKEE_TALK_PLAY_WAIT ||
+               t->state == STACKEE_TALK_PLAYING || t->look_reserved;
+    }
+    return true;
+}
+
 bool stackee_talk_uses_audio(const stackee_talk_t *t) {
+    // 常時ポーリングで届いた発話は、PCM を取っている間は音を使わない。
+    if (t->watch_say &&
+        (t->state == STACKEE_TALK_SUBS || t->state == STACKEE_TALK_AUDIO)) {
+        return t->look_reserved;
+    }
     switch (t->state) {
         case STACKEE_TALK_IDLE:
         case STACKEE_TALK_INBOX_SEQ:
@@ -1629,6 +1979,7 @@ bool stackee_talk_cstm(stackee_talk_t *t, int n, bool play) {
         fail(t, "Wi-Fi 未接続です");
         return true;
     }
+    watch_abort(t, true);       // 受け箱の待ちを打ち切って通信を空ける
     char text[48];
     snprintf(text, sizeof(text), "CSTM_%d を送信中…", n);
     // ★ 覚えている seq が新しければ使い回す (GET /inbox の握手を 1 回省く)。
@@ -1672,6 +2023,7 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
         fail(t, "Wi-Fi 未接続です");
         return false;
     }
+    watch_abort(t, true);       // 受け箱の待ちを打ち切って通信を空ける
     t->samples = t->ops->record_alloc(STACKEE_TALK_MAX_SAMPLES);
     if (t->samples == NULL) {
         fail(t, "録音の領域を確保できません");
@@ -1759,6 +2111,10 @@ int stackee_talk_look_reserve(stackee_talk_t *t) {
     }
     t->look_reserved = true;
     t->error[0] = '\0';
+    // ★ カメラのキーも最優先。受け箱の待ちを打ち切って通信を空ける
+    //   (撮影の 4 秒のあいだに通信側が畳み終える)。ログにも画面にも
+    //   触らない (camera タスクから呼ばれる)。
+    watch_abort(t, true);
     return STACKEE_TALK_LOOK_OK;
 }
 

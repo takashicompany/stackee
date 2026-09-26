@@ -2221,5 +2221,424 @@ lookprint
         self.assertEqual(p['alloc'], p['release'])
 
 
+# ---------------------------------------------------------------------------
+# 暇なときに受け箱を見る (常時ポーリング、2026-09-27)
+# ---------------------------------------------------------------------------
+def watch_info(text):
+    rows = re.findall(r'^WATCHINFO (.*)$', text, re.M)
+    assert rows, text
+    head, _, error = rows[-1].partition(' error=')
+    out = {'error': error}
+    for part in head.split(' '):
+        k, _, v = part.partition('=')
+        out[k] = int(v) if re.fullmatch(r'-?\d+', v) else v
+    return out
+
+
+def watch_infos(text):
+    out = []
+    for row in re.findall(r'^WATCHINFO (.*)$', text, re.M):
+        head, _, error = row.partition(' error=')
+        item = {'error': error}
+        for part in head.split(' '):
+            k, _, v = part.partition('=')
+            item[k] = int(v) if re.fullmatch(r'-?\d+', v) else v
+        out.append(item)
+    return out
+
+
+def paths(text):
+    return [c[1] for c in http_calls(text)]
+
+
+EMPTY7 = '{"state":"empty","seq":7}'
+WSAY8 = ('{"state":"say","seq":8,"reply":"おしらせなのだ","audio_url":'
+         '"/inbox/8/audio","audio_bytes":3200,%s,'
+         '"subtitles":"0\\tおしらせなのだ\\n"}' % FMT)
+WSAY9_TEXT = ('{"state":"say","seq":9,"reply":"字幕だけのおしらせ",%s}' % FMT)
+WEMPTY9 = '{"state":"empty","seq":9}'
+
+
+class WatchStartTest(unittest.TestCase):
+    """いつ受け箱を回し始めるか。待っている間は idle のまま (busy でない)。"""
+
+    def test_off_by_default_in_the_state_machine(self):
+        # ★ 既定で回すのは audio (実機)。状態機械の既定は止めておく。
+        out = run('t 1000\n')
+        self.assertEqual(http_calls(out), [])
+
+    def test_seq_first_then_long_poll(self):
+        out = run("""
+respdelay 50
+resp 200 %s
+watch 1
+t 100
+watchprint
+audiobusy
+""" % EMPTY7)
+        self.assertEqual(paths(out), ['/inbox', '/inbox?after=7&wait=25'])
+        info = watch_info(out)
+        self.assertEqual((info['seqknown'], info['seq'], info['phase']),
+                         (1, 7, 'poll'))
+        self.assertEqual((info['http'], info['long'], info['busy']), (1, 1, 0))
+        self.assertIn('AUDIOBUSY 0 0 0', out)      # 待っているだけでは何も後回しにしない
+        self.assertEqual(state_names(out), ['idle'])
+        self.assertNotRegex(out, r'(?m)^SHOW ')     # 画面にも出さない
+
+    def test_not_started_without_wifi_url_or_permission(self):
+        for script in ('net 0\nwatch 1\nt 1000\n',
+                       'init \nwatch 1\nt 1000\n',
+                       'init /chat\nwatch 1\nt 1000\n',
+                       'watchok 0\nwatch 1\nt 1000\n'):
+            with self.subTest(script=script):
+                self.assertEqual(http_calls(run(script)), [])
+
+    def test_cold_connection_starts_with_a_short_poll(self):
+        out = run("""
+respdelay 50
+resp 200 %s
+resp 200 %s
+warm 0
+watch 1
+t 80
+warm 1
+t 100
+""" % (EMPTY7, EMPTY7))
+        self.assertEqual(paths(out)[:3],
+                         ['/inbox', '/inbox?after=7', '/inbox?after=7&wait=25'])
+
+    def test_reconnect_fetches_the_latest_seq_again(self):
+        out = run("""
+respdelay 100
+resp 200 %s
+resp 200 {"state":"empty","seq":12}
+watch 1
+t 150
+net 0
+t 1000
+net 1
+t 150
+watchprint
+""" % EMPTY7)
+        # 落ちる前: seq → 待ち。上がったあと: また GET /inbox (after なし)
+        self.assertEqual(paths(out)[:3], ['/inbox', '/inbox?after=7&wait=25', '/inbox'])
+        self.assertIn('HABORT', out)                # 落ちた時点で待ちを打ち切る
+        self.assertEqual(watch_info(out)['seq'], 12)
+
+    def test_disable_aborts_the_wait(self):
+        out = run("""
+respdelay 100000
+resp 200 %s
+watch 1
+t 10
+watch 0
+t 10
+watchprint
+""" % EMPTY7)
+        self.assertEqual(paths(out), ['/inbox'])
+        self.assertIn('HABORT', out)
+        info = watch_info(out)
+        self.assertEqual((info['on'], info['phase'], info['http']), (0, 'off', 0))
+
+
+class WatchAbortTest(unittest.TestCase):
+    """キーが押されたら、待っている受け箱の要求を即座に打ち切る。"""
+
+    # seq を得て (100 秒かかる偽の通信)、ロングポーリングが通信中のところ。
+    PRE = """
+respdelay 100000
+resp 200 %s
+watch 1
+t 100010
+""" % EMPTY7
+
+    def test_talk_key_aborts_and_recording_starts_at_once(self):
+        out = run('mic 40\n' + self.PRE + 'press\nt 1\nwatchprint\n')
+        # 押した周で打ち切り、同じ周で録音が始まる (遅れを足さない)
+        self.assertRegex(out, r'(?m)^REC begin$')
+        self.assertIn('HABORT', out)
+        info = watch_info(out)
+        self.assertEqual((info['aborts'], info['http']), (1, 0))
+        rec = out.index('REC begin')
+        self.assertLess(out.index('HABORT'), out.index('WATCHINFO'))
+        self.assertLess(rec, out.index('WATCHINFO'))
+
+    def test_prewarm_after_recording_starts(self):
+        # 録音を始めた「あと」で待ちを打ち切り、先に張る (録音の開始は遅らせない)
+        out = run('mic 40\n' + self.PRE + 'press\nt 1\n')
+        rec, abort, warm = (out.index('REC begin'), out.index('HABORT'),
+                            out.index('PREWARM /inbox?after=7'))
+        self.assertLess(rec, abort)
+        self.assertLess(abort, warm)
+
+    def test_prewarm_without_the_watcher(self):
+        out = run('mic 40\npress\nt 1\n')
+        self.assertIn('PREWARM /inbox\n', out)
+        self.assertNotIn('HABORT', out)
+        out = run('mic 40\ninit /chat\npress\nt 1\n')
+        self.assertNotIn('PREWARM', out)            # 受け箱の URL が作れない
+
+    def test_talk_after_abort_then_polling_resumes(self):
+        out = run('mic 40\nackms 0\n' + self.PRE + """
+respdelay 5
+resp 202 %s
+resp 200 %s
+resp 200 PCM:1600
+press
+t 400
+release
+t 3000
+watchprint
+""" % (ACCEPT_BODY, DONE_BODY))
+        p = paths(out)
+        self.assertEqual(p[:2], ['/inbox', '/inbox?after=7&wait=25'])
+        self.assertIn('/talk', p)
+        self.assertIn('PLAY 1600', out)
+        # 会話が終わったら続きから (after=7) また聞く
+        self.assertEqual(p[-1], '/inbox?after=7&wait=25')
+        self.assertGreater(p.index('/inbox?after=7&wait=25', 2), p.index('/talk'))
+
+    def test_cstm_aborts_and_reuses_the_seq(self):
+        out = run(self.PRE + """
+respdelay 10
+resp 200 %s
+cstm 3 1
+t 100
+cstmprint
+watchprint
+""" % IGNORED)
+        self.assertIn('HABORT', out)
+        # 受け箱が seq を新しく保っているので GET /inbox を省いて POST /key
+        self.assertEqual(paths(out)[:3], ['/inbox', '/inbox?after=7&wait=25', '/key'])
+        self.assertEqual(cstm_info(out)['reused'], 1)
+        self.assertEqual(watch_info(out)['aborts'], 1)
+
+    def test_camera_and_inject_abort(self):
+        out = run(self.PRE + 'reserve\nt 1\nwatchprint\n')
+        self.assertIn('RESERVE 0', out)
+        self.assertIn('HABORT', out)
+        out = run(self.PRE + 'respdelay 10\ninject 16000\nt 1\nwatchprint\n')
+        self.assertIn('INJECT 1', out)
+        self.assertIn('HABORT', out)
+        self.assertEqual(paths(out)[-1], '/talk')
+
+    def test_watch_ok_false_aborts(self):
+        out = run(self.PRE + 'watchok 0\nt 5\nwatchprint\nwatchok 1\nt 5\n')
+        self.assertIn('HABORT', out)
+        self.assertEqual(paths(out)[-1], '/inbox?after=7&wait=25')   # 戻ればまた聞く
+
+
+class WatchBackoffTest(unittest.TestCase):
+    def test_backoff_doubles_up_to_60_seconds(self):
+        out = run('respdelay 10\n' + 'resperr\n' * 8 + """
+watch 1
+t 20
+watchprint
+t 5100
+watchprint
+t 10000
+watchprint
+t 20000
+watchprint
+t 40000
+watchprint
+t 60000
+watchprint
+""")
+        infos = watch_infos(out)
+        self.assertEqual([i['backoff'] for i in infos],
+                         [5000, 10000, 20000, 40000, 60000, 60000])
+        self.assertEqual([i['fails'] for i in infos], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(infos[-1]['error'], '通信に失敗しました')
+        self.assertNotRegex(out, r'(?m)^SHOW ')     # 静かに
+
+    def test_success_resets_the_backoff(self):
+        out = run("""
+respdelay 10
+resperr
+resp 200 %s
+watch 1
+t 20
+t 5005
+watchprint
+""" % EMPTY7)
+        info = watch_info(out)
+        self.assertEqual((info['backoff'], info['seqknown'], info['error']), (0, 1, '-'))
+
+    def test_404_sleeps_quietly(self):
+        out = run("""
+respdelay 10
+resp 404 {}
+watch 1
+t 100
+watchprint
+t 120000
+""")
+        self.assertEqual(paths(out), ['/inbox'])     # 2 分たっても聞き直さない
+        info = watch_info(out)
+        self.assertEqual(info['phase'], 'sleep')
+        self.assertGreater(info['next_in'], 590000)
+        self.assertIn('404', info['error'])
+        self.assertNotRegex(out, r'(?m)^SHOW ')
+
+    def test_quick_empty_replies_are_spaced(self):
+        # 中継が wait を握らず即返す → 5 秒あける (毎秒撃たない)
+        out = run('respdelay 10\nsticky 200 %s\nwatch 1\nt 12000\n' % EMPTY7)
+        n = len([x for x in paths(out) if 'wait=25' in x])
+        self.assertIn(n, (2, 3))
+
+    def test_a_relay_that_never_keeps_the_connection_is_spaced(self):
+        # 持続を許さない中継: 接続が温まらず、待たない要求が続く → 5 秒あける
+        out = run('respdelay 10\nsticky 200 %s\nwarm 0\nwatch 1\nt 12000\n' % EMPTY7)
+        self.assertIn(len(paths(out)), (3, 4))      # seq + 5 秒ごと
+
+    def test_a_long_poll_that_holds_is_reissued_at_once(self):
+        out = run('respdelay 25000\nsticky 200 %s\nwatch 1\nt 76000\n' % EMPTY7)
+        # seq 25 s + 待ち 25 s x2 (すぐ撃ち直す)
+        self.assertEqual(len(paths(out)), 4)
+
+
+class WatchSayTest(unittest.TestCase):
+    PRE = """
+ackms 0
+respdelay 10
+resp 200 %s
+""" % EMPTY7
+
+    def test_say_with_audio_is_played_and_polling_continues(self):
+        # 30 ms の偽の通信: seq 1→31、発話 31→61、PCM 61→91、鳴らす 200 ms
+        out = run(self.PRE + """
+respdelay 30
+resp 200 %s
+resp 200 PCM:3200
+resp 200 %s
+watch 1
+t 75
+audiobusy
+t 25
+audiobusy
+t 300
+watchprint
+""" % (WSAY8, WEMPTY9))
+        p = paths(out)
+        self.assertEqual(p[:3], ['/inbox', '/inbox?after=7&wait=25', '/inbox/8/audio'])
+        self.assertIn('PLAY 3200', out)
+        self.assertIn('SUB おしらせなのだ', out)
+        self.assertNotIn('ACK', out.replace('ACK skip', ''))   # 一次回答は鳴らさない
+        self.assertEqual(p[3], '/inbox?after=8&wait=25')       # 続きから
+        info = watch_info(out)
+        self.assertEqual((info['received'], info['played'], info['say']), (1, 1, 0))
+        self.assertEqual(info['seq'], 9)
+        self.assertEqual(state_names(out),
+                         ['idle', 'audio', 'play_wait', 'playing', 'idle'])
+        # PCM を取っている間は音を使っていない / 鳴らしている間は使っている
+        busy = re.findall(r'^AUDIOBUSY (.*)$', out, re.M)
+        self.assertEqual(busy[0], '1 0 0')
+        self.assertEqual(busy[1], '1 1 1')
+        self.assertNotIn('考えています', out)
+
+    def test_play_0_counts_without_sound(self):
+        out = run(self.PRE + """
+resp 200 %s
+resp 200 PCM:3200
+resp 200 %s
+watch 1 0
+t 500
+watchprint
+""" % (WSAY8, WEMPTY9))
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        info = watch_info(out)
+        self.assertEqual((info['received'], info['played'], info['play']), (1, 0, 0))
+        self.assertIn('/inbox/8/audio', paths(out))   # PCM は受け取る (道を通す)
+
+    def test_text_only_say_shows_subtitles(self):
+        out = run(self.PRE + """
+resp 200 %s
+resp 200 %s
+watch 1
+t 100
+print
+t 7000
+watchprint
+""" % (WSAY9_TEXT, WEMPTY9))
+        self.assertEqual(last_print(out)['state'], 'say_text')
+        self.assertIn('SUB 字幕だけのおしらせ', out)
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        info = watch_info(out)
+        self.assertEqual((info['received'], info['played']), (1, 1))
+
+    def test_text_only_say_with_play_0_is_only_counted(self):
+        out = run(self.PRE + """
+resp 200 %s
+resp 200 %s
+watch 1 0
+t 200
+watchprint
+""" % (WSAY9_TEXT, WEMPTY9))
+        self.assertNotIn('SUB 字幕だけのおしらせ', out)
+        self.assertNotIn('SHOW 字幕だけのおしらせ', out)
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        info = watch_info(out)
+        self.assertEqual((info['received'], info['played']), (1, 0))
+
+    def test_seen_seq_is_skipped(self):
+        out = run("""
+respdelay 10
+resp 200 {"state":"empty","seq":9}
+resp 200 %s
+resp 200 %s
+watch 1
+t 200
+watchprint
+""" % (WSAY8, WEMPTY9))
+        self.assertNotIn('/inbox/8/audio', paths(out))
+        info = watch_info(out)
+        self.assertEqual((info['skipped'], info['received']), (1, 0))
+
+    def test_keys_are_refused_only_while_the_say_plays(self):
+        out = run('mic 40\n' + self.PRE + """
+resp 200 %s
+resp 200 PCM:32000
+watch 1
+t 100
+print
+press
+t 100
+release
+t 3000
+press
+t 10
+""" % WSAY8)
+        self.assertEqual(last_print(out)['state'], 'playing')
+        recs = re.findall(r'^REC begin$', out, re.M)
+        self.assertEqual(len(recs), 1)          # 2 回目 (鳴り終わったあと) だけ
+        self.assertGreater(out.index('REC begin'), out.index('PLAY done'))
+
+    def test_a_failed_say_is_quiet_and_backs_off(self):
+        out = run(self.PRE + """
+resp 200 %s
+resperr
+watch 1
+t 200
+watchprint
+""" % WSAY8)
+        self.assertNotIn('会話エラー', out)
+        info = watch_info(out)
+        self.assertEqual((info['fails'], info['backoff'], info['say']), (1, 5000, 0))
+        self.assertEqual(last_state := state_names(out)[-1], 'idle')
+        self.assertEqual(last_state, 'idle')
+
+    def test_cstm_bookkeeping_is_not_touched(self):
+        out = run(self.PRE + """
+resp 200 %s
+resp 200 PCM:3200
+watch 1
+t 400
+cstmprint
+""" % WSAY8)
+        info = cstm_info(out)
+        self.assertEqual((info['says'], info['count']), (0, 0))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

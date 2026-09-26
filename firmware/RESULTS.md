@@ -1792,3 +1792,126 @@ check スクリプトは先に `audio.null` を立て、**終わったら元の�
 | **帯の「CSTM_n 未設定」とエラーの見え方** | 帯に置く文字列はホストテストで見た。`lcd.crc` / `ui.status` の字幕で無音のまま確かめられる |
 | **受け箱を待っている間の USB マイク** | full のとき、コマンドの待ち (最大 10 分) では UAC を止めない作りにした。実機の UAC では未確認 |
 | **中継の `&wait=` の扱い** | 本体は `?after=…&wait=25&job=…` の `wait` も見て、その秒数 + 15 秒まで待つ (従来は `?wait=` だけ)。中継が `wait` を読んで握るかはサーバ側次第 |
+
+## 内蔵 RAM を戻す / HTTPS の接続を使い回す / 暇なときに受け箱を見る 2026-09-27 — **予定 (まだ書き込んでいない)**
+
+README §24-5 (内蔵 RAM)、§17-2d (接続の使い回し)、§17-2e (常時ポーリング)。
+**実機には書き込んでいない**。下の数字はビルドとホストテストと、書き込み前の
+実機を読むだけで測ったもの。
+
+### 0. 内蔵 RAM が 13 KB 減っていた件 (読むだけで測った。像 `43e0cbf`)
+
+| 見たもの | 値 |
+|---|---|
+| `status` (起動 410 秒、画像 1 / CSTM 4 / 会話の往復のあと) | `heap_internal` 17,711 / 最大の塊 8,192 / 最小 8,016 |
+| `camera.status.internal_free` (最初の撮影の直前) | **29,951** |
+| 2 回目の撮影の前後 | 17,707 → 17,707 (撮影ごとには減らない) |
+| `wifi.off` → `wifi.on` | +436 → 元に戻る (Wi-Fi の受信バッファではない) |
+
+→ 最初の撮影より後の往復のどこかで ESP-IDF の中が 1 度だけ約 12 KB を
+内蔵に取って返していない。**どの確保かは読むだけでは特定できなかった**
+(内訳を出す口が無い)。`heap.info` と目印を足したので、書き込み後に下の
+手順で特定する。あわせて、原因と別に静的領域 18,176 B を PSRAM へ移した。
+
+### ビルド (実機に触らない)
+
+| | dev | full |
+|---|---:|---:|
+| 像 (`stackee.bin`) | 1,415,488 B (ota_0 の 67%) | 1,416,976 B (67%) |
+| 変更前 (`43e0cbf`) | 1,406,240 B | 1,407,776 B |
+| 内蔵 RAM の静的合計 (DIRAM) | **181,444 B** (変更前 199,620、**−18,176**) | **179,668 B** (変更前 197,844、**−18,176**) |
+| うち `.bss` | 58,648 B | 56,872 B |
+
+警告は変更前からの `tud_init` の deprecated だけ。
+
+### ホストテスト
+
+**631 件** (`tools/test_*.py` をファイルごとに。前 581 件)。
+`test_httpcore_host` **23 件 (新規)**: 2 本目からの使い回し・POST は 30 秒以内の
+接続だけ・古い接続でも GET は使う・Connection: close・相手が閉じていた
+(送る前の点検 / POST の前)・上限超え / 本文の途中で切れた / 読みの失敗で
+閉じる・ちょうど埋まったのは上限超えでない (chunked を含む)・打ち切ったロングポーリングの
+接続は捨てる・POST は送り直さない (送信 / 頭 / 本文 / 黙って死んだ接続)・
+GET は 1 回だけ送り直す・張れない / 待ち時間切れ / 上限超えは送り直さない・
+暗号の自己診断に回す失敗の分け方・送る前の打ち切りは接続を残す・短い要求は
+打ち切りでも最後まで読む。
+`test_talk_host` 137 → **164** (常時ポーリング 27: 既定で止まっている・
+seq → ロングポーリング・待っている間は idle で後回しを起こさない・Wi-Fi /
+URL / OTA 等では撃たない・冷えた接続は待たない要求から・再接続で seq を
+取り直す・無効化で打ち切る・会話キー / CSTM / カメラ / talk.inject /
+OTA 等で打ち切る・録音開始のあとで打ち切って先に張る・打ち切りのあと会話が
+通って続きから聞く・CSTM は seq を使い回す・5→60 秒のバックオフ・成功で戻る・
+404 で 10 分休む・即返る中継と接続を残さない中継は 5 秒あける・握る中継はすぐ撃ち直す・発話を
+鳴らして続きから・play=0 は数えるだけ (字幕だけの発話も出さない)・字幕だけの
+発話・見た seq を飛ばす・鳴らしている間だけキーを断る・発話の失敗は静かに
+バックオフ・CSTM の記録に混ぜない)。`test_console_host` は `hello` に
+`inbox.status` / `inbox.enable` / `heap.info`。
+
+### 書き込み後に回す確認 (人手ゼロ・無音)
+
+★ 音を鳴らさない: `audio.null` を立ててから。**終わったら元に戻す**。
+常時ポーリングで受けた発話も鳴るので、確認の間は `inbox.enable on=1 play=0`
+にしておき、**最後に `on=1 play=1` に戻す** (再起動でも既定に戻る)。
+
+**1. 起動直後の内蔵 RAM と内訳 (何もしていないうち)**
+
+```
+python3 tools/console_hid.py status          # heap_internal / _largest / _min
+python3 tools/console_hid.py heap.info       # hist / big / stack_free / marks
+python3 tools/console_hid.py inbox.status    # phase=poll, seq_known=1, http.conn=1
+```
+
+| 見るもの | 期待値 |
+|---|---|
+| `heap_internal` (Wi-Fi が上がって受け箱を 1 本張ったあと) | **40 KB 前後** (前の版の起動直後 ≈ 30〜33 KB + 静的に移した 18 KB − 接続の居座り約 3 KB) |
+| `heap.info.marks` | `boot` と、最初の張った往復の `-<B> /inbox` (接続の居座りぶん、2〜3 KB の見込み) |
+| `inbox.status` | `enabled=1`、`phase=poll`、`waiting=1`、`long=1`、`http.conn=1` |
+
+**2. 既存の回帰 (前の版と同じ手順)**
+
+```
+python3 tools/console_hid.py inbox.enable on=1 play=0
+python3 tools/check_phase4.py --transport hid --only look
+python3 tools/check_phase4.py --transport hid --only cstm --cstm-key 9 --cstm-expect prompt
+python3 tools/check_phase4.py --transport hid --only cstm --cstm-key 8 --cstm-expect command
+# 会話 (無音): audio.null を立てて talk.inject
+python3 tools/console_hid.py audio.null on=true
+python3 tools/console_hid.py talk.inject ms=2000
+python3 tools/console_hid.py talk.status     # state が idle に戻るまで。turns が増える
+python3 tools/console_hid.py audio.null on=false        # ★ 元が false なら戻す
+python3 tools/console_hid.py heap.info       # 毎回ここで marks と internal を控える
+```
+
+| 見るもの | 期待値 |
+|---|---|
+| look / cstm prompt / cstm command / 会話 | 前の版と同じく通る (final=done、reply_len > 0、audio_bytes > 0、played=0) |
+| `log.tail` の `[talk-http-timing]` | 会話 1 回: POST は `reused=0` (キーで待ちを打ち切った直後なので張る。`connect_ms` ≈ 4,000〜5,000)、続く `GET /jobs/…?wait=25` と `GET …/audio` は **`reused=1`・`connect_ms=0`** |
+| 返答までの時間 (`[talk-turn-timing]`) | 受理 `accepted_ms` は前と同じ ~7〜8 s (POST は張る)。**`audio_ready_ms` は前の ~24〜26 s より握手 2 回ぶん (約 9 s) 短い見込み** |
+| CSTM | `seq_reused=1` (常時ポーリングが seq を新しく保つので `GET /inbox` を省く)、`t.key` が前より短い |
+| `heap.info.marks` | 1 往復で 1 KB 以上減った要求があれば `-<B> <path>` が残る。**ここに約 12 KB の目印が出れば、それが §24-5 の原因** |
+| `heap_internal` | **30 KB 台を割らない** (look / cstm / 会話を一通り回したあと) |
+| `heap_internal_min` | 前の版の 8,016 より大きい |
+
+**3. 常時ポーリング**
+
+| 手順 | 期待値 |
+|---|---|
+| `inbox.status` を 30 秒あけて 2 回 | `polls` が増える、`fails=0`、`http.reused` が増える、`http.connects` は増えない |
+| ubook で `server/bin/stackee-say --no-voice "テスト"` → `inbox.status` | `received` が 1 増える、`played` は増えない (play=0)、`seq` が進む |
+| 待っている最中に会話キーを短く押す (`key.inject kc=32256 hold_ms=200`。32256 = `STK_TALK`) → `inbox.status` | `aborts` が 1 増える、`http.shutdowns` が 1 増える。短押しは「送信しませんでした」で戻り、受け箱はまた待ち始める |
+| 同じく `key.cstm n=9 play=0` / `camera.look play=0` | `aborts` が増え、それぞれ前と同じく最後まで通る |
+| 押下 → 録音開始の遅れ | 上の短押しのあとの `talk.status.first_sample_ms` が前の版と同じ桁 (録音を始めてから待ちを打ち切る作りなので増えないはず)。★ `audio.selftest` は使わない |
+| 待っている間の打鍵・タッチ | `key.inject` を 20 回 → `press_ms` 中央値 ≤ 2 ms / 最大 ≤ 5 ms。`status.perf.input_loop.max_us` / `perf.main.max_us` が前の版と同じ桁 (待っているだけでは CPU を使わない) |
+| `ota.*` の最中 (Web 操作盤から書き込むとき) | `inbox.status.phase=wait`・`waiting=0` (止まっている)。書き込みは前と同じ時間で終わる |
+| 最後に | `inbox.enable on=1 play=1` で戻す。`audio.null` を元の値に戻す |
+
+### 未確認のまま
+
+| 項目 | なぜ |
+|---|---|
+| **§24-5 の 12 KB の確保元** | 読むだけの手段では特定できなかった。書き込み後に `heap.info` の `marks` / `big` で見る |
+| **接続を持ち続けたときの内蔵 RAM の居座り** | 見込み 2〜3 KB (esp-tls の入れ物と lwIP のソケット)。書き込み後に `heap.info` で測る |
+| **Funnel が本当に接続を保つか (本体から)** | Mac からは 10 分の無通信でも保った (tls_research.md)。本体では `http.connects` が増えないことで確かめる |
+| **ISRG Root YE を信頼点に足す (握手の計算を 1 回減らす)** | 入れていない。接続を使い回すと握手そのものが減るので効果が小さく、書き込み前に効果を測れないため |
+| **本物のキーを指で押したとき** | `key.inject` で代わりに見る (入口は同じ) |
+| **握手の最中の打ち切り** | TLS の握手中はソケットを起こせない。持っていた接続が死んでいて張り直し中の待ちをキーで打ち切ると、次の要求がその握手のぶん待つ (まれ。独立レビューの指摘、直していない) |

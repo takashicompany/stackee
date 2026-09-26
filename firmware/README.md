@@ -219,6 +219,7 @@ python3 tools/flash.py --rollback           # CircuitPython の像を書き戻�
 | 基本 | `hello` `status` `reset` `bootloader` |
 | ログ | `log.tail` `log.burst` |
 | キー | `key.inject` `hid.switch` `hid.set` `key.cstm` `key.cstm_status` |
+| 受け箱 | `inbox.status` `inbox.enable` (§17-2e) |
 | BLE | `ble.refresh` `ble.clear_bonds` `ble.drop_cccd` `ble.svc_changed` |
 | 画面 | `lcd.crc` `lcd.dump` `lcd.status` `lcd.full` `face.set` `face.auto` `bar.set` `bar.auto` `ui.selftest` `ui.status` `ui.assets` `ui.subtitle` |
 | Wi-Fi | `wifi.scan` `wifi.list` `wifi.add` `wifi.remove` `wifi.connect` `wifi.status` `wifi.off` `wifi.on` |
@@ -228,7 +229,7 @@ python3 tools/flash.py --rollback           # CircuitPython の像を書き戻�
 | タッチ | `touch.status` `touch.inject` `touch.scroll` |
 | カメラ | `camera.capture` `camera.status` `camera.power` `camera.dump` `camera.look` `camera.look_status` |
 | USB | `usb.status` |
-| 計測 | `bench` |
+| 計測 | `bench` `heap.info` (内蔵 RAM の内訳、§24-5) |
 | 未対応 | `loop.*` (CircuitPython のメインループを測るもの。C 版に当たるものが無い。`status` の `perf` を見る) |
 
 ### 0-8. 素材を差し替える
@@ -1269,6 +1270,7 @@ FAT の根っこ (`/settings.toml`) を起動時に 1 回だけ読む。
 | `STACKEE_TALK_MIN_MS` | 任意 | 短押しを捨てる下限 [ms]。既定 **1000**。0 でこの条件を見ない (§11-4 の「誤って触れたときは何も起こさない」) |
 | `STACKEE_TALK_VOICE_RMS` | 任意 | 「声がある」とみなす 20 ms 窓の RMS。既定 **1000**。0 でこの条件を見ない |
 | `STACKEE_TALK_VOICE_WINDOWS` | 任意 | その窓がいくつ要るか。既定 **5** (= 100 ms)。0 でこの条件を見ない |
+| `STACKEE_INBOX_WATCH` | 任意 | 暇なときに受け箱を見る (§17-2e)。既定 **1**。0 で止める (逃げ道。`inbox.enable` は再起動で戻る) |
 
 ★ 値はログにも `status` にも出さない。`status` に出るのは
 `talk_url` / `talk_token` の**真偽だけ**。
@@ -2292,10 +2294,10 @@ python3 tools/check_phase4.py --transport hid --only look
 **打鍵**: キーは印を 1 つ置くだけ (入力タスクは待たない)。送信は audio
 タスクの会話の状態機械、通信は http タスク。
 
-**第 2 段への備え**: 受け箱の取得と発話 1 件の再生 (`INBOX_WAIT` →
-`INBOX` → `say` → 再生 / 字幕 → `INBOX_WAIT`) はキー押下に縛られない形に
-してある。暇なときの常時ポーリングは `job` なしで同じ状態に入れればよい
-(今回は入れていない)。
+**第 2 段**: 受け箱の取得と発話 1 件の再生 (`take_say` → 再生 / 字幕) は
+キー押下に縛られない形にしてあり、暇なときの常時ポーリング (§17-2e) が
+同じ部品を使う。★ 常時ポーリングが seq を新しく保つので、CSTM を押したとき
+は `GET /inbox` を省いてすぐ `POST /key` を送る (`seq_reused=1`)。
 
 #### console (人手ゼロ・無音で確かめる)
 
@@ -2317,6 +2319,121 @@ python3 tools/check_phase4.py --transport hid --only cstm --cstm-key 9 --cstm-ex
 (未設定なら `ignored` で NG)。先に `audio.null` を立て、`key.cstm play=0` で
 流し、待っている間は `key.inject` を回して打鍵の遅延も見る。**終わったら
 `audio.null` を元の値に戻す** (立てたままだと返答が鳴らなくなる)。
+
+### 17-2d. HTTPS の接続を使い回す (2026-09-27)
+
+**要求ごとに TCP + TLS を張り直すのをやめた。** 通信タスクが 1 本の接続を
+持ち続け、要求ごとに URL・メソッド・本文だけを差し替える。握手 (実機で
+約 4.5 秒の計算) は「最初の 1 本」と「捨てたあと」にしか起きない。会話 1 回の
+`POST /talk` → `GET /jobs/<id>?wait=25` → `GET /jobs/<id>/audio` は、以前は
+握手 3 回、いまは多くて 1 回 (録音中に先に張れていれば 0 回)。
+(調べた経緯: Tailscale Funnel はセッション再開 (チケット) を受けないが、
+HTTP/1.1 の持続接続は 10 分の無通信でも保つ。)
+
+決まり (`main/stackee_httpcore.c`。ESP-IDF に依存しない部分で、
+`tools/test_httpcore_host.py` が偽の接続で確かめる):
+
+| いつ | どうする |
+|---|---|
+| 送る前 | 持っている接続を点検する (待ち時間 0 の select)。相手が閉じた・頼んでいないバイトが来ている → 捨てて張り直す |
+| POST | **直前 30 秒以内に使えた接続にだけ載せる**。それより古ければ張り直す (黙って死んだ接続に書いて待たされるのを避ける) |
+| 読み終えた | 最後まで読めて、相手が持続を許した (Connection: close でない) ときだけ残す |
+| 読み残し | 失敗・受け皿の上限超え・打ち切り・本文の途中で切れた → **必ず閉じる**。読み残した接続を次に使わない |
+| GET が失敗 | 送信・応答の頭・本文の途中の失敗なら、**1 回だけ**張り直して送り直す。張れない・待ち時間切れ・上限超え・打ち切りは送り直さない |
+| POST が失敗 | **送り直さない** (`/talk` `/look` `/key` を二重に受理させない。今までどおり) |
+| 打ち切り | 送る前ならそのまま返す (接続は残る)。送ったあとはロングポーリングと大きな本文 (返答 PCM) だけが従い、呼び手がソケットを `shutdown` して待ちを起こす。短い要求は最後まで読んで接続を残す。★ TLS の握手の最中は起こせない (握手を終えたところで捨てる)。持っていた接続が死んでいて張り直しになった待ちをキーで打ち切ると、その握手のぶんだけ次の要求が待つ (まれ) |
+
+★ **受信バッファと接続は別のもの。** 受信バッファ (返答 PCM を含む) は今までどおり
+状態機械が `stackee_http_close` を呼ぶまで生かす (鳴らし終えるまで握る)。
+接続は通信タスクが持ち続ける。`stackee_http_close` は接続を閉じない。
+
+★ **録音中に先に張る。** 会話キーを押したら (録音を始めた**あと**で)、接続が
+無ければ返事を捨てる短い `GET /inbox?after=<seq>` で張っておく。離したあとの
+`POST /talk` はその接続に載る。録音の開始は 1 µs も遅らせていない
+(`REC begin` のあと。`tools/test_talk_host.py` の
+`test_prewarm_after_recording_starts`)。撮影中は張らない (TLS の握手と撮影を
+同時に走らせない約束、§17-2b)。
+
+★ 暗号の自己診断 (§20) は「張れなかった」に加えて「張れた接続の上で読み書きに
+失敗した」でも回す (使い回した接続の送信・頭の失敗は「相手が閉じていた」が
+ほとんどなので除く)。常時ポーリングで中継が落ちている間に毎回回さないよう、
+**10 分に 1 回まで**。
+
+★ 内蔵 RAM: 接続を持ち続けるあいだ、esp-tls の入れ物 (約 2 KB) と lwIP の
+ソケットが内蔵 RAM に居座る (mbedTLS の入出力バッファは元から PSRAM)。
+esp_http_client の送受信の作業領域は **4,100 B** にして PSRAM に追い出した
+(malloc は 4,096 B **以下**を内蔵に取る。以前の 2,048 / 1,024 は内蔵)。
+実測は書き込み後 (RESULTS.md の予定)。
+
+`[talk-http-timing]` に足したもの:
+
+| キー | 意味 |
+|---|---|
+| `connect_ms` | TCP + TLS を張った時間 [ms]。使い回したら 0 |
+| `reused` | 既存の接続に載せたか (1 / 0) |
+| `retried` | GET を 1 回送り直したか |
+| `stale` | 送る前の点検 / POST の古さで捨てた数 |
+| `kept` | 終わったあと接続を残したか |
+
+★ 常時ポーリングの待ち (`/inbox?...&wait=25`) は 25 秒ごとに来るので、
+張り直した・送り直した・200 以外・20 本に 1 本のときだけ行を残す。
+`talk.status` の `http` と `inbox.status` の `http` に `conn` `reused`
+`connects` `last_connect_ms` などが出る。
+
+### 17-2e. 暇なときに受け箱を見る (常時ポーリング、2026-09-27)
+
+会話・写真・CSTM・OTA 書き込みのどれもしておらず、Wi-Fi が上がっていて
+`STACKEE_TALK_URL` があれば、受け箱を回し続ける。サーバ (ubook の
+`stackee-say` など) が置いた発話を、キーを押さなくても鳴らす / 字幕に出す。
+
+| 段 | 要求 | 中身 |
+|---|---|---|
+| 起動時・Wi-Fi の再接続時 | `GET /inbox` | 最新の `seq` を覚えるだけ。**それより前の発話は鳴らさない** |
+| 待つ | `GET /inbox?after=<seq>&wait=25` | 中継が 25 秒握る。空なら `seq` を覚え直してすぐ撃ち直す |
+| 接続が無いとき (張り直しの最初の 1 本) | `GET /inbox?after=<seq>` | 待たない要求にする。張っている最中にキーで打ち切られても、張れた接続を次の要求 (会話の POST など) に回せる |
+| `state:"say"` | CSTM のコマンドと同じ部品 | `audio_url` があれば PCM を取って字幕つきで鳴らす。無ければ字幕だけ。`seq` を進めてまた待つ |
+
+★ **待っている間は「暇」のまま。** 状態機械は `idle` のままなので、
+会話キー・カメラ・CSTM・`talk.inject` はいつでも入る。**押した瞬間に待ちを
+打ち切る** (通信タスクがソケットを `shutdown` し、データ待ちで止まっている
+`recv` をすぐ返らせる。以前の取り消しはデータが来るまで最大 40 秒効かなかった)。
+打ち切った接続は捨てて張り直す。`seq` で続きから聞くので取りこぼしは無い
+(サーバは 5 分・16 件保持)。
+★ **断るのは受けた発話を扱っている間だけ** (PCM の取得〜鳴り終わり / 字幕を
+出している間。会話キーは録音しない・カメラは撮らない・CSTM は無視、の
+いつもの排他)。
+★ USB マイク (UAC)・音量の保存・Wi-Fi の走査の「後回し」は、待っているだけでは
+発動しない。発話の PCM を取っている間も発動しない。**鳴らしている間だけ**
+音声使用中扱い。
+★ 止めるとき: OTA の書き込み中 (Raw HID の `ota.*`)・撮影中
+(`camera.capture` を含む)・マイクの自己診断中は、待っている要求も打ち切る。
+★ 失敗したら 5 → 10 → 20 → 40 → 60 秒 (上限) あけて聞き直す。成功で 0 に戻る。
+ロングポーリングが 1 秒未満で空を返す (中継が握らない) とき、待たない要求の
+あとで接続が残らない (中継が Connection: close を返す) ときは 5 秒あける
+(握手を休みなく繰り返さない)。
+中継が `/inbox` を知らない (404) ときは **10 分休む**。Wi-Fi 切断中・URL 未設定
+のときは何もしない。どれも画面には出さない (ログと `inbox.status` だけ)。
+★ 常時ポーリングで受けた発話の失敗 (PCM が取れない等) は「会話エラー」を
+出さない (頼んだのはユーザーではないため)。
+★ 帯: 受けた発話に「考えています…」は出さない (字幕が出るまで空)。
+一次回答も鳴らさない。
+
+#### console (人手ゼロ・無音で確かめる)
+
+| コマンド | 中身 |
+|---|---|
+| `inbox.status` | `enabled` `play` `phase` (`off` / `wait` / `seq` / `poll` / `say` / `sleep`) `waiting` (要求を持っている) `long` `seq` `seq_known` `say` `polls` `received` (受けた発話) `played` (鳴らした / 字幕を出した) `aborts` (キーなどで打ち切った) `fails` `skipped` (見た seq) `status` `backoff_ms` `next_in_ms` `talk` `busy`、`http:{conn, reused, connects, stale, leftover, retries, discarded, shutdowns, requests, failures, last_connect_ms, last_reused}`、`error` |
+| `inbox.enable` `{"on":0\|1,"play":0\|1}` | 検証用の入り切り。**NVS には残さない** (再起動で既定 = 有効・鳴らす)。`play:0` は受けた発話を**鳴らさず字幕も出さず**数えるだけ (音声つきは PCM を受け取るところまで通す) |
+
+```
+python3 tools/console_hid.py inbox.enable on=1 play=0   # 数えるだけにする
+# ubook で: server/bin/stackee-say --no-voice "テスト"
+python3 tools/console_hid.py inbox.status                # received が 1 増える / played は増えない
+python3 tools/console_hid.py inbox.enable on=1 play=1   # 戻す
+```
+
+ログ: 受けたとき `[inbox] 発話を受けた (seq N, play=0|1)`、扱い終えたとき
+`[inbox-say] {…}`、失敗 `[inbox] … (次は N ms 後)`。
 
 ### 17-3. Raw HID の上のコンソール
 
@@ -3374,6 +3491,58 @@ PSRAM でよい。PSRAM が取れない機体では内蔵 RAM に落ちる (動�
   あと自然に戻った。`bench` の `main_max_us` が **4,427,755 us** (4.4 秒) なので、
   コンソールを持つ main タスク (CPU0 の優先度 1) が長く止められている。
   `status` は集める項目がいちばん多いので最初に現れる。**原因は未調査。**
+
+### 24-5. CSTM を入れた版で内蔵 RAM が 13 KB 減っていた件 (2026-09-27)
+
+実機 (43e0cbf、起動 410 秒): `heap_internal` **17,711** / 最大の塊 8,192 /
+最小 8,016。86a6bf5 / 818614a では 30〜33 KB だった。繰り返しても減り続けは
+しない (漏れではなく居座り)。静的な増分は +16 B なので実行時の確保。
+
+**読むだけで調べたこと** (実機、書き込みなし):
+
+| 見たもの | 結果 |
+|---|---|
+| `camera.status` の `internal_free` (最初の撮影 = 画像の往復の直前に取った値) | **29,951 B**。この時点では前の版と同じ水準 |
+| 2 回目の撮影 (`camera.capture`) の前後 | 17,707 → 17,707 B。撮影 1 回ごとには減らない |
+| `wifi.off` → `wifi.on` | 戻るのは 436 B だけ (Wi-Fi の受信バッファではない) |
+| しばらく置く (410 → 527 秒) | 動かない (TIME_WAIT の解放待ちでもない) |
+| 差分 (86a6bf5..30ec567) の確保 | 本体のコードに実行時の確保は増えていない (状態機械は元から PSRAM)。増えたのは CSTM の通信の型 (`GET /inbox` / ロングポーリング / `POST /key` / 発話の PCM) |
+
+つまり **「最初の撮影より後の、画像 / CSTM / 会話の往復のどこか」で、
+ESP-IDF の中 (esp_http_client / esp-tls / lwIP のどれか) が 1 度だけ
+約 12 KB を内蔵に取って返していない**。読むだけの手段ではどれかまで
+絞れなかった (内訳を出す口が無かった)。
+
+**足したもの (次の書き込みで特定する):**
+
+* `heap.info` — 内蔵 RAM の空き・最大の塊・最小、使用中の塊を大きさ別に数えた
+  表 (`hist`: 32 / 64 / … / 16384 B / それ以上)、大きい使用中の塊 8 個
+  (`big`: 大きさとアドレス)、主なタスクのスタックの残り (`stack_free`)、
+  目印 (`marks`)。読むだけ。
+* 目印: 起動の終わり (`boot`) と、**1 往復で内蔵 RAM が 1 KB 以上戻って
+  こなかった HTTP の要求** (`-<減った B> <path>`) を最新 12 件。ログの
+  リングが一周しても `heap.info` で読める。
+
+**戻したもの (原因と別に、静的領域を PSRAM へ):** 内蔵 RAM に置く理由の無い
+大きな静的領域を、起動時に PSRAM へ取るようにした。
+
+| 何 | 大きさ | 触るのは |
+|---|---:|---|
+| 計測の標本 (`stackee_perf.c`、7 本 x 256 標本 + 写し) | 8,304 B | 各タスク (割り込み・キャッシュ停止中は触らない) |
+| settings.toml の表 (`stackee_settings.c`) | 5,760 B | 起動時に埋めて、あとは読むだけ |
+| Wi-Fi の状態 (`stackee_wifi.c`、走査結果 24 件が大半) | 5,172 B | net / console / イベントのタスク |
+
+内蔵 RAM の静的合計 (DIRAM): full 197,844 → **179,668 B (−18,176)**、
+dev 199,620 → **181,444 B (−18,176)**。起動時の空きがそのぶん増える。
+接続の使い回し (§17-2d) で居座る約 2〜3 KB と、上の 12 KB が今回も
+起きるとして差し引くと、書き込み後の見込みは **33 KB 前後** (実測は
+RESULTS.md の予定)。
+
+★ ESP-IDF の `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY` は**使わなかった**。
+入れると lwIP / Wi-Fi / BT のライブラリの .bss まで自動で PSRAM に移り
+(追加で約 15 KB)、打鍵 (BLE) と通信の中身まで変わるため。こちらは自分の
+ファイルの領域だけを、起動時に `heap_caps_calloc(…SPIRAM)` で取る
+(取れなければ内蔵に落ちる。動きは同じ)。
 
 ---
 

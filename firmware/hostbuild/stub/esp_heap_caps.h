@@ -29,3 +29,9 @@ static inline void *heap_caps_malloc(size_t size, uint32_t caps) {
     (void)caps;
     return malloc(size);
 }
+
+// 2026-09-27: perf の標本を PSRAM に取る。ホストでは普通の calloc。
+static inline void *heap_caps_calloc(size_t n, size_t size, uint32_t caps) {
+    (void)caps;
+    return calloc(n, size);
+}

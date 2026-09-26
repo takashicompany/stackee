@@ -19,11 +19,13 @@
 #include "freertos/task.h"
 
 #include "stackee_assets.h"
+#include "stackee_camera.h"
 #include "stackee_console.h"
 #include "stackee_codec.h"
 #include "stackee_http.h"
 #include "stackee_input.h"
 #include "stackee_jsonlite.h"
+#include "stackee_ota.h"
 #include "stackee_settings.h"
 #include "stackee_talksm.h"
 #include "stackee_ui.h"
@@ -825,6 +827,27 @@ static void ops_subtitle(const char *text) {
     stackee_ui_set_subtitle(text);
 }
 
+static bool ops_http_warm(void) {
+    return stackee_http_warm();
+}
+
+static bool ops_http_prewarm(const char *path) {
+    return stackee_http_prewarm(path);
+}
+
+// 受け箱を回してよいか (常時ポーリング)。★ 待っているだけの要求でも、
+// OTA の書き込み中 (Raw HID の ota.*) と撮影中 (camera.capture を含む。
+// TLS の握手と撮影を同時に走らせない約束、README §17-2b) とマイクの
+// 自己診断中は止める。talk.inject / 画像 / CSTM の依頼が載っているときも
+// 譲る (それぞれの入口でも打ち切る)。
+static bool ops_watch_ok(void) {
+    int st = atomic_load(&a.selftest_req);
+    return !stackee_ota_busy() && !stackee_camera_busy() &&
+           !(st == 1 || st == 2 || st == 4) &&
+           atomic_load(&a.inject_req) < 0 && atomic_load(&a.look_req) == 0 &&
+           atomic_load(&a.cstm_req) == 0;
+}
+
 static const stackee_talk_ops_t TALK_OPS = {
     .now_ms = ops_now,
     .record_alloc = ops_record_alloc,
@@ -846,6 +869,9 @@ static const stackee_talk_ops_t TALK_OPS = {
     .log = ops_log,
     .face = ops_face,
     .subtitle = ops_subtitle,
+    .http_warm = ops_http_warm,
+    .watch_ok = ops_watch_ok,
+    .http_prewarm = ops_http_prewarm,
 };
 
 // ---------------------------------------------------------------------------
@@ -1143,7 +1169,9 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     "\"audio_duration_ms\":%d,\"turns\":%lu,\"errors\":%lu,"
                     "\"ignored\":%lu,\"http\":{\"state\":%d,\"status\":%d,"
                     "\"err\":%d,\"requests\":%lu,\"failures\":%lu,"
-                    "\"last_ms\":%lu,\"last_bytes\":%u},\"null\":%s,"
+                    "\"last_ms\":%lu,\"last_bytes\":%u,\"conn\":%d,"
+                    "\"reused\":%lu,\"connects\":%lu,\"last_connect_ms\":%lu,"
+                    "\"last_reused\":%d},\"null\":%s,"
                     "\"sub_pages\":%d,\"sub_page\":%d,\"sub_bytes\":%lu,"
                     "\"sub_dropped\":%d,\"subs_ok\":%lu,\"subs_failed\":%lu,"
                     "\"sub_src\":\"%s\","
@@ -1163,6 +1191,9 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     http.state, http.status, http.err,
                     (unsigned long)http.requests, (unsigned long)http.failures,
                     (unsigned long)http.last_ms, (unsigned)http.last_bytes,
+                    http.conn ? 1 : 0, (unsigned long)http.reused,
+                    (unsigned long)http.connects,
+                    (unsigned long)http.last_connect_ms, http.last_reused ? 1 : 0,
                     atomic_load(&a.null_out) ? "true" : "false",
                     t->page_count, t->page_shown, (unsigned long)t->sub_bytes,
                     t->sub_dropped, (unsigned long)t->subs_ok,
@@ -1318,6 +1349,73 @@ static size_t reply_cstm_status(long id, char *buf, size_t cap) {
     return at;
 }
 
+// inbox.status — 暇なときに受け箱を見る (常時ポーリング) の様子。
+static size_t reply_inbox_status(long id, char *buf, size_t cap) {
+    if (!talk_lock()) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    const stackee_talk_t *t = a.talk;
+    stackee_http_stats_t http;
+    stackee_http_stats(&http);
+    uint32_t now = ops_now();
+    int32_t next_in = (int32_t)(t->watch_next - now);
+    size_t at = put(buf, cap, 0,
+                    "{\"id\":%ld,\"ok\":1,\"enabled\":%d,\"play\":%d,"
+                    "\"phase\":\"%s\",\"waiting\":%d,\"long\":%d,"
+                    "\"seq\":%lu,\"seq_known\":%d,\"say\":%d,"
+                    "\"polls\":%lu,\"received\":%lu,\"played\":%lu,"
+                    "\"aborts\":%lu,\"fails\":%lu,\"skipped\":%lu,"
+                    "\"status\":%d,\"backoff_ms\":%lu,\"next_in_ms\":%ld,"
+                    "\"talk\":\"%s\",\"busy\":%d,"
+                    "\"http\":{\"conn\":%d,\"reused\":%lu,\"connects\":%lu,"
+                    "\"stale\":%lu,\"leftover\":%lu,\"retries\":%lu,"
+                    "\"discarded\":%lu,\"shutdowns\":%lu,\"requests\":%lu,"
+                    "\"failures\":%lu,\"last_connect_ms\":%lu,"
+                    "\"last_reused\":%d},\"error\":\"",
+                    id, t->watch_on ? 1 : 0, t->watch_play ? 1 : 0,
+                    stackee_talk_watch_phase_names[t->watch_phase],
+                    t->watch_http ? 1 : 0, t->watch_long ? 1 : 0,
+                    (unsigned long)t->inbox_seq, t->watch_seq_known ? 1 : 0,
+                    t->watch_say ? 1 : 0,
+                    (unsigned long)t->watch_polls, (unsigned long)t->watch_received,
+                    (unsigned long)t->watch_played, (unsigned long)t->watch_aborts,
+                    (unsigned long)t->watch_fails, (unsigned long)t->watch_skipped,
+                    t->watch_status, (unsigned long)t->watch_backoff,
+                    (long)(next_in > 0 ? next_in : 0),
+                    stackee_talk_state_names[t->state],
+                    stackee_talk_busy(t) ? 1 : 0,
+                    http.conn ? 1 : 0, (unsigned long)http.reused,
+                    (unsigned long)http.connects, (unsigned long)http.stale_closed,
+                    (unsigned long)http.leftover_closed, (unsigned long)http.retries,
+                    (unsigned long)http.discarded, (unsigned long)http.shutdowns,
+                    (unsigned long)http.requests, (unsigned long)http.failures,
+                    (unsigned long)http.last_connect_ms, http.last_reused ? 1 : 0);
+    at = put_json_str(buf, cap, at, t->watch_error);
+    at = put(buf, cap, at, "\"}");
+    talk_unlock();
+    return at;
+}
+
+// inbox.enable {"on":0|1,"play":0|1} — 検証用。NVS には残さない (再起動で既定
+// = settings.toml の STACKEE_INBOX_WATCH、無ければ有効 / 鳴らす に戻る)。
+// ★ play:0 は受けた発話を**鳴らさず・字幕も出さずに**数えるだけ
+//   (音声つきの発話は PCM を受け取るところまで通す)。
+static size_t reply_inbox_enable(long id, const char *line, char *buf, size_t cap) {
+    if (!talk_lock()) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    bool on = stackee_console_bool(line, "on", a.talk->watch_on);
+    bool play = stackee_console_bool(line, "play", a.talk->watch_play);
+    stackee_talk_watch_enable(a.talk, on, play);
+    size_t at = put(buf, cap, 0,
+                    "{\"id\":%ld,\"ok\":1,\"enabled\":%d,\"play\":%d,"
+                    "\"phase\":\"%s\"}",
+                    id, a.talk->watch_on ? 1 : 0, a.talk->watch_play ? 1 : 0,
+                    stackee_talk_watch_phase_names[a.talk->watch_phase]);
+    talk_unlock();
+    return at;
+}
+
 static size_t audio_console(const char *cmd, const char *line, long id,
                             char *buf, size_t cap) {
     if (!a.ready) {
@@ -1447,6 +1545,12 @@ static size_t audio_console(const char *cmd, const char *line, long id,
     if (strcmp(cmd, "key.cstm") == 0) {
         return reply_key_cstm(id, line, buf, cap);
     }
+    if (strcmp(cmd, "inbox.status") == 0) {
+        return reply_inbox_status(id, buf, cap);
+    }
+    if (strcmp(cmd, "inbox.enable") == 0) {
+        return reply_inbox_enable(id, line, buf, cap);
+    }
     if (strcmp(cmd, "key.cstm_status") == 0) {
         return reply_cstm_status(id, buf, cap);
     }
@@ -1494,6 +1598,10 @@ esp_err_t stackee_audio_start(const char *post_path) {
                                        STACKEE_TALK_VOICE_RMS_DEFAULT),
         (uint32_t)stackee_settings_int("STACKEE_TALK_VOICE_WINDOWS",
                                        STACKEE_TALK_VOICE_WINDOWS_DEFAULT));
+    // ★ 暇なときに受け箱を見る (常時ポーリング)。既定で有効。
+    //   settings.toml に STACKEE_INBOX_WATCH = 0 と書けば止まる (逃げ道)。
+    stackee_talk_watch_enable(
+        a.talk, stackee_settings_int("STACKEE_INBOX_WATCH", 1) != 0, true);
     ESP_LOGI(TAG, "会話の切り捨て: 最短 %lu ms / 声の RMS %lu x %lu 窓",
              (unsigned long)a.talk->min_ms, (unsigned long)a.talk->voice_rms,
              (unsigned long)a.talk->voice_windows);
@@ -1513,10 +1621,7 @@ bool stackee_audio_ready(void) {
 }
 
 // ★ a.talk は stackee_audio_start が PSRAM に取る。起きる前に外から
-//   聞かれても落ちないように、ここで NULL を吸う。
-static bool talk_busy(void) {
-    return a.talk != NULL && stackee_talk_busy(a.talk);
-}
+//   聞かれても落ちないように、下の関数は NULL を吸う。
 
 // ★ USB マイクに明け渡すかの判断はこちら。CSTM のコマンドを待っている間
 //   (受け箱のロングポーリング、最大 10 分) は busy だが、音は使わない。
@@ -1526,7 +1631,10 @@ static bool talk_uses_audio(void) {
 }
 
 bool stackee_audio_busy(void) {
-    return a.play_active || a.mode == MODE_MIC || talk_busy();
+    // ★ 常時ポーリングの待ちと、受けた発話の PCM を取っている間は数えない
+    //   (音量の保存・Wi-Fi の走査を待っているだけで後回しにしない)。
+    return a.play_active || a.mode == MODE_MIC ||
+           (a.talk != NULL && stackee_talk_audio_busy(a.talk));
 }
 
 bool stackee_audio_recording(void) {

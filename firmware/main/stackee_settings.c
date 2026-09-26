@@ -5,12 +5,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
+
 typedef struct {
     char key[STACKEE_SETTINGS_KEY_MAX];
     char value[STACKEE_SETTINGS_VALUE_MAX];
 } entry_t;
 
-static entry_t s_entries[STACKEE_SETTINGS_MAX_KEYS];
+// ★ 5.6 KB。起動時に 1 度埋めて、あとはタスクが読むだけなので PSRAM に取る
+//   (2026-09-27、README §24-5)。hostbuild では普通の calloc。
+static entry_t *s_entries;
+
+static bool ensure_entries(void) {
+    if (s_entries != NULL) {
+        return true;
+    }
+#ifdef ESP_PLATFORM
+    s_entries = heap_caps_calloc(STACKEE_SETTINGS_MAX_KEYS, sizeof(entry_t),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    if (s_entries == NULL) {
+        s_entries = calloc(STACKEE_SETTINGS_MAX_KEYS, sizeof(entry_t));
+    }
+    return s_entries != NULL;
+}
 static int     s_count;
 
 static bool key_char(char c) {
@@ -60,7 +80,7 @@ static void unquote(const char *raw, size_t len, char *out, size_t cap) {
 
 int stackee_settings_load_text(const char *text) {
     s_count = 0;
-    if (text == NULL) {
+    if (text == NULL || !ensure_entries()) {
         return 0;
     }
     const char *line = text;

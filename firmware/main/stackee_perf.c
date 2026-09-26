@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -19,7 +20,11 @@ typedef struct {
     uint32_t last_us;
 } channel_t;
 
-static channel_t s_channels[STACKEE_PERF_CHANNELS];
+// ★ 7 KB。内蔵 RAM は HTTPS の握手に残すので PSRAM に取る (2026-09-27、
+//   README §24-5)。標本を積むのはタスクだけで、割り込みやキャッシュを
+//   止めた区間からは触らない。取れる前 (init の前) の標本は捨てる。
+static channel_t *s_channels;
+static uint32_t *s_scratch;         // 中央値を出すときの写し (console だけ)
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static const char *const s_names[STACKEE_PERF_CHANNELS] = {
@@ -34,13 +39,28 @@ const char *stackee_perf_name(stackee_perf_channel_t ch) {
 }
 
 void stackee_perf_init(void) {
+    if (s_channels == NULL) {
+        size_t bytes = sizeof(channel_t) * STACKEE_PERF_CHANNELS;
+        channel_t *c = heap_caps_calloc(1, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (c == NULL) {
+            c = heap_caps_calloc(1, bytes, MALLOC_CAP_8BIT);
+        }
+        s_scratch = heap_caps_calloc(STACKEE_PERF_WINDOW, sizeof(uint32_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_scratch == NULL) {
+            s_scratch = heap_caps_calloc(STACKEE_PERF_WINDOW, sizeof(uint32_t),
+                                         MALLOC_CAP_8BIT);
+        }
+        s_channels = c;             // ★ 最後に公開する (中身は 0 で埋まっている)
+        return;
+    }
     taskENTER_CRITICAL(&s_lock);
-    memset(s_channels, 0, sizeof(s_channels));
+    memset(s_channels, 0, sizeof(channel_t) * STACKEE_PERF_CHANNELS);
     taskEXIT_CRITICAL(&s_lock);
 }
 
 void stackee_perf_reset(stackee_perf_channel_t ch) {
-    if (ch < 0 || ch >= STACKEE_PERF_CHANNELS) {
+    if (ch < 0 || ch >= STACKEE_PERF_CHANNELS || s_channels == NULL) {
         return;
     }
     taskENTER_CRITICAL(&s_lock);
@@ -49,7 +69,7 @@ void stackee_perf_reset(stackee_perf_channel_t ch) {
 }
 
 void stackee_perf_sample(stackee_perf_channel_t ch, uint32_t us) {
-    if (ch < 0 || ch >= STACKEE_PERF_CHANNELS) {
+    if (ch < 0 || ch >= STACKEE_PERF_CHANNELS || s_channels == NULL) {
         return;
     }
     channel_t *c = &s_channels[ch];
@@ -74,10 +94,11 @@ static int compare_u32(const void *a, const void *b) {
 }
 
 bool stackee_perf_stats(stackee_perf_channel_t ch, stackee_perf_stats_t *out) {
-    if (ch < 0 || ch >= STACKEE_PERF_CHANNELS || out == NULL) {
+    if (ch < 0 || ch >= STACKEE_PERF_CHANNELS || out == NULL ||
+        s_channels == NULL || s_scratch == NULL) {
         return false;
     }
-    static uint32_t scratch[STACKEE_PERF_WINDOW];   // 呼ぶのは console だけ
+    uint32_t *scratch = s_scratch;   // 呼ぶのは console だけ
     channel_t *c = &s_channels[ch];
     uint16_t n;
     taskENTER_CRITICAL(&s_lock);
