@@ -244,7 +244,14 @@ esp_err_t stackee_http_start(void) {
     // CPU0 / 低優先度。入力 (CPU1 / 最高) とは別の CPU。
     // ★ スタックは 10 KB。TLS のハンドシェイクが 6 KB では足りない
     //   (ESP-IDF の HTTPS の例も 8 KB 以上を使っている)。
-    if (xTaskCreatePinnedToCore(worker, "stackee_http", 10240, NULL, 4, &h.task, 0)
+    // ★★ 優先度は 1 (main / lcd と同じ、touch・ui の 3 より下)。2026-09-26 まで
+    //   4 で、「低優先度」の意図と食い違っていた。keep-alive を切っているので
+    //   要求のたびに TLS の握手が走り、それが CPU0 を約 4.5〜5 秒握り続ける
+    //   (会話 1 回で POST・poll・音声 GET の 3 回)。4 だとその間 touch (3)・
+    //   ui (3)・console (main, 1) がほぼ回れず (実測: 毎秒 200 周 → 6〜50)、
+    //   タッチと顔が固まっていた。握手は計算だけなので、
+    //   下の優先度で回しても周期の短い仕事の合間に進むだけで失うものは小さい。
+    if (xTaskCreatePinnedToCore(worker, "stackee_http", 10240, NULL, 1, &h.task, 0)
             != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

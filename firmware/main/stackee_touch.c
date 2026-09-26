@@ -39,6 +39,7 @@ static struct {
     int32_t  moved_x, moved_y;
     int      last_x, last_y;
     uint32_t loop_max_us, loop_n;
+    uint32_t late;       // 周期に遅れて眠らずに戻った回数 (取り戻しはしない)
     // クリックの保持 (押してから click_hold_ms たったら離す)
     uint8_t  held_button;
     int64_t  release_at_us;
@@ -180,7 +181,20 @@ static void touch_task(void *arg) {
             tp.loop_n++;
             give();
         }
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TOUCH_PERIOD_MS));
+        // ★ 遅れを「取り戻さない」(2026-09-26)。vTaskDelayUntil は周期の
+        //   起点を覚えているので、上位のタスク (HTTPS の握手など) に数秒
+        //   待たされると、その間の周期ぶん**眠らずに連続で**回って追いつこう
+        //   とする。4.5 秒待たされると約 900 周を 2 ms ごとに回し続け、その間
+        //   内部 I2C の錠 (stackee_board) を放した直後にまた取るので、優先度の
+        //   低い使い手 (console の aldo3 / 電池、camera タスクの ALDO3 入り切り)
+        //   が 200 ms 待っても錠を取れず失敗し続けた (会話 1 回で約 19 秒)。
+        //   タッチは「いまの 1 点」を読むだけなので、過ぎた周期を読み直す意味は
+        //   無い。遅れていたら起点を今に置き直し、以後は普通に 5 ms 眠る。
+        if (xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TOUCH_PERIOD_MS)) == pdFALSE) {
+            tp.late++;
+            last_wake = xTaskGetTickCount();
+            vTaskDelay(pdMS_TO_TICKS(TOUCH_PERIOD_MS));
+        }
     }
 }
 
@@ -197,7 +211,7 @@ static size_t reply_status(long id, char *buf, size_t cap) {
         "\"taps_left\":%lu,\"taps_right\":%lu,\"taps_rejected\":%lu,"
         "\"moves\":%lu,\"scrolls\":%lu,\"clicks\":%lu,"
         "\"moved_x\":%ld,\"moved_y\":%ld,\"last_x\":%d,\"last_y\":%d,"
-        "\"scroll\":%s,\"loop_n\":%lu,\"loop_max_us\":%lu}",
+        "\"scroll\":%s,\"loop_n\":%lu,\"loop_max_us\":%lu,\"late\":%lu}",
         id, st.present ? "true" : "false", st.vendor,
         (unsigned long)st.reads, (unsigned long)st.read_fails,
         (unsigned long)st.points, (unsigned long)st.releases,
@@ -207,7 +221,8 @@ static size_t reply_status(long id, char *buf, size_t cap) {
         (unsigned long)st.clicks,
         (long)st.moved_x, (long)st.moved_y, st.last_x, st.last_y,
         st.scroll_mode ? "true" : "false",
-        (unsigned long)st.loop_n, (unsigned long)st.loop_max_us);
+        (unsigned long)st.loop_n, (unsigned long)st.loop_max_us,
+        (unsigned long)st.late);
 }
 
 // `{"cmd":"touch.inject","xy":[x0,y0,x1,y1,...],"step_ms":5,"release":true}`
@@ -366,6 +381,7 @@ void stackee_touch_stats(stackee_touch_stats_t *out) {
     out->scroll_mode = tp.state.scroll_mode;
     out->loop_max_us = tp.loop_max_us;
     out->loop_n = tp.loop_n;
+    out->late = tp.late;
 }
 
 esp_err_t stackee_touch_start(void) {

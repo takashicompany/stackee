@@ -39,6 +39,7 @@ typedef struct {
     bool     scroll_mode;
     uint32_t loop_max_us;       // 1 周の最大処理時間 (loop_debug 相当)
     uint32_t loop_n;
+    uint32_t late;              // 周期に遅れた回数 (遅れは取り戻さず起点を置き直す)
 } stackee_touch_stats_t;
 
 void stackee_touch_stats(stackee_touch_stats_t *out);
