@@ -50,7 +50,13 @@ esp_err_t stackee_camera_capture(const stackee_camera_req_t *req);
 
 // STK_CAMERA キー。入力タスクから呼ばれるので**ブロックしない**
 // (印を立てるだけ。実際の撮影は camera タスクが進める)。
+// 撮って POST /look で AI に見せ、返答を音声と字幕で鳴らす (2026-09-26)。
+// ★ 会話中 (録音/送信/待ち/再生) に押されたら撮らずに無視する。
 void stackee_camera_key(void);
+
+// 撮影中か、画像を見せる流れを camera タスクが進めている最中か。
+// ★ 再起動の判断 (撮影中にリセットしない) に使う。
+bool stackee_camera_busy(void);
 
 // ALDO3 (カメラの 3.3V) の入り切り。
 // ★ ハードリセットの前に off にすること。
@@ -79,7 +85,7 @@ typedef struct {
     bool     psram_dma;         // PSRAM DMA で開けたか (内蔵 RAM をほぼ使わない)
     uint32_t dma_largest;       // 撮る直前の「DMA に使える内蔵の最大の塊」
     uint32_t internal_free;     // 撮る直前の内蔵 RAM の空き
-    uint32_t sent;          // HTTP で送った回数
+    uint32_t sent;          // POST /look に渡した回数 (受理ではなく送り始めた数)
     char     error[48];
     uint32_t t_power_ms, t_init_ms, t_warm_ms, t_take_ms, t_jpeg_ms, t_stop_ms;
 } stackee_camera_stats_t;

@@ -110,6 +110,7 @@ static struct {
     _Atomic bool talk_recording;
     _Atomic bool talk_busy;
     _Atomic bool talk_speaking;
+    _Atomic bool camera_active;     // STK_CAMERA の撮影中 (顔を `camera` に)
 
     uint32_t last_key_events;
     int64_t  battery_at_us;
@@ -218,6 +219,10 @@ void stackee_ui_set_talk(bool recording, bool busy, bool speaking) {
     atomic_store(&ui.talk_recording, recording);
     atomic_store(&ui.talk_busy, busy);
     atomic_store(&ui.talk_speaking, speaking);
+}
+
+void stackee_ui_set_camera(bool active) {
+    atomic_store(&ui.camera_active, active);
 }
 
 void stackee_ui_set_screen(const char *text) {
@@ -460,7 +465,10 @@ static void ui_task(void *unused) {
             //   印を読むだけ (打鍵の道には何も足さない)。microphoneの3コマを表示。
             .mic_held = stackee_input_mic_held(),
             .talk_busy = atomic_load(&ui.talk_busy),
-            .camera_active = false,             // カメラは段階 4
+            // ★ 撮影中 (と撮り終えて 1.5 秒) は `camera`。ただし返答待ち
+            //   (thinking) のほうが上なので、画像を渡したら考え中に変わる。
+            //   絵は既存の faces.bin のまま (描き直さない)。
+            .camera_active = atomic_load(&ui.camera_active),
         };
         stackee_face_rect_t rect;
         bool busy_before = stackee_face_view_busy(&ui.view);

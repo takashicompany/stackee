@@ -15,6 +15,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -64,3 +65,19 @@ const char *stackee_audio_screen(void);
 // 返すのは読めたサンプル数 (0 なら「いまは無い」、-1 なら「使えない」)。
 int  stackee_audio_uac_pull(int16_t *dst, int max_samples);
 void stackee_audio_uac_release(void);
+
+// ---------------------------------------------------------------------------
+// 画像を見せる (POST /look、2026-09-26)。呼ぶのは camera タスク。
+// ---------------------------------------------------------------------------
+// 撮る前に会話の口を押さえる。戻り値は stackee_talk_look_reserve_t
+// (0 = 撮ってよい / 1 = 会話中などで撮らない / 2 = 送れない。画面に出した)。
+// ★ 押さえている間と画像の往復の間は、STK_TALK と talk.inject を受け付けない。
+int  stackee_audio_look_reserve(void);
+// 撮れなかったときに押さえを外す。
+void stackee_audio_look_release(void);
+// 撮れた JPEG を渡す。audio タスクが拾って写し取り、POST /look を始めるまで
+// 待つ (最大 2 秒ほど)。戻ったら jpeg は自由に使ってよい。
+// play=false なら返答を鳴らす直前で止める (一次回答も鳴らさない)。
+bool stackee_audio_look_submit(const uint8_t *jpeg, size_t len, bool play);
+// camera.look_status に混ぜる "talk":{…} (job / 返答の長さ / 各段の ms / エラー)。
+size_t stackee_audio_look_json(char *buf, size_t cap, size_t at);

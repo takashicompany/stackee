@@ -4,6 +4,8 @@
 Python standard library only. POST /talk accepts WAV; poll the returned Location
 for status, then GET its /audio endpoint for 16 kHz, signed little-endian PCM. The
 status carries the caption pages timed against that PCM, which /subtitles also serves.
+POST /look accepts a camera JPEG instead: the agent looks at it in the same
+conversation and its remark comes back through exactly the same job, audio and captions.
 GET /admin serves the browser page that switches agent, model, effort and instructions.
 """
 from __future__ import annotations
@@ -39,6 +41,11 @@ MAX_UPLOAD = RATE * 2 * MAX_SECONDS + 4096
 MAX_REPLY_SECONDS = 120
 MAX_REPLY_BYTES = RATE * 2 * MAX_REPLY_SECONDS
 MAX_ADMIN_BYTES = 64 * 1024
+MAX_IMAGE = 512 * 1024
+# What the agent is asked with every /look photo. The photo joins the same conversation,
+# so a later spoken question can refer to it.
+LOOK_PROMPT = ("ユーザーが stackee のカメラで今撮った写真です。"
+               "何が写っているかを見て、短く話しかけてください。")
 AGENT_DIR = Path(__file__).resolve().parent / "agent"
 ADMIN_HTML = Path(__file__).resolve().parent / "admin.html"
 
@@ -59,6 +66,13 @@ def read_audio(data, max_seconds=MAX_SECONDS, min_seconds=.3):
             return pcm
     except (wave.Error, EOFError) as exc:
         raise ValueError("Invalid WAV") from exc
+
+
+def read_jpeg(data):
+    """Accept one whole JPEG file: it opens with SOI (FFD8) and closes with EOI (FFD9)."""
+    if len(data) < 4 or data[:2] != b"\xff\xd8" or data[-2:] != b"\xff\xd9":
+        raise ValueError("Expected a JPEG image (FFD8 ... FFD9)")
+    return data
 
 
 def peak(pcm):
@@ -402,6 +416,35 @@ class Pipeline:
         if self.agent:
             self.agent.close()
 
+    def answer(self, question, root, timings, started, image=None):
+        """The agent's reply to one input, cleaned, fitted and spoken, as the job result."""
+        stage = time.monotonic()
+        if self.echo:
+            reply = question if image is None else (
+                "写真を受け取りました。" + str(len(image) // 1024) + "キロバイトです。")
+        else:
+            reply = (self.agent.ask(question) if image is None
+                     else self.agent.ask(question, image))
+            if not reply:
+                raise RuntimeError("codex returned no final message")
+        reply = clean_reply(reply)
+        timings["codex_ms"] = round((time.monotonic() - stage) * 1000, 2)
+        stage = time.monotonic()
+        # Keep synthesis and device memory bounded even when the model ignores brevity.
+        reply, audio, subtitles = self.fit(reply, root)
+        timings["tts_ms"] = round((time.monotonic() - stage) * 1000, 2)
+        timings["total_ms"] = round((time.monotonic() - started) * 1000, 2)
+        return {"state": "done", "transcript": "" if image is not None else question,
+                "reply": reply, "timings": timings, "subtitles": subtitles}, audio
+
+    def look(self, data):
+        """A camera photo instead of speech: no transcription, the same reply path."""
+        started = time.monotonic()
+        image = read_jpeg(data)
+        with tempfile.TemporaryDirectory(prefix="stackee-look-") as tmp:
+            timings = {"prepare_ms": round((time.monotonic() - started) * 1000, 2)}
+            return self.answer(LOOK_PROMPT, Path(tmp), timings, started, image)
+
     def __call__(self, data):
         started = time.monotonic()
         timings = {}
@@ -419,26 +462,14 @@ class Pipeline:
             timings["stt_ms"] = round((time.monotonic() - stage) * 1000, 2)
             if not text:
                 return {"state": "ignored", "reason": "no_speech"}, b""
-            stage = time.monotonic()
-            if self.echo:
-                reply = text
-            else:
-                reply = self.agent.ask(text)
-                if not reply:
-                    raise RuntimeError("codex returned no final message")
-            reply = clean_reply(reply)
-            timings["codex_ms"] = round((time.monotonic() - stage) * 1000, 2)
-            stage = time.monotonic()
-            # Keep synthesis and device memory bounded even when the model ignores brevity.
-            reply, audio, subtitles = self.fit(reply, root)
-            timings["tts_ms"] = round((time.monotonic() - stage) * 1000, 2)
-            timings["total_ms"] = round((time.monotonic() - started) * 1000, 2)
-            return {"state": "done", "transcript": text, "reply": reply, "timings": timings,
-                    "subtitles": subtitles}, audio
+            return self.answer(text, root, timings, started)
 
 
 class Jobs:
-    """One conversation at a time; results expire after five minutes, max 8 retained."""
+    """One conversation at a time; results expire after five minutes, max 8 retained.
+
+    /talk and /look share the single slot: while either runs, both answer 409.
+    """
     def __init__(self, pipeline):
         self.pipeline = pipeline
         self.lock = threading.Lock()
@@ -452,7 +483,7 @@ class Jobs:
                     and time.monotonic() - self.entries[key]["created"] > 300):
                 del self.entries[key]
 
-    def submit(self, data):
+    def submit(self, data, kind="talk"):
         with self.lock:
             if self.busy:
                 return None
@@ -462,19 +493,22 @@ class Jobs:
             ident = uuid.uuid4().hex
             self.entries[ident] = {"created": time.monotonic(), "state": "processing"}
             self.busy = True
-            self.worker = threading.Thread(target=self.process, args=(ident, data), daemon=True)
+            self.worker = threading.Thread(target=self.process, args=(ident, data, kind),
+                                           daemon=True)
             self.worker.start()
             return ident
 
-    def process(self, ident, data):
+    def process(self, ident, data, kind="talk"):
         started = time.monotonic()
         try:
-            result, audio = self.pipeline(data)
+            work = self.pipeline if kind == "talk" else self.pipeline.look
+            result, audio = work(data)
             result["audio"] = audio
         except Exception as exc:
             logging.exception("Voice job %s failed", ident)
             result = {"state": "error", "error": str(exc)}
-        logging.info("job-timing %s", json.dumps({"job": ident, "state": result["state"],
+        logging.info("job-timing %s", json.dumps({"job": ident, "kind": kind,
+                     "state": result["state"],
                      "worker_ms": round((time.monotonic() - started) * 1000, 2),
                      "timings": result.get("timings", {})}))
         with self.lock:
@@ -654,31 +688,38 @@ class Handler(BaseHTTPRequestHandler):
                                      {"reset": reset[1]})
         if self.path.startswith("/admin/"):
             return self.send(404, {"error": "not_found"})
-        if self.path != "/talk":
+        # Per device route: content types, size range, the two error codes, the validator.
+        route = {"/talk": (("audio/wav", "audio/x-wav"), 44, MAX_UPLOAD,
+                           "recording_too_large_or_empty", "expected_audio_wav", read_audio),
+                 "/look": (("image/jpeg",), 4, MAX_IMAGE,
+                           "image_too_large_or_empty", "expected_image_jpeg", read_jpeg),
+                 }.get(self.path)
+        if route is None:
             return self.send(404, {"error": "not_found"})
+        types, smallest, largest, too_large, wrong_type, validate = route
         # Device API only. No CORS; reject browser-originated posts explicitly.
         if self.headers.get("Origin"):
             return self.send(403, {"error": "device_api_only"})
         if self.headers.get("Transfer-Encoding"):
             return self.send(400, {"error": "content_length_required"})
-        if self.headers.get_content_type() not in ("audio/wav", "audio/x-wav"):
-            return self.send(415, {"error": "expected_audio_wav"})
+        if self.headers.get_content_type() not in types:
+            return self.send(415, {"error": wrong_type})
         lengths = self.headers.get_all("Content-Length", [])
         if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
             return self.send(411, {"error": "content_length_required"})
         length = int(lengths[0])
-        if not 44 <= length <= MAX_UPLOAD:
-            return self.send(413, {"error": "recording_too_large_or_empty"})
+        if not smallest <= length <= largest:
+            return self.send(413, {"error": too_large})
         try:
             data = self.rfile.read(length)
             if len(data) != length:
                 raise ValueError("Incomplete request body")
-            read_audio(data)
+            validate(data)
         except TimeoutError:
             return self.send(408, {"error": "upload_timeout"})
         except ValueError as exc:
             return self.send(400, {"error": str(exc)})
-        ident = self.server.jobs.submit(data)
+        ident = self.server.jobs.submit(data, self.path[1:])
         if ident is None:
             return self.send(409, {"error": "busy"})
         location = "/jobs/" + ident
@@ -720,7 +761,7 @@ def main():
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    logging.info("Listening on http://%s:%s/talk (admin: http://%s:%s/admin)",
+    logging.info("Listening on http://%s:%s/talk and /look (admin: http://%s:%s/admin)",
                  *(server.server_address * 2))
     try:
         server.serve_forever()

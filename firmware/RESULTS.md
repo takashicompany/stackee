@@ -1619,3 +1619,85 @@ t=44429  idle       guide=none   crc=2186780939  黒
 | **公開ページ (`--page https://…`) からの書き込み** | 手元配信で書いた。公開ページ相手は引数の道が同じだけで、実行していない |
 | **管理ポリシーの道** | root が要るので実行していない。コマンドだけ README に置いた |
 | **Windows / Linux での許可の書き方** | macOS でしか試していない (プロファイルの形は同じはず) |
+
+## カメラの画像を AI に見せる (POST /look) 2026-09-26 — **予定 (まだ書き込んでいない)**
+
+README §17-2b。`STK_CAMERA` → 撮影 → `POST /look` (image/jpeg) → 会話と同じ返答待ち →
+音声 + 字幕。**実機には書き込んでいない**。下の数字はビルドとホストテストだけ。
+
+### ビルド (実機に触らない)
+
+| | dev | full |
+|---|---:|---:|
+| 像 (`stackee.bin`) | 1,399,536 B (ota_0 の 66%) | 1,400,976 B (66%) |
+| 変更前 (HEAD `49ef0f2`) | 1,395,424 B | 1,396,880 B |
+| 内蔵 RAM の静的合計 (DIRAM) | 199,604 B (変更前 199,524、**+80**) | 197,828 B (変更前 197,748、**+80**) |
+| うち `.bss` | 78,360 B (**+80**) | 76,584 B (**+80**) |
+
+内蔵に増えたのは camera の統計 (約 100 B) と audio の受け渡し口 (約 30 B) の
+静的ぶんだけ。JPEG・写し・TLS の受け皿は PSRAM。
+会話の状態機械の実体 (`stackee_talk_t`) は元から PSRAM に置いてある。
+
+### ホストテスト
+
+**546 件** (`tools/test_*.py` 全部)。`test_talk_host` 83 → **105**
+(送り先の置き換え 1 / `/look` の往復・鳴らさない止め方・会話キーとの排他・
+409・タイムアウト・512 KiB の境目・JPEG でないもの・写しの確認・
+URL の不備 21)。`test_console_host` は `hello` の features に
+`camera.look` / `camera.look_status` があることを足した。
+
+### 書き込み後に回す確認 (人手ゼロ・無音)
+
+★ 先に **`audio.null` を立てる**。`camera.look` の既定は `play=0`
+(一次回答も返答も鳴らさない) だが、二重に守る。
+
+```
+python3 firmware/tools/check_phase4.py --transport hid --only look
+```
+
+手で撃つなら (Raw HID でも CDC でも同じ):
+
+```
+{"cmd":"audio.null","on":true}
+{"cmd":"camera.look","play":0}          -> {"ok":1,"seq":N,"play":0,"warmup":30}  (すぐ返る)
+{"cmd":"camera.look_status"}            -> 1 秒おきに。撮影中に key.inject を数回
+{"cmd":"key.inject","kc":"F24","hold_ms":20}
+{"cmd":"talk.status"} / {"cmd":"log.tail"}   -> [talk-turn-timing] … "look":1,"played":0
+```
+
+| 見るもの | 期待値 |
+|---|---|
+| `camera.look_status.phase` | `starting` → `capturing` (約 4〜5 秒) → `submitted` |
+| `capture_ms` | 4,000〜6,000 (撮影の実測 §17-2 と同じ桁) |
+| `jpeg_bytes` | 0 より大きい (320x240、数 KB〜十数 KB) |
+| `aldo3` (撮り終えたあと) | **0** |
+| `talk.state` | `upload` → `poll_wait`/`poll` → `audio` → `play_wait` → **`idle`** |
+| `talk.look` / `talk.play` | **1 / 0** |
+| `talk.job` / `talk.job_id` | `/jobs/<id>` / `<id>` (空でない) |
+| `talk.reply_len` / `talk.reply` | 0 より大きい / 返答文 |
+| `talk.audio_bytes` | 0 より大きい偶数 (16 kHz mono 16bit) |
+| `talk.t` | `accepted` < `reply_ready` < `audio_ready` ≤ `complete`、**`play_setup` は 0** |
+| `talk.looks_done` / `looks_unplayed` | それぞれ 1 増える |
+| `talk.error` / `look_err` | 空 |
+| `talk.null` | `true` |
+| 撮影中の `key.inject` の `press_ms` | 中央値 ≤ 2 ms / 最大 ≤ 5 ms (DESIGN.md §3) |
+| `audio.status` の `plays` | 変わらない (何も鳴らしていない) |
+
+排他の確認 (無音でできるもの):
+
+| 手順 | 期待値 |
+|---|---|
+| `talk.inject` の直後 (返答待ちの間) に `camera.look` | `camera.look_status` の `phase=ignored`、`ignored` が 1 増える、`aldo3=0` のまま (撮らない) |
+| `camera.look` のあと `camera.look_status` が `phase=capturing` を返してから `talk.inject` | `{"error":"busy"}`、`talk.status` の `look_reserved=1` |
+| `wifi.off` のあと `camera.look` | `phase=error`、`refused` が 1 増える、`talk.error="Wi-Fi 未接続です"`、撮らない (`aldo3=0`) |
+
+★ `talk.inject` は一次回答を鳴らすので、上の排他の確認も `audio.null` を立てたまま行う。
+
+### 未確認のまま
+
+| 項目 | なぜ |
+|---|---|
+| **実機で 1 往復通るか** | 書き込んでいない。サーバ側の `/look` も別の作業者が作っている最中 |
+| **本物のキー (`STK_CAMERA`) を指で押したとき** | キーは `play=1` で鳴らす。無音の約束があるので `camera.look play=0` で代わりに見る (道は同じ `run_look`) |
+| **撮影中の顔が `camera` に描き替わるか** | 電源待ちの 1 秒の間に描く作り。`lcd.crc` で `face.set camera` と突き合わせれば無音で確かめられる |
+| **撮影と Wi-Fi の同時の RAM** | 撮影は TLS の前に畳む順序にしたが、`heap_internal` の実測はまだ |

@@ -28,8 +28,14 @@
 //   playblock         再生を始められないことにする
 //   playfail          再生が失敗したことにする
 //   print             いまの状態名を出す
+//   reserve           撮影の前の押さえ (stackee_talk_look_reserve)。RESERVE <0|1|2>
+//   unreserve         撮れなかったときの押さえ外し
+//   look <bytes> <play>  JPEG (FF D8 … FF D9) を <bytes> バイト作って送る。LOOK <0|1>
+//   lookpath <path>   "/talk" → "/look" の置き換えだけを聞く。LOOKPATH <結果|->
+//   lookprint         画像の往復の様子 (LOOKINFO …)
+//   init <path>       STACKEE_TALK_URL のパスを変えて作り直す (空 = 未設定)
 //
-// 出てくる行: STATE / SHOW / HTTP / ACK / PLAY / REC / TIME / SUB
+// 出てくる行: STATE / SHOW / HTTP / CTYPE / ACK / PLAY / REC / TIME / SUB
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +90,7 @@ static size_t   g_http_len;
 // ★ 録音の領域は **本当に malloc する**。実機では 960 KB あるので、
 //   取りっぱなし・二重解放をここで捕まえたい (ASan つきでビルドしている)。
 static uint8_t *g_record;
+static size_t   g_record_cap;
 static int g_alloc_count, g_release_count;
 static bool g_alloc_fail;
 
@@ -93,13 +100,21 @@ static int16_t *ops_record_alloc(int max_samples) {
     if (g_alloc_fail) {
         return NULL;
     }
-    if (g_record != NULL) {
+    size_t want = 44 + (size_t)max_samples * 2;
+    if (g_record != NULL && g_record_cap >= want) {
         return (int16_t *)(g_record + 44);      // 既に持っている
     }
-    g_record = malloc(44 + (size_t)max_samples * 2);
+    if (g_record != NULL) {
+        // 小さすぎる領域を持ったまま頼まれた (実機も同じく取り直す)。
+        free(g_record);
+        g_record = NULL;
+        g_release_count++;
+    }
+    g_record = malloc(want);
     if (g_record == NULL) {
         return NULL;
     }
+    g_record_cap = want;
     g_alloc_count++;
     return (int16_t *)(g_record + 44);
 }
@@ -110,6 +125,7 @@ static void ops_record_release(void) {
     }
     free(g_record);
     g_record = NULL;
+    g_record_cap = 0;
     g_release_count++;
 }
 
@@ -177,13 +193,24 @@ static bool ops_play_failed(void) { return g_play_fail; }
 static bool ops_net_ready(void)   { return g_net; }
 
 static bool ops_http_start(const char *method, const char *path,
-                           const void *body, size_t body_len, size_t limit) {
-    (void)body;
+                           const void *body, size_t body_len, size_t limit,
+                           const char *content_type) {
     if (g_http_busy) {
         printf("HTTP busy\n");
         return false;
     }
     printf("HTTP %s %s %u %u\n", method, path, (unsigned)body_len, (unsigned)limit);
+    if (content_type != NULL) {
+        // 本体の先頭 2 バイトも出す (JPEG なら ffd8、WAV なら 5249 = "RI")。
+        // ★ 本体を最後まで読む。領域の外を指していれば ASan が言う。
+        const uint8_t *b = body;
+        unsigned sum = 0;
+        for (size_t i = 0; i < body_len; i++) {
+            sum += b[i];
+        }
+        printf("CTYPE %s %02x%02x %u\n", content_type,
+               body_len > 0 ? b[0] : 0, body_len > 1 ? b[1] : 0, sum);
+    }
     g_http_busy = true;
     g_http_done_at = g_now + g_resp_delay;
     return true;
@@ -441,6 +468,45 @@ int main(void) {
                 if (*p == '\n') { printf("\\n"); } else { putchar(*p); }
             }
             printf("\n");
+        } else if (strcmp(line, "init") == 0) {
+            stackee_talk_init(&g_talk, &OPS, arg ? arg : "");
+            stackee_talk_set_gate(&g_talk, 300, 0, 0);
+        } else if (strcmp(line, "reserve") == 0) {
+            printf("RESERVE %d\n", stackee_talk_look_reserve(&g_talk));
+        } else if (strcmp(line, "unreserve") == 0) {
+            stackee_talk_look_release(&g_talk);
+        } else if (strcmp(line, "look") == 0) {
+            size_t n = arg ? (size_t)atol(arg) : 1000;
+            char *second = arg ? strchr(arg, ' ') : NULL;
+            bool play = second ? atoi(second + 1) != 0 : true;
+            // ★ 呼び手の入れ物は本当に malloc して、渡したら**すぐ壊して
+            //   解放する**。状態機械が写し取らずに指したままだと ASan が言う。
+            uint8_t *jpeg = malloc(n > 0 ? n : 1);
+            for (size_t i = 0; i < n; i++) {
+                jpeg[i] = (uint8_t)(i * 7);
+            }
+            if (n >= 2) { jpeg[0] = 0xFF; jpeg[1] = 0xD8; }
+            if (n >= 4) { jpeg[n - 2] = 0xFF; jpeg[n - 1] = 0xD9; }
+            printf("LOOK %d\n", stackee_talk_look(&g_talk, jpeg, n, play) ? 1 : 0);
+            memset(jpeg, 0, n);
+            free(jpeg);
+        } else if (strcmp(line, "lookpath") == 0) {
+            char out[STACKEE_TALK_PATH_MAX];
+            bool ok = stackee_talk_look_path(arg ? arg : "", out, sizeof(out));
+            printf("LOOKPATH %s\n", ok ? out : "-");
+        } else if (strcmp(line, "lookprint") == 0) {
+            printf("LOOKINFO look=%d play=%d reserved=%d busy=%d job=%s "
+                   "reply_len=%d audio_bytes=%d bytes=%u looks=%u done=%u "
+                   "unplayed=%u complete_ms=%u audio_ready_ms=%u error=%s\n",
+                   g_talk.look ? 1 : 0, g_talk.look_play ? 1 : 0,
+                   g_talk.look_reserved ? 1 : 0,
+                   stackee_talk_busy(&g_talk) ? 1 : 0,
+                   g_talk.job[0] ? g_talk.job : "-", g_talk.reply_len,
+                   g_talk.audio_samples * 2, (unsigned)g_talk.look_bytes,
+                   (unsigned)g_talk.looks, (unsigned)g_talk.looks_done,
+                   (unsigned)g_talk.looks_unplayed,
+                   (unsigned)g_talk.complete_ms, (unsigned)g_talk.audio_ready_ms,
+                   g_talk.error[0] ? g_talk.error : "-");
         } else if (strcmp(line, "print") == 0) {
             printf("NOW %u STATE %s POLLS %d ALLOC %d RELEASE %d "
                    "PAGES %d PAGE %d DROPPED %d SUBBYTES %u SRC %s "

@@ -321,7 +321,8 @@ class Phase4CommandTest(unittest.TestCase):
         for name in ('settings.get', 'settings.raw', 'settings.set', 'fs.put',
                      'bench', 'log.burst', 'lcd.status', 'lcd.full',
                      'usb.status', 'touch.status', 'touch.inject',
-                     'camera.capture', 'camera.power', 'camera.dump'):
+                     'camera.capture', 'camera.power', 'camera.dump',
+                     'camera.look', 'camera.look_status'):
             self.assertIn(name, features, name)
 
     def test_hello_says_which_profile(self):

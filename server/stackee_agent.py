@@ -4,6 +4,7 @@ The runtime files (AGENTS.md, CLAUDE.md, agent.json, .state/) live in the agent 
 not tracked by git, so the admin UI can rewrite them without breaking `git pull --ff-only`.
 Missing runtime files are restored from the tracked `defaults/` copies at startup.
 """
+import base64
 from collections import deque
 import fcntl
 import json
@@ -25,6 +26,12 @@ DEFAULT_MODELS = {"codex": "gpt-6-astra", "claude": "sonnet"}
 CONVERSATION_KEYS = {"codex": "thread_id", "claude": "session_id"}
 INSTRUCTION_FILES = {"codex": "AGENTS.md", "claude": "CLAUDE.md"}
 RUNTIME_FILES = ("AGENTS.md", "CLAUDE.md", "agent.json")
+IMAGE_TYPE = "image/jpeg"
+
+
+def image_base64(image):
+    """A JPEG as base64 text, for the image inputs of both backends."""
+    return base64.b64encode(image).decode("ascii")
 
 
 def normalize_config(raw):
@@ -278,7 +285,17 @@ class CodexAgent:
         logging.info("Codex agent pid=%s cwd=%s thread=%s model=%s effort=%s",
                      self.process.pid, self.directory, self.thread_id, self.model, self.effort)
 
-    def ask(self, text):
+    def ask(self, text, image=None):
+        """One turn in the saved thread; `image` is JPEG bytes shown with the text.
+
+        The image travels inline as a data URL (UserInput "image" in the app-server
+        schema), so nothing is written to disk and the read-only sandbox never has to
+        read it. It stays in the thread like any other turn.
+        """
+        items = [{"type": "text", "text": text}]
+        if image is not None:
+            items.append({"type": "image",
+                          "url": "data:" + IMAGE_TYPE + ";base64," + image_base64(image)})
         with self._serial:
             try:
                 self._start()
@@ -287,7 +304,7 @@ class CodexAgent:
                 result = self._request("turn/start", {
                     "threadId": self.thread_id, "cwd": str(self.directory),
                     "model": self.model, "effort": self.effort,
-                    "input": [{"type": "text", "text": text}]}, deadline)
+                    "input": items}, deadline)
                 turn_id = result["turn"]["id"]
                 # Zero-turn threads may not have a rollout yet; save after a turn is accepted.
                 self._save_session()
@@ -400,30 +417,51 @@ class ClaudeAgent:
         logging.info("Claude agent cwd=%s session=%s model=%s effort=%s",
                      self.directory, self.session_id, self.model, self.effort)
 
-    def _argv(self):
+    def _argv(self, image=False):
         # Searching and fetching only: no files, no commands, no MCP, no approval prompts.
-        argv = [self.claude, "-p", "--output-format", "json", "--model", self.model,
+        # An image needs stream-json input, and the CLI then insists on stream-json output
+        # ("--input-format=stream-json requires output-format=stream-json"), which -p only
+        # prints with --verbose. The last line is the same result object json prints.
+        output = ["stream-json", "--verbose"] if image else ["json"]
+        argv = [self.claude, "-p", "--output-format", *output, "--model", self.model,
                 "--effort", self.effort, "--tools", CLAUDE_TOOLS,
                 "--allowedTools", CLAUDE_TOOLS, "--strict-mcp-config",
                 "--setting-sources", "project", "--permission-mode", "plan"]
+        if image:
+            # One user message as a JSON line; stdin closing ends the session.
+            argv += ["--input-format", "stream-json"]
         if self.session_id:
             argv += ["--resume", self.session_id]
         return argv
 
-    def ask(self, text):
+    @staticmethod
+    def _stdin(text, image):
+        if image is None:
+            return text.encode("utf-8")
+        # An image content block (base64 JPEG) in the same session; Read is not allowed,
+        # so the picture never goes through a file.
+        message = {"type": "user", "parent_tool_use_id": None, "message": {
+            "role": "user", "content": [
+                {"type": "text", "text": text},
+                {"type": "image", "source": {"type": "base64", "media_type": IMAGE_TYPE,
+                                             "data": image_base64(image)}}]}}
+        return (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+
+    def ask(self, text, image=None):
         with self._serial:
             self._start()
             # The utterance goes in on stdin: a leading "-" must never be read as an option.
             with self._lifecycle:
                 if self.closed:
                     raise RuntimeError("Claude agent is closed")
-                proc = subprocess.Popen(self._argv(), cwd=self.directory,
+                proc = subprocess.Popen(self._argv(image is not None), cwd=self.directory,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, start_new_session=True)
                 self.process = proc
             try:
                 try:
-                    out, err = proc.communicate(input=text.encode("utf-8"), timeout=self.timeout)
+                    out, err = proc.communicate(input=self._stdin(text, image),
+                                                timeout=self.timeout)
                 except subprocess.TimeoutExpired:
                     try:
                         os.killpg(proc.pid, signal.SIGKILL)
@@ -431,17 +469,29 @@ class ClaudeAgent:
                         pass
                     proc.communicate()
                     raise TimeoutError("Claude agent timed out") from None
-                return self._reply(out, err)
+                return self._reply(out, err, image is not None)
             finally:
                 with self._lifecycle:
                     self.process = None
 
-    def _reply(self, out, err):
+    @staticmethod
+    def _result(out, streamed):
+        """The result object: the whole output, or the last `result` line of a stream."""
+        text = out.decode("utf-8", "replace")
+        if not streamed:
+            return json.loads(text)
+        results = [event for event in map(json.loads, filter(str.strip, text.splitlines()))
+                   if isinstance(event, dict) and event.get("type") == "result"]
+        if not results:
+            raise json.JSONDecodeError("no result event", text, 0)
+        return results[-1]
+
+    def _reply(self, out, err, streamed=False):
         if not out.strip():
             detail = err.decode("utf-8", "replace").strip() or "no output"
             raise RuntimeError("claude failed: " + detail[-500:])
         try:
-            data = json.loads(out.decode("utf-8", "replace"))
+            data = self._result(out, streamed)
         except json.JSONDecodeError as exc:
             raise RuntimeError("Invalid claude output") from exc
         ident = data.get("session_id")
@@ -525,9 +575,11 @@ class Agent:
             ensure_runtime_files(self.directory)
             self._ensure().start()
 
-    def ask(self, text):
+    def ask(self, text, image=None):
+        """Send one utterance, or a JPEG with a question, to the current conversation."""
         with self._serial:
-            return self._ensure().ask(text)
+            backend = self._ensure()
+            return backend.ask(text) if image is None else backend.ask(text, image)
 
     def reload(self):
         """Stop the running backend and re-read agent.json; raise if the new settings are wrong."""

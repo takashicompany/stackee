@@ -14,10 +14,10 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "stackee_audio.h"
 #include "stackee_board.h"
 #include "stackee_console.h"
-#include "stackee_http.h"
-#include "stackee_settings.h"
+#include "stackee_talksm.h"
 #include "stackee_ui.h"
 
 static const char *TAG = "camera";
@@ -95,7 +95,27 @@ static struct {
     volatile bool key_pending;
     stackee_camera_stats_t st;
     stackee_camera_req_t   last_req;
-    char      send_path[64];
+    volatile bool busy;         // camera タスクが撮影 / 画像の受け渡し中
+
+    // ---- 画像を見せる (POST /look、2026-09-26) ----
+    // ★ 撮る → 会話の状態機械へ渡す、までが camera タスクの仕事。
+    //   受理より後ろ (返答待ち・受信・字幕・再生) は会話の道 (audio タスク)。
+    struct {
+        volatile bool pending;      // console の camera.look が頼んだ
+        bool     play;              // 頼まれた play (キーは常に true)
+        int      warmup;
+        const char *phase;          // idle / starting / capturing / submitted / ignored / error
+        const char *source;         // "key" / "console"
+        bool     play_now;          // いま / 直近の流れの play
+        uint32_t seq;               // 流れを始めた回数
+        uint32_t ignored;           // 会話中で撮らなかった回数
+        uint32_t refused;           // 送れない (URL / Wi-Fi) で撮らなかった回数
+        uint32_t capture_failed;
+        uint32_t submit_failed;
+        uint32_t capture_ms;        // 撮影 (電源〜JPEG〜電源断) にかかった時間
+        uint32_t submit_ms;         // 状態機械が JPEG を写して送り始めるまで
+        char     error[64];         // "capture:" + 撮影側の理由 (48 B まで)
+    } look;
 } cam;
 
 static void set_state(const char *s) { cam.st.state = s; }
@@ -327,9 +347,6 @@ esp_err_t stackee_camera_capture(const stackee_camera_req_t *req_in) {
     cam.st.warmup = req.warmup;
     cam.st.quality = req.quality;
     set_state("capturing");
-    // ★ 撮影中は画面を止める (DESIGN.md §3)。PSRAM の帯域と CPU0 を
-    //   カメラに明け渡す。画面はそのまま残る。
-    stackee_ui_pause(true);
 
     int64_t t0 = esp_timer_get_time();
     esp_err_t err = ESP_OK;
@@ -342,6 +359,13 @@ esp_err_t stackee_camera_capture(const stackee_camera_req_t *req_in) {
         vTaskDelay(pdMS_TO_TICKS(POWER_SETTLE_MS));
     }
     cam.st.t_power_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+
+    // ★ 撮影中は画面を止める (DESIGN.md §3)。PSRAM の帯域と CPU0 を
+    //   カメラに明け渡す。画面はそのまま残る。
+    //   止めるのは電源を待ったあと (2026-09-26)。待つ 1 秒の間はまだ何も
+    //   流れていないので、その間に ui が顔を `camera` に描き替えられる
+    //   (STK_CAMERA の撮影中の表情。stackee_ui_set_camera)。
+    stackee_ui_pause(true);
 
     // 2. 初期化。
     int64_t t1 = esp_timer_get_time();
@@ -454,18 +478,114 @@ void stackee_camera_key(void) {
     cam.key_pending = true;         // ★ ここでは撮らない (入力タスクを止めない)
 }
 
+bool stackee_camera_busy(void) {
+    return cam.busy || cam.key_pending || cam.look.pending;
+}
+
+static void look_note(const char *why) {
+    snprintf(cam.look.error, sizeof(cam.look.error), "%s", why);
+}
+
+// 撮る → POST /look を会話の状態機械に頼む。★ camera タスクの上だけで走る。
+//
+// 内蔵 RAM の順序 (README §17-2 / §24):
+//   撮影 (カメラの DMA 記述子 480 B + PSRAM のフレーム) を**全部畳んで
+//   ALDO3 を切ってから**送る。TLS の握手 (内蔵 RAM を食う) と撮影は
+//   同時には走らない。JPEG は PSRAM (cam.jpeg) → 状態機械が PSRAM の
+//   録音の領域へ写す。内蔵 RAM には 1 バイトも置かない。
+static void run_look(bool play, int warmup, const char *source) {
+    // ★ phase を先に置き直す。seq だけ進んで前回の phase ("submitted") が
+    //   残っていると、見ている側が「もう終わった」と取り違える。
+    cam.look.phase = "starting";
+    cam.look.seq++;
+    cam.look.source = source;
+    cam.look.play_now = play;
+    cam.look.error[0] = '\0';
+    cam.look.capture_ms = 0;
+    cam.look.submit_ms = 0;
+
+    // 1. 会話の口を押さえる。会話中なら撮らない (約束)。
+    int r = stackee_audio_look_reserve();
+    if (r == STACKEE_TALK_LOOK_BUSY) {
+        cam.look.ignored++;
+        cam.look.phase = "ignored";
+        look_note("talk_busy");
+        ESP_LOGI(TAG, "[look] 会話中なので撮らない (%s)", source);
+        return;
+    }
+    if (r != STACKEE_TALK_LOOK_OK) {
+        // URL 未設定 / Wi-Fi なし。理由は会話の状態機械が画面に出す。
+        cam.look.refused++;
+        cam.look.phase = "error";
+        look_note("refused");
+        ESP_LOGW(TAG, "[look] 送れないので撮らない (%s)", source);
+        return;
+    }
+
+    // 2. 撮る。顔は `camera` (電源を待つ 1 秒の間に描かれる)。
+    cam.look.phase = "capturing";
+    stackee_camera_req_t req;
+    stackee_camera_req_default(&req);
+    if (warmup > 0) {
+        req.warmup = warmup;
+    }
+    int64_t t0 = esp_timer_get_time();
+    stackee_ui_set_camera(true);
+    esp_err_t err = stackee_camera_capture(&req);
+    stackee_ui_set_camera(false);
+    cam.look.capture_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+    if (err != ESP_OK) {
+        stackee_audio_look_release();
+        cam.look.capture_failed++;
+        cam.look.phase = "error";
+        snprintf(cam.look.error, sizeof(cam.look.error), "capture:%s",
+                 cam.st.error[0] ? cam.st.error : "fail");
+        stackee_ui_set_screen("会話エラー: 撮影に失敗しました");
+        return;
+    }
+
+    // 3. 渡す。★ 状態機械が写し終えるまで cam.jpeg を動かさない
+    //   (console の camera.capture が同時に撮り直して入れ物を替えないよう、
+    //   撮影と同じ錠を持つ)。
+    int64_t t1 = esp_timer_get_time();
+    bool ok = false;
+    if (xSemaphoreTake(cam.lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        ok = stackee_audio_look_submit(cam.jpeg, cam.jpeg_len, play);
+        xSemaphoreGive(cam.lock);
+    } else {
+        stackee_audio_look_release();
+    }
+    cam.look.submit_ms = (uint32_t)((esp_timer_get_time() - t1) / 1000);
+    if (!ok) {
+        // 断られた理由は状態機械のエラー欄 (camera.look_status の talk.error)。
+        cam.look.submit_failed++;
+        cam.look.phase = "error";
+        look_note("submit");
+        return;
+    }
+    cam.st.sent++;
+    cam.look.phase = "submitted";
+    ESP_LOGI(TAG, "[look] %u B を渡した (play=%d, 撮影 %lu ms)",
+             (unsigned)cam.jpeg_len, play ? 1 : 0,
+             (unsigned long)cam.look.capture_ms);
+}
+
 static void camera_task(void *arg) {
     (void)arg;
     for (;;) {
-        if (cam.key_pending) {
-            cam.key_pending = false;
-            stackee_camera_req_t req;
-            stackee_camera_req_default(&req);
-            if (stackee_camera_capture(&req) == ESP_OK) {
-                // ★ 送るのは Wi-Fi が上がっていて、会話が空いているときだけ。
-                //   会話の HTTP ワーカーは 1 本しかないので取り合わない。
-                (void)0;
+        if (cam.key_pending || cam.look.pending) {
+            cam.busy = true;
+            if (cam.key_pending) {
+                cam.key_pending = false;
+                // ★ キーは本番: 返答を鳴らす。
+                run_look(true, 0, "key");
+            } else {
+                bool play = cam.look.play;
+                int warmup = cam.look.warmup;
+                cam.look.pending = false;
+                run_look(play, warmup, "console");
             }
+            cam.busy = false;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -616,6 +736,62 @@ static size_t camera_console(const char *cmd, const char *line, long id,
     if (strcmp(cmd, "camera.dump") == 0) {
         return reply_dump(id, line, buf, cap);
     }
+    if (strcmp(cmd, "camera.look") == 0) {
+        // ★ **非同期**。頼んだらすぐ返す。進み具合は camera.look_status。
+        // ★ 既定は play=0 (鳴らさない)。鳴らすのは play=1 を書いたときだけ。
+        //   キー (STK_CAMERA) は常に鳴らす。
+        long warm = stackee_console_int(line, "warmup", DEFAULT_WARMUP);
+        if (warm < 1 || warm > MAX_WARMUP) {
+            return (size_t)snprintf(buf, cap,
+                                    "{\"id\":%ld,\"error\":\"badwarmup\"}", id);
+        }
+        if (stackee_camera_busy()) {
+            return (size_t)snprintf(buf, cap,
+                                    "{\"id\":%ld,\"error\":\"busy\"}", id);
+        }
+        cam.look.play = stackee_console_bool(line, "play", false);
+        cam.look.warmup = (int)warm;
+        cam.look.pending = true;
+        return (size_t)snprintf(buf, cap,
+                                "{\"id\":%ld,\"ok\":1,\"seq\":%lu,\"play\":%d,"
+                                "\"warmup\":%ld}",
+                                id, (unsigned long)cam.look.seq + 1,
+                                cam.look.play ? 1 : 0, warm);
+    }
+    if (strcmp(cmd, "camera.look_status") == 0) {
+        int n = snprintf(buf, cap,
+                         "{\"id\":%ld,\"ok\":1,\"phase\":\"%s\",\"busy\":%d,"
+                         "\"seq\":%lu,\"source\":\"%s\",\"play\":%d,"
+                         "\"ignored\":%lu,\"refused\":%lu,\"capture_failed\":%lu,"
+                         "\"submit_failed\":%lu,\"sent\":%lu,"
+                         "\"capture_ms\":%lu,\"submit_ms\":%lu,"
+                         "\"jpeg_bytes\":%u,\"aldo3\":%d,\"camera_err\":\"%s\","
+                         "\"look_err\":\"%s\",",
+                         id, cam.look.phase ? cam.look.phase : "idle",
+                         stackee_camera_busy() ? 1 : 0,
+                         (unsigned long)cam.look.seq,
+                         cam.look.source ? cam.look.source : "",
+                         cam.look.play_now ? 1 : 0,
+                         (unsigned long)cam.look.ignored,
+                         (unsigned long)cam.look.refused,
+                         (unsigned long)cam.look.capture_failed,
+                         (unsigned long)cam.look.submit_failed,
+                         (unsigned long)cam.st.sent,
+                         (unsigned long)cam.look.capture_ms,
+                         (unsigned long)cam.look.submit_ms,
+                         (unsigned)cam.st.jpeg_bytes,
+                         stackee_camera_power_is_on(), cam.st.error,
+                         cam.look.error);
+        size_t at = (n > 0) ? (size_t)n : 0;
+        at = stackee_audio_look_json(buf, cap, at);
+        if (at + 2 <= cap) {
+            buf[at++] = '}';
+            buf[at] = '\0';
+        } else {
+            at = cap;           // 入り切らない → console が error にする
+        }
+        return at;
+    }
     return 0;
 }
 
@@ -629,9 +805,7 @@ esp_err_t stackee_camera_init(void) {
     cam.st.quality = cam.last_req.quality;
     cam.st.hmirror = cam.last_req.hmirror;
     cam.st.vflip = cam.last_req.vflip;
-    const char *path = stackee_settings_get("STACKEE_CAMERA_PATH");
-    snprintf(cam.send_path, sizeof(cam.send_path), "%s",
-             (path != NULL && path[0] != '\0') ? path : "/image");
+    cam.look.phase = "idle";
     stackee_console_register(camera_console);
     if (xTaskCreatePinnedToCore(camera_task, "camera", 4096, NULL, 2, NULL, 0)
             != pdPASS) {

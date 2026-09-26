@@ -12,6 +12,8 @@
   * 30 秒で録音を打ち切る。返答音声の受け皿はその 4 倍 (120 秒 = 3.84 MB)
   * どこで失敗してもマイクを戻し、idle に戻る
   * talk.inject は録音の道を通らず、送信から先は同じ道を歩く
+  * 画像 (POST /look、image/jpeg) は受理から先が会話と同じ道。撮影の前に
+    押さえ、その間と往復の間は会話キーを受け付けない。play=0 は鳴らさない
 
   python3 firmware/tools/test_talk_host.py
 """
@@ -1311,6 +1313,330 @@ print
         self.assertIn('スピーカー待機がタイムアウト', info['error'])
         self.assertEqual(info['pages'], 0)           # 後始末で捨ててある
 
+
+def look_info(text):
+    """lookprint の行 (最後のもの) を辞書にする。"""
+    rows = re.findall(r'^LOOKINFO (.*)$', text, re.M)
+    assert rows, text
+    out = {}
+    for part in rows[-1].split(' '):
+        k, _, v = part.partition('=')
+        out[k] = int(v) if re.fullmatch(r'-?\d+', v) else v
+    return out
+
+
+def ctypes(text):
+    return re.findall(r'^CTYPE (\S+) (\S+) (\d+)$', text, re.M)
+
+
+LOOK_ACCEPT = '{"id":"img1","status_url":"/jobs/img1"}'
+# ★ サーバとの取り決め: done の形は /talk と完全に同じ (transcript は空か無し)。
+LOOK_DONE = ('{"state":"done","reply":"りんごが見えるのだ","transcript":"",'
+             '"audio_url":"/jobs/img1/audio","sample_rate":16000,"channels":1,'
+             '"sample_width":2,"subtitles":"0\\tりんごが見えるのだ\\n"}')
+
+
+class LookPathTest(unittest.TestCase):
+    """送り先は STACKEE_TALK_URL の末尾 /talk を /look にしたもの。"""
+
+    def test_replacements(self):
+        cases = {
+            '/talk': '/look',
+            '/api/talk': '/api/look',
+            '/stackee/v1/talk': '/stackee/v1/look',
+            '/talkx': '-',
+            '/xtalk': '-',
+            '/talk/': '-',
+            '/talk?x=1': '-',
+            '/': '-',
+            'talk': '-',
+            '//talk': '-',
+        }
+        script = ''.join('lookpath %s\n' % k for k in cases)
+        got = re.findall(r'^LOOKPATH (.*)$', run(script), re.M)
+        self.assertEqual(got, list(cases.values()))
+
+
+class LookTest(unittest.TestCase):
+    """画像を見せる (POST /look)。受理より後ろは会話と同じ道を歩く。"""
+
+    HAPPY = """
+ackms 300
+respdelay 20
+resp 202 %s
+resp 200 {"state":"processing"}
+resp 200 %s
+resp 200 PCM:16000
+reserve
+look 12345 %%d
+t 8000
+print
+lookprint
+""" % (LOOK_ACCEPT, LOOK_DONE)
+
+    def test_the_image_goes_to_look_as_jpeg_and_the_rest_is_the_talk_path(self):
+        out = run(self.HAPPY % 1)
+        self.assertIn('RESERVE 0', out)
+        self.assertIn('LOOK 1', out)
+        self.assertNotIn('REC begin', out)          # 録音の道は通らない
+        calls = http_calls(out)
+        self.assertEqual([c[0] for c in calls], ['POST', 'GET', 'GET', 'GET'])
+        self.assertEqual([c[1] for c in calls],
+                         ['/look', '/jobs/img1?wait=25', '/jobs/img1?wait=25',
+                          '/jobs/img1/audio'])
+        # 本体は JPEG そのもの (WAV ヘッダを付けない)。長さもそのまま。
+        self.assertEqual(int(calls[0][2]), 12345)
+        ct = ctypes(out)
+        self.assertEqual(len(ct), 1)                # POST のときだけ
+        self.assertEqual(ct[0][0], 'image/jpeg')
+        self.assertEqual(ct[0][1], 'ffd8')
+        # 受理のあとは会話と 1 手も違わない。
+        self.assertEqual(
+            state_names(out),
+            ['idle', 'upload', 'poll_wait', 'poll', 'poll_wait', 'poll',
+             'audio', 'play_wait', 'playing', 'idle'])
+        self.assertIn('ACK 300', out)
+        self.assertIn('PLAY 16000', out)
+        self.assertIn('りんごが見えるのだ', subtitles(out))   # 字幕も同じ
+        self.assertIn('SHOW りんごが見えるのだ', out)
+        info = look_info(out)
+        self.assertEqual(info['look'], 1)
+        self.assertEqual(info['play'], 1)
+        self.assertEqual(info['job'], '/jobs/img1')
+        self.assertEqual(info['reply_len'], len('りんごが見えるのだ'.encode()))
+        self.assertEqual(info['audio_bytes'], 32000)
+        self.assertEqual(info['bytes'], 12345)
+        self.assertEqual((info['looks'], info['done'], info['unplayed']), (1, 1, 0))
+        self.assertEqual(info['reserved'], 0)
+        self.assertEqual(info['busy'], 0)
+        p = last_print(out)
+        self.assertEqual(p['state'], 'idle')
+        self.assertEqual(p['alloc'], p['release'])   # 写した JPEG は返してある
+        self.assertIn('"look":1,"played":1', out)
+
+    def test_play_zero_stops_just_before_playing_and_makes_no_sound(self):
+        out = run(self.HAPPY % 0)
+        self.assertNotIn('ACK ', out.replace('ACK skip', ''))
+        self.assertNotIn('ACK skip', out)           # 一次回答を頼みもしない
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        # PCM は取りに行って受け取っている (鳴らす直前まで全部の段を通る)。
+        self.assertEqual(http_calls(out)[-1][1], '/jobs/img1/audio')
+        self.assertEqual(state_names(out)[-3:], ['audio', 'play_wait', 'idle'])
+        info = look_info(out)
+        self.assertEqual(info['play'], 0)
+        self.assertEqual(info['audio_bytes'], 32000)
+        self.assertEqual(info['reply_len'], len('りんごが見えるのだ'.encode()))
+        self.assertEqual((info['looks'], info['done'], info['unplayed']), (1, 1, 1))
+        self.assertGreater(info['complete_ms'], 0)
+        self.assertGreaterEqual(info['complete_ms'], info['audio_ready_ms'])
+        self.assertEqual(info['error'], '-')
+        p = last_print(out)
+        self.assertEqual(p['alloc'], p['release'])
+        self.assertIn('"look":1,"played":0', out)
+
+    def test_the_talk_key_is_ignored_while_reserved_for_the_camera(self):
+        out = run("""
+mic 40
+reserve
+press
+t 500
+release
+t 100
+print
+lookprint
+""")
+        self.assertIn('RESERVE 0', out)
+        self.assertNotIn('REC begin', out)
+        self.assertEqual(state_names(out), ['idle'])
+        self.assertEqual(look_info(out)['busy'], 1)
+
+    def test_the_talk_key_is_ignored_during_a_look_turn(self):
+        out = run("""
+ackms 0
+respdelay 100000
+resp 202 %s
+mic 40
+reserve
+look 2000 0
+t 10
+press
+t 500
+release
+t 100
+""" % LOOK_ACCEPT)
+        self.assertIn('LOOK 1', out)
+        self.assertNotIn('REC begin', out)
+        self.assertEqual(state_names(out), ['idle', 'upload'])
+
+    def test_a_key_held_through_the_look_does_not_start_recording_after_it(self):
+        """撮影中から押しっぱなしのキーは、画像の往復が終わっても録音を始めない。"""
+        out = run("""
+ackms 0
+respdelay 10
+resp 202 %s
+resp 200 %s
+resp 200 PCM:1600
+mic 40
+reserve
+press
+t 5
+look 2000 0
+t 3000
+print
+""" % (LOOK_ACCEPT, LOOK_DONE))
+        self.assertNotIn('REC begin', out)
+        self.assertEqual(last_print(out)['state'], 'idle')
+
+    def test_the_camera_is_refused_while_talking(self):
+        out = run("""
+mic 40
+press
+t 100
+reserve
+""")
+        self.assertIn('RESERVE 1', out)
+
+    def test_the_camera_is_refused_while_the_talk_key_is_down(self):
+        out = run("press\nreserve\n")
+        self.assertIn('RESERVE 1', out)
+
+    def test_the_camera_is_refused_while_a_reply_is_waiting(self):
+        out = run("""
+ackms 0
+respdelay 100000
+resp 202 %s
+inject 16000
+t 10
+reserve
+""" % ACCEPT_BODY)
+        self.assertIn('RESERVE 1', out)
+
+    def test_a_second_reserve_is_refused(self):
+        out = run("reserve\nreserve\n")
+        self.assertEqual(re.findall(r'^RESERVE (\d)$', out, re.M), ['0', '1'])
+
+    def test_inject_is_refused_while_reserved_and_allowed_after_release(self):
+        out = run("""
+reserve
+inject 16000
+unreserve
+inject 16000
+""")
+        self.assertEqual(re.findall(r'^INJECT (\d)$', out, re.M), ['0', '1'])
+
+    def test_no_wifi_refuses_before_the_capture(self):
+        out = run("net 0\nreserve\nt 1\nlookprint\n")
+        self.assertIn('RESERVE 2', out)
+        self.assertIn('SHOW 会話エラー: Wi-Fi 未接続です', out)
+        info = look_info(out)
+        self.assertEqual(info['reserved'], 0)
+        self.assertEqual(info['error'], 'Wi-Fi')    # 空白で切れる (中身は上で見た)
+
+    def test_a_server_busy_409_is_shown_and_returns_to_idle(self):
+        out = run("""
+ackms 0
+respdelay 10
+resp 409 {"error":"busy"}
+reserve
+look 3000 0
+t 200
+print
+lookprint
+""")
+        self.assertIn('SHOW 会話エラー: サーバーが処理中です (HTTP 409)', out)
+        p = last_print(out)
+        self.assertEqual(p['state'], 'idle')
+        self.assertEqual(p['alloc'], p['release'])
+        info = look_info(out)
+        self.assertEqual((info['looks'], info['done']), (1, 0))
+        self.assertEqual(info['busy'], 0)
+
+    def test_a_timeout_is_shown_and_returns_to_idle(self):
+        out = run("""
+ackms 0
+respdelay 5
+resp 202 %s
+sticky 200 {"state":"processing"}
+reserve
+look 3000 0
+t 395000
+print
+""" % LOOK_ACCEPT)
+        p = last_print(out)
+        self.assertEqual(p['state'], 'idle')
+        self.assertIn('タイムアウト', p['error'])
+        self.assertEqual(p['alloc'], p['release'])
+
+    def test_an_image_over_512_kib_is_not_sent(self):
+        out = run("reserve\nlook %d 0\nt 10\nprint\nlookprint\n" % (512 * 1024 + 1))
+        self.assertIn('LOOK 0', out)
+        self.assertEqual(http_calls(out), [])
+        self.assertIn('大きすぎ', last_print(out)['error'])
+        self.assertEqual(look_info(out)['reserved'], 0)
+
+    def test_exactly_512_kib_is_sent(self):
+        out = run("respdelay 100000\nreserve\nlook %d 0\nt 10\n" % (512 * 1024))
+        self.assertIn('LOOK 1', out)
+        self.assertEqual(int(http_calls(out)[0][2]), 512 * 1024)
+
+    def test_something_that_is_not_a_jpeg_is_not_sent(self):
+        out = run("reserve\nlook 1 0\nt 10\nprint\n")
+        self.assertIn('LOOK 0', out)
+        self.assertEqual(http_calls(out), [])
+
+    def test_the_image_body_is_a_copy(self):
+        """呼び手の入れ物は look の直後に壊して解放する。送る本体は写しなので
+        中身 (和) が変わらず、ASan も何も言わない。"""
+        out = run("respdelay 50\nreserve\nlook 5000 0\nt 10\n")
+        expect = sum(((i * 7) & 0xFF) for i in range(5000))
+        expect += (0xFF + 0xD8 + 0xFF + 0xD9) - sum(
+            ((i * 7) & 0xFF) for i in (0, 1, 4998, 4999))
+        self.assertEqual(int(ctypes(out)[0][2]), expect)
+
+    def test_talk_still_posts_wav_to_talk_after_a_look(self):
+        out = run("""
+ackms 0
+respdelay 5
+resp 202 %s
+resp 200 %s
+resp 200 PCM:1600
+resp 202 %s
+resp 200 %s
+resp 200 PCM:1600
+reserve
+look 2000 0
+t 3000
+mic 40
+press
+t 400
+release
+t 3000
+print
+lookprint
+""" % (LOOK_ACCEPT, LOOK_DONE, ACCEPT_BODY, DONE_BODY))
+        posts = [c for c in http_calls(out) if c[0] == 'POST']
+        self.assertEqual([c[1] for c in posts], ['/look', '/talk'])
+        self.assertEqual([c[0] for c in ctypes(out)], ['image/jpeg', 'audio/wav'])
+        self.assertEqual(look_info(out)['look'], 0)     # 直近は会話
+        self.assertIn('PLAY 1600', out)
+        p = last_print(out)
+        self.assertEqual(p['alloc'], p['release'])
+
+    def test_a_url_that_does_not_end_in_talk_cannot_look(self):
+        out = run("init /chat\nreserve\nt 1\nlook 2000 0\nt 10\n")
+        self.assertIn('RESERVE 2', out)
+        self.assertIn('SHOW 会話エラー: STACKEE_TALK_URL が /talk で終わっていません', out)
+        self.assertIn('LOOK 0', out)
+        self.assertEqual(http_calls(out), [])
+
+    def test_an_unset_url_cannot_look(self):
+        out = run("init \nreserve\nt 1\n")
+        self.assertIn('RESERVE 2', out)
+        self.assertIn('SHOW 会話エラー: STACKEE_TALK_URL が未設定です', out)
+
+    def test_a_nested_talk_path_looks_next_to_it(self):
+        out = run("init /api/talk\nrespdelay 100000\nreserve\nlook 2000 0\nt 10\n")
+        self.assertEqual(http_calls(out)[0][1], '/api/look')
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

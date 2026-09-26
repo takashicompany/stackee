@@ -88,6 +88,7 @@ static struct {
     // 録音用の領域 (WAV ヘッダ 44 B を前に置いてある)
     uint8_t *rec_raw;
     int16_t *rec_pcm;
+    size_t   rec_cap;           // rec_raw の大きさ (画像は録音より小さく取る)
 
     // 会話。★ 状態機械を進めるのは audio タスクだが、console の
     //   talk.inject / talk.status が同じ構造体を触るので錠をかける。
@@ -134,6 +135,14 @@ static struct {
     _Atomic int  inject_req;        // -1 なし / 0.. 送るサンプル数
     _Atomic int  inject_src;        // 使う一次回答の番号
     _Atomic int  inject_result;     // 0 未処理 / 1 受理 / -1 断られた
+    // 画像を見せる (camera タスク → audio タスク)。talk.inject と同じ形:
+    // camera タスクは頼んで待つだけ。一次回答の再生 (I2S) を始めるのは
+    // audio タスク。JPEG は stackee_talk_look() が写し取る。
+    _Atomic int  look_req;          // 0 なし / 1 依頼
+    _Atomic int  look_result;       // 0 未処理 / 1 受理 / -1 断られた
+    const uint8_t *look_jpeg;
+    size_t   look_len;
+    bool     look_play;
     uint32_t stat_records, stat_plays;
     uint32_t last_key_events;
 } a;
@@ -653,16 +662,26 @@ static uint32_t ops_now(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+// ★ 画像 (POST /look) も同じ領域を使う。大きさは JPEG ぶんだけ
+//   (数十 KB) なので、持っている領域が頼まれた大きさに足りなければ
+//   取り直す (足りない領域を返すと、あとの録音が外へ書く)。
 static int16_t *ops_record_alloc(int max_samples) {
-    if (a.rec_raw != NULL) {
+    size_t bytes = 44 + (size_t)max_samples * 2;
+    if (a.rec_raw != NULL && a.rec_cap >= bytes) {
         return a.rec_pcm;
     }
-    size_t bytes = 44 + (size_t)max_samples * 2;
+    if (a.rec_raw != NULL) {
+        free(a.rec_raw);
+        a.rec_raw = NULL;
+        a.rec_pcm = NULL;
+        a.rec_cap = 0;
+    }
     a.rec_raw = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (a.rec_raw == NULL) {
         ESP_LOGE(TAG, "録音用の %u B を確保できない", (unsigned)bytes);
         return NULL;
     }
+    a.rec_cap = bytes;
     a.rec_pcm = (int16_t *)(a.rec_raw + 44);
     return a.rec_pcm;
 }
@@ -672,6 +691,7 @@ static void ops_record_release(void) {
         free(a.rec_raw);
         a.rec_raw = NULL;
         a.rec_pcm = NULL;
+        a.rec_cap = 0;
     }
 }
 
@@ -733,8 +753,9 @@ static bool ops_net_ready(void) {
 }
 
 static bool ops_http_start(const char *method, const char *path,
-                           const void *body, size_t body_len, size_t limit) {
-    return stackee_http_request(method, path, body, body_len, limit);
+                           const void *body, size_t body_len, size_t limit,
+                           const char *content_type) {
+    return stackee_http_request(method, path, body, body_len, limit, content_type);
 }
 
 static int ops_http_poll(int *status, const uint8_t **body, size_t *len) {
@@ -1030,6 +1051,11 @@ static void audio_task(void *unused) {
                           stackee_talk_inject(a.talk, a.ack[src].pcm, inject);
                 atomic_store(&a.inject_result, ok ? 1 : -1);
             }
+            if (atomic_exchange(&a.look_req, 0) == 1) {
+                bool ok = stackee_talk_look(a.talk, a.look_jpeg, a.look_len,
+                                            a.look_play);
+                atomic_store(&a.look_result, ok ? 1 : -1);
+            }
             stackee_talk_set_pressed(a.talk, atomic_load(&a.talk_pressed));
             stackee_talk_step(a.talk);
             talk_unlock();
@@ -1101,7 +1127,8 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     "\"rms_at\":%d,\"rms_mean\":%lu,\"rms_2nd\":%lu,"
                     "\"loud\":%lu,"
                     "\"min_ms\":%lu,\"voice_rms\":%lu,\"voice_windows\":%lu,"
-                    "\"guide\":%d",
+                    "\"guide\":%d,\"look\":%d,\"look_reserved\":%d,"
+                    "\"looks\":%lu",
                     id, stackee_talk_state_names[t->state], t->polls,
                     (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
                     (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
@@ -1124,7 +1151,9 @@ static size_t reply_talk_status(long id, char *buf, size_t cap) {
                     t->last_rms_at, (unsigned long)t->last_rms_mean,
                     (unsigned long)t->last_rms_2nd, (unsigned long)t->last_loud,
                     (unsigned long)t->min_ms, (unsigned long)t->voice_rms,
-                    (unsigned long)t->voice_windows, t->guide_shown);
+                    (unsigned long)t->voice_windows, t->guide_shown,
+                    t->look ? 1 : 0, t->look_reserved ? 1 : 0,
+                    (unsigned long)t->looks);
     at = put(buf, cap, at, ",\"reply\":\"");
     at = put_json_str(buf, cap, at, t->reply);
     at = put(buf, cap, at, "\",\"error\":\"");
@@ -1308,6 +1337,7 @@ esp_err_t stackee_audio_start(const char *post_path) {
     }
     atomic_store(&a.play_req, -1);
     atomic_store(&a.inject_req, -1);
+    atomic_store(&a.look_req, 0);
     a.play_ack = -1;
     a.talk_lock = xSemaphoreCreateMutex();
     if (a.talk_lock == NULL) {
@@ -1429,4 +1459,110 @@ const char *stackee_audio_talk_state(void) {
 
 const char *stackee_audio_screen(void) {
     return (a.talk != NULL) ? a.talk->screen : "";
+}
+
+// ---------------------------------------------------------------------------
+// 画像を見せる (POST /look、2026-09-26)
+// ---------------------------------------------------------------------------
+int stackee_audio_look_reserve(void) {
+    if (!a.ready || a.talk == NULL) {
+        return STACKEE_TALK_LOOK_ERROR;
+    }
+    if (!talk_lock()) {
+        return STACKEE_TALK_LOOK_BUSY;
+    }
+    int r;
+    int st = atomic_load(&a.selftest_req);
+    // ★ 会話の状態機械が idle でも、音が鳴っている (audio.play の検査を
+    //   含む)・STK_TALK が押されている・talk.inject の依頼が載っている・
+    //   マイクの自己診断中、のどれかなら撮らない。
+    if (a.play_active || atomic_load(&a.talk_pressed) ||
+        atomic_load(&a.inject_req) >= 0 || atomic_load(&a.look_req) != 0 ||
+        st == 1 || st == 2 || st == 4) {
+        r = STACKEE_TALK_LOOK_BUSY;
+    } else {
+        r = stackee_talk_look_reserve(a.talk);
+    }
+    talk_unlock();
+    return r;
+}
+
+void stackee_audio_look_release(void) {
+    if (a.talk != NULL && talk_lock()) {
+        stackee_talk_look_release(a.talk);
+        talk_unlock();
+    }
+}
+
+bool stackee_audio_look_submit(const uint8_t *jpeg, size_t len, bool play) {
+    if (!a.ready || a.talk == NULL) {
+        return false;
+    }
+    a.look_jpeg = jpeg;
+    a.look_len = len;
+    a.look_play = play;
+    atomic_store(&a.look_result, 0);
+    atomic_store(&a.look_req, 1);       // ★ 中身を置いてから旗を立てる
+    for (int i = 0; i < 400; i++) {     // audio タスクは 5 ms 周期。2 秒待てば十分
+        int r = atomic_load(&a.look_result);
+        if (r != 0) {
+            return r == 1;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    // 拾われなかったら取り下げる。★ 拾われていたら jpeg を写している
+    // 最中かもしれないので、終わるまで待つ (呼び手はそれまで jpeg を持つ)。
+    if (atomic_exchange(&a.look_req, 0) == 1) {
+        ESP_LOGW(TAG, "画像の依頼を audio タスクが拾わない。取り下げる");
+        stackee_audio_look_release();
+        return false;
+    }
+    for (int i = 0; i < 2000 && atomic_load(&a.look_result) == 0; i++) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return atomic_load(&a.look_result) == 1;
+}
+
+size_t stackee_audio_look_json(char *buf, size_t cap, size_t at) {
+    if (!a.ready || a.talk == NULL) {
+        return put(buf, cap, at, "\"talk\":null");
+    }
+    if (!talk_lock()) {
+        return put(buf, cap, at, "\"talk\":\"busy\"");
+    }
+    const stackee_talk_t *t = a.talk;
+    stackee_http_stats_t http;
+    stackee_http_stats(&http);
+    // job は status_url ("/jobs/<id>")。id はその最後の区切りのうしろ。
+    const char *slash = strrchr(t->job, '/');
+    const char *job_id = (slash != NULL) ? slash + 1 : t->job;
+    at = put(buf, cap, at,
+             "\"talk\":{\"state\":\"%s\",\"look\":%d,\"play\":%d,"
+             "\"reserved\":%d,\"job\":\"",
+             stackee_talk_state_names[t->state], t->look ? 1 : 0,
+             t->look_play ? 1 : 0, t->look_reserved ? 1 : 0);
+    at = put_json_str(buf, cap, at, t->job);
+    at = put(buf, cap, at, "\",\"job_id\":\"");
+    at = put_json_str(buf, cap, at, job_id);
+    at = put(buf, cap, at,
+             "\",\"look_bytes\":%lu,\"reply_len\":%d,\"audio_bytes\":%ld,"
+             "\"audio_ms\":%d,\"polls\":%d,"
+             "\"t\":{\"accepted\":%lu,\"reply_ready\":%lu,\"audio_ready\":%lu,"
+             "\"play_setup\":%lu,\"complete\":%lu},"
+             "\"looks\":%lu,\"looks_done\":%lu,\"looks_unplayed\":%lu,"
+             "\"http_status\":%d,\"null\":%s,\"reply\":\"",
+             (unsigned long)t->look_bytes, t->reply_len,
+             (long)t->audio_samples * 2, t->audio_duration_ms, t->polls,
+             (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
+             (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
+             (unsigned long)t->complete_ms,
+             (unsigned long)t->looks, (unsigned long)t->looks_done,
+             (unsigned long)t->looks_unplayed, http.status,
+             atomic_load(&a.null_out) ? "true" : "false");
+    at = put_json_str(buf, cap, at, t->reply);
+    at = put(buf, cap, at, "\",\"error\":\"");
+    at = put_json_str(buf, cap, at, t->error);
+    at = put(buf, cap, at, "\"}");
+    talk_unlock();
+    return at;
 }

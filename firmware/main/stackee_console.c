@@ -355,7 +355,7 @@ static void reply_hello(long id) {
                 "\"lcd.status\",\"lcd.full\",\"usb.status\",\"axp.read\",\"axp.write\",\"crypto.selftest\","
                 "\"touch.status\",\"touch.inject\",\"touch.scroll\","
                 "\"camera.capture\",\"camera.power\",\"camera.dump\","
-                "\"camera.status\","
+                "\"camera.status\",\"camera.look\",\"camera.look_status\","
                 "\"app.info\",\"app.boot_factory\",\"ota.begin\",\"ota.status\","
                 "\"ota.end\",\"ota.commit\",\"ota.abort\"],"
                 "\"profile\":\"%s\",\"cdc\":%s}",

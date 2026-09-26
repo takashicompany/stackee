@@ -226,7 +226,7 @@ python3 tools/flash.py --rollback           # CircuitPython の像を書き戻�
 | 設定 | `settings.get` `settings.raw` `settings.set` |
 | ファイル | `fs.put` |
 | タッチ | `touch.status` `touch.inject` `touch.scroll` |
-| カメラ | `camera.capture` `camera.status` `camera.power` `camera.dump` |
+| カメラ | `camera.capture` `camera.status` `camera.power` `camera.dump` `camera.look` `camera.look_status` |
 | USB | `usb.status` |
 | 計測 | `bench` |
 | 未対応 | `loop.*` (CircuitPython のメインループを測るもの。C 版に当たるものが無い。`status` の `perf` を見る) |
@@ -298,6 +298,7 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 
 | タッチパッド | **段階 4**。FT6336 を 5 ms 周期で読み、なぞり = ポインタ / タップ = クリック / `STK_TOUCH_SCROLL` 中はスクロール。Report ID 2 で USB・BLE 両方に出る |
 | カメラ | **段階 4**。GC0308 を ALDO3 で起こして撮り、software で JPEG に畳む。`camera.*` と `STK_CAMERA` キー |
+| カメラ → AI | **2026-09-26**。`STK_CAMERA` で撮った JPEG を `POST /look` で見せ、返答を会話と同じく音声 + 字幕で鳴らす。撮影中の顔は `camera`、返答待ちは `thinking` (§17-2b) |
 | USB マイク (UAC) | **段階 4 / full プロファイルのみ**。16 kHz モノラル。会話が優先で、録音中は無音を送る |
 | Raw HID コンソール | **段階 4**。VIA の独自 command id 0xC0〜。**dev でも有効** (CDC と同じバイト列を両方へ流す) |
 | FAT への書き込み | **段階 4**。`settings.set` と `fs.put`。書くときだけ読み書き可能で付け直す |
@@ -305,10 +306,7 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | 入っていない | どこで入るか |
 |---|---|
 | BLE 越しの VIA | 段階 1b の実験項目。BLE 側に Raw HID を出していないので応答は捨てる |
-| カメラの画像を Wi-Fi で送る | 撮って JPEG にするところまで。送り先の取り決めが pi400 側で未定 (§17-2) |
-| カメラの表情 (顔の `camera`) | 顔の状態機械には口があるが、`STK_CAMERA` からは繋いでいない |
 | 旧 VoiceLink (Mac の 5555 番へ TCP、`stackee_voice.py`) | **移植しない。** 現行でも使われていない経路 (会話は HTTPS の `stackee_talk` に移っている)。`STACKEE_HOST` / `STACKEE_PORT` は読まない |
-| カメラの表情 | 段階 4 (顔の状態機械には `camera` の口が既にある) |
 | コンソールの残りのコマンド、UAC (full プロファイル) | 段階 4 |
 | ESP-IDF v6.0.3 とツールチェーン | 取得物。`setup.sh` が取ってくる (§0-0 / §3) |
 | TinyUSB (`managed_components/`) | 取得物。**初回のビルドで** `dependencies.lock` どおりに取れる |
@@ -479,7 +477,7 @@ python3 firmware/tools/hid_desc_check.py       # 記述子の構成を目で見�
 python3 firmware/tools/test_faceanim_host.py   # 顔の状態機械 (20 件)
 python3 firmware/tools/test_render_host.py     # 画面の描画と期待値 (27 件)
 python3 firmware/tools/test_cfg_host.py        # 段階 3: 設定・登録簿・音量・素材 + 4 KB の JSON (48 件)
-python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 + 切り捨て + 案内 (83 件)
+python3 firmware/tools/test_talk_host.py       # 段階 3: 会話の状態機械 + 字幕 + 切り捨て + 案内 + 画像 /look (105 件)
 python3 firmware/tools/test_wifi_host.py       # 段階 3: Wi-Fi の状態機械 (21 件)
 python3 firmware/tools/test_touch_host.py      # 段階 4: タッチ (25 件)
 python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソール (18 件)
@@ -490,7 +488,7 @@ python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **517 件**。どれも実機に触らない。
+全部で **546 件** (2026-09-26、`tools/test_*.py` を全部回した数)。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -1600,7 +1598,7 @@ I2C も NVS も触らない (値を書き換えるだけ)。レジスタと NVS 
 
 ```
 python3 firmware/tools/test_cfg_host.py    # 設定・登録簿・音量・JSON・URL・素材 (48 件)
-python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 + 切り捨て + 案内 (83 件)
+python3 firmware/tools/test_talk_host.py   # 会話の状態機械 + 字幕 + 切り捨て + 案内 + 画像 /look (105 件)
 python3 firmware/tools/test_wifi_host.py   # Wi-Fi の状態機械 (21 件)
 ```
 
@@ -2153,9 +2151,81 @@ python3 tools/check_phase4.py --only camera --save-jpeg /tmp/shot.jpg
 撮って `camera.dump` で取り出し、**Mac 側で JPEG として妥当か** (SOI / EOI /
 SOF の寸法) を確かめる。ALDO3 が落ちていることも見る。
 
-**未実装**: 撮った JPEG を Wi-Fi で送るところ。`stackee_http` のワーカーは
-1 本しかなく会話が使っているのと、pi400 側の受け口の取り決めが無いため、
-`STACKEE_CAMERA_PATH` (既定 `/image`) を読むところまでで止めてある。
+撮った JPEG を AI に見せるところは §17-2b。(`STACKEE_CAMERA_PATH` は
+もう読まない。送り先は `STACKEE_TALK_URL` から決まる。)
+
+### 17-2b. 撮った画像を AI に見せる (2026-09-26)
+
+`STK_CAMERA` を押す → 撮る → `POST /look` → 返答を**音声と字幕で**鳴らす。
+受け付けられたあとは**会話 (§11-4) とまったく同じ道**を通る (返答待ちの
+ロングポーリング・done の JSON・`/audio` の PCM・字幕・一次回答との排他)。
+会話の状態機械 (`stackee_talksm.c`) に「録音の代わりに JPEG を送る入口」を
+1 つ足しただけで、後半は二重に持たない。
+
+| 決まり (サーバとの取り決め) | 値 |
+|---|---|
+| 送り先 | `STACKEE_TALK_URL` のパスの末尾 `/talk` を `/look` にしたもの (`https://…:8443/talk` → `…/look`、`/api/talk` → `/api/look`)。末尾が `/talk` でなければ送らない |
+| 認証 / HTTPS | `/talk` と同じ (`STACKEE_TALK_TOKEN` を Bearer で。平文には載せない) |
+| 送信 | `POST /look`、`Content-Type: image/jpeg`、`Content-Length` 付き。本体は JPEG そのもの。上限 **512 KiB** (320x240 の実測は数 KB〜十数 KB) |
+| 受理 | `202 {"id":..,"status_url":"/jobs/<id>"}` (会話と同じ) |
+| 以降 | 会話と同じ。done の `transcript` は空か無し |
+| 409 | サーバが処理中 (会話と共有)。「会話エラー: サーバーが処理中です (HTTP 409)」で idle に戻る |
+
+**会話との排他** (本体側):
+
+| いつ | 何が起きる |
+|---|---|
+| 会話中 (録音 / 送信 / 返答待ち / 再生、一次回答が鳴っている、`STK_TALK` を押している) に `STK_CAMERA` | **撮らずに無視する**。画面にも何も出さない (`camera.look_status` の `ignored` が増える) |
+| 撮影〜返答の再生が終わるまでに `STK_TALK` | **受け付けない** (録音を始めない)。押しっぱなしのまま画像の往復が終わっても、離して押し直すまで始まらない |
+| 同じ間の `talk.inject` / `audio.play` / `audio.selftest` | `busy` で断る |
+
+撮影に入る前に「会話の口」を押さえてから撮る (`stackee_talk_look_reserve`)。
+押さえられなければ撮らないので、撮ってから捨てることは無い。
+
+**送れないと分かっているときは撮らない。** `STACKEE_TALK_URL` 未設定 /
+末尾が `/talk` でない / Wi-Fi 未接続なら、ALDO3 も入れずに
+「会話エラー: …」を出して戻る (会話の失敗と同じ出し方。`status.screen`)。
+撮影の失敗は「会話エラー: 撮影に失敗しました」。
+
+**顔**: 撮影中は `camera` (既存の faces.bin の絵のまま。1 画素も描き直して
+いない)。撮影中は描画を止める約束 (§17-2) なので、止めるのを ALDO3 の
+1 秒待ちの**あと**にずらし、その 1 秒で顔が `camera` に描き替わるように
+した。画像を渡したあとは会話と同じ `thinking` → `speaking`。帯は
+「考えています…」→ 返答の字幕。一次回答 (`ack_0N`) も会話と同じく鳴る。
+
+**RAM の順序**: 撮影 (PSRAM DMA、内蔵は記述子 480 B) を**畳んで ALDO3 を
+切ってから**送る。TLS の握手と撮影は同時に走らない。JPEG は PSRAM の
+`cam.jpeg` → 状態機械が PSRAM の録音の領域へ写して送り、受理 (202) で
+返す (録音の 960 KB と同じ扱い)。内蔵 RAM の静的な増分は **+80 B**
+(`.bss`、dev / full とも)。
+
+**打鍵**: 撮影は camera タスク (CPU0)、会話は audio タスク (CPU0)。入力
+タスク (CPU1) には 1 行も足していない。`STK_CAMERA` は印を立てるだけ。
+
+#### console (人手ゼロ・無音で確かめる)
+
+| コマンド | 中身 |
+|---|---|
+| `camera.look` `{"play":0,"warmup":30}` | キーと同じ流れを起こす。**非同期** (すぐ返る)。**`play` の既定は 0** = 返答の PCM を受け取り終えたところで止め、**一次回答も返答も鳴らさない**。`play:1` でキーと同じく鳴らす |
+| `camera.look_status` | `phase` (`starting` / `capturing` / `submitted` / `ignored` / `error`)、`seq`、`capture_ms` / `submit_ms`、`jpeg_bytes`、`aldo3`、`look_err`、`ignored` / `refused` / `capture_failed` / `submit_failed`、`talk:{state, look, play, reserved, job, job_id, look_bytes, reply_len, reply, audio_bytes, audio_ms, polls, t:{accepted, reply_ready, audio_ready, play_setup, complete}, looks, looks_done, looks_unplayed, http_status, null, error}` |
+
+`talk.t` の各 ms は**受け付けた瞬間 (JPEG を写したとき) から**の累積。
+`play:0` では `play_setup` は 0 のまま、`complete` は PCM を受け取り終えた
+時刻。終わりの見分け方: `phase=="submitted"` かつ `talk.state=="idle"` かつ
+`talk.looks_done` が増えた (失敗なら `talk.error` に理由)。
+`talk.status` にも `look` / `look_reserved` / `looks` が出る。
+ログには会話と同じ `[talk-turn-timing]` が出て、末尾に `"look":1,"played":0|1`。
+
+```
+python3 tools/check_phase4.py --only look            # 撮影 → /look → 返答 PCM (鳴らさない)
+python3 tools/check_phase4.py --transport hid --only look
+```
+
+`--only look` を書いたときだけ走る (サーバに仕事を 1 件投げるので既定の組には
+入れていない)。先に `audio.null` を立て、`camera.look play=0` で流し、撮影中は
+`key.inject` を回して打鍵の遅延も見る。合否は RESULTS.md の「予定」。
+
+★ `STACKEE_CAMERA_PATH` / `/image` は使わなくなった (送り先は `/look` に決まった)。
 
 ### 17-3. Raw HID の上のコンソール
 

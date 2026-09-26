@@ -12,7 +12,7 @@ import wave
 
 import stackee_agent
 import stackee_server as s
-from test_stackee_agent import FAKE_CLAUDE
+from test_stackee_agent import FAKE_CLAUDE, FAKE_CODEX, JPEG
 
 
 def wav(seconds=.5, rate=16000, value=1000):
@@ -60,6 +60,71 @@ class ReplyTests(unittest.TestCase):
         expected = '資料によると、晴れです。'
         self.assertEqual(synth.call_args.args[0], expected)
         self.assertEqual(result['reply'], expected)
+
+
+class LookTests(unittest.TestCase):
+    """POST /look: a photo instead of speech, the rest of the job exactly as /talk."""
+
+    def test_jpeg_must_open_with_soi_and_close_with_eoi(self):
+        self.assertEqual(s.read_jpeg(JPEG), JPEG)
+        for bad in (b'', b'\xff\xd8', JPEG[:-1], b'\x89PNG' + JPEG[4:], JPEG + b'\0', wav()):
+            with self.subTest(bad=bad[:8]), self.assertRaises(ValueError):
+                s.read_jpeg(bad)
+
+    def test_look_asks_the_fixed_question_with_the_photo_and_skips_whisper(self):
+        p = s.Pipeline('unused')
+        p.run = lambda *args, **kwargs: self.fail('whisper must not run for a photo')
+        raw = '赤いマグカップですね。[詳しく](https://example.com)どうぞ。'
+        with patch.object(p.agent, 'ask', return_value=raw) as ask, \
+                patch.object(p, 'synthesize', return_value=b'\0\1' * 8000) as synth:
+            result, audio = p.look(JPEG)
+        self.assertEqual(ask.call_args.args, (s.LOOK_PROMPT, JPEG))
+        # The same clean-up, sentence-by-sentence synthesis and captions as /talk.
+        self.assertEqual(result['reply'], '赤いマグカップですね。詳しくどうぞ。')
+        self.assertEqual([c.args[0] for c in synth.call_args_list],
+                         ['赤いマグカップですね。', '詳しくどうぞ。'])
+        self.assertEqual((result['state'], result['transcript']), ('done', ''))
+        self.assertTrue(result['subtitles'].startswith('0\t'.encode()))
+        self.assertEqual(set(result['timings']), {'prepare_ms', 'codex_ms', 'tts_ms', 'total_ms'})
+        self.assertLessEqual(s.peak(audio), 8191)
+
+    def test_look_rejects_a_non_jpeg_before_the_agent(self):
+        p = s.Pipeline('unused')
+        with patch.object(p.agent, 'ask') as ask, self.assertRaises(ValueError):
+            p.look(wav())
+        ask.assert_not_called()
+
+    def test_echo_look_answers_without_an_agent(self):
+        p = s.Pipeline('unused', echo=True)
+        with patch.object(p, 'synthesize', return_value=b'\0\1' * 800):
+            result, _ = p.look(JPEG)
+        self.assertEqual(result['reply'], '写真を受け取りました。1キロバイトです。')
+
+    def test_the_photo_reaches_the_fake_agents_in_the_saved_conversation(self):
+        import sys
+        for kind, body in (('codex', FAKE_CODEX), ('claude', FAKE_CLAUDE)):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / 'AGENTS.md').write_text('Codex instructions', encoding='utf-8')
+                (root / 'CLAUDE.md').write_text('Claude instructions', encoding='utf-8')
+                (root / 'agent.json').write_text(json.dumps({'agent': kind}), encoding='utf-8')
+                fake = root / ('fake-' + kind)
+                fake.write_text('#!' + sys.executable + '\n' + body)
+                fake.chmod(0o700)
+                p = s.Pipeline('unused', codex=str(fake), claude=str(fake), agent_dir=root)
+                try:
+                    with patch.object(p, 'synthesize', return_value=b'\0\1' * 800):
+                        result, _ = p.look(JPEG)
+                        self.assertEqual(result['reply'], 'saw %d bytes ffd8' % len(JPEG))
+                        conversation = p.agent.status()['conversations'][kind]
+                        self.assertTrue(conversation)
+                        # A spoken question afterwards lands in the same conversation.
+                        p.run = lambda *args, **kwargs: 'recall-image'
+                        result, _ = p(wav())
+                        self.assertEqual(result['reply'], 'saw %d bytes ffd8' % len(JPEG))
+                        self.assertEqual(p.agent.status()['conversations'][kind], conversation)
+                finally:
+                    p.close()
 
 
 class AudioTests(unittest.TestCase):
@@ -198,11 +263,18 @@ class HttpTests(unittest.TestCase):
     def setUp(self):
         self.release = threading.Event()
         self.calls = []
+        self.looks = []
         def pipeline(data):
             self.calls.append(data)
             self.release.wait(3)
             return {'state': 'done', 'transcript': 'test', 'reply': 'reply',
                     'subtitles': '0\tこんにちは\n1200\tさようなら\n'.encode('utf-8')}, b'\0\1' * 100
+        def look(data):
+            self.looks.append(data)
+            self.release.wait(3)
+            return {'state': 'done', 'transcript': '', 'reply': '写真ですね',
+                    'subtitles': '0\t写真ですね\n'.encode('utf-8')}, b'\0\2' * 50
+        pipeline.look = look
         self.server = s.ThreadingHTTPServer(('127.0.0.1', 0), s.Handler)
         self.server.jobs = s.Jobs(pipeline)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -309,6 +381,67 @@ class HttpTests(unittest.TestCase):
                  ('/talk', b'', {'Content-Type': 'audio/wav', 'Content-Length': str(s.MAX_UPLOAD + 1)}, 413)]
         for path, body, headers, expected in cases:
             self.assertEqual(self.request('POST', path, body, headers)[0], expected)
+        self.assertEqual(self.calls, [])
+
+    def test_look_job_is_polled_and_played_like_talk(self):
+        status, headers, body = self.request('POST', '/look', JPEG, {'Content-Type': 'image/jpeg'})
+        self.assertEqual(status, 202)
+        created = json.loads(body)
+        path = created['status_url']
+        self.assertEqual(set(created), {'id', 'status_url'})
+        self.assertEqual(headers['Location'], path)
+        self.assertEqual(json.loads(self.request('GET', path)[2]), {'state': 'processing'})
+        self.assertEqual(self.request('GET', path + '/audio')[0], 409)
+        self.release.set()
+        self.server.jobs.worker.join(3)
+        state = json.loads(self.request('GET', path)[2])
+        self.assertEqual(set(state), {'state', 'transcript', 'reply', 'audio_url', 'audio_bytes',
+                                      'sample_rate', 'channels', 'sample_width', 'subtitles_url',
+                                      'subtitles'})
+        self.assertEqual((state['state'], state['transcript'], state['reply']), ('done', '', '写真ですね'))
+        self.assertEqual(state['subtitles'], '0\t写真ですね\n')
+        self.assertEqual(self.request('GET', state['audio_url'])[2], b'\0\2' * 50)
+        self.assertEqual(self.request('GET', state['subtitles_url'])[2].decode(), '0\t写真ですね\n')
+        self.assertEqual((self.looks, self.calls), ([JPEG], []))
+
+    def test_talk_and_look_share_the_single_slot(self):
+        for first, body, kind, other, other_body, other_kind in (
+                ('/talk', wav(), 'audio/wav', '/look', JPEG, 'image/jpeg'),
+                ('/look', JPEG, 'image/jpeg', '/talk', wav(), 'audio/wav')):
+            with self.subTest(first=first):
+                self.release.clear()
+                self.assertEqual(self.request('POST', first, body, {'Content-Type': kind})[0], 202)
+                status, _, data = self.request('POST', other, other_body, {'Content-Type': other_kind})
+                self.assertEqual((status, json.loads(data)), (409, {'error': 'busy'}))
+                self.assertEqual(self.request('POST', first, body, {'Content-Type': kind})[0], 409)
+                self.release.set()
+                self.server.jobs.worker.join(3)
+        self.assertEqual((len(self.calls), len(self.looks)), (1, 1))
+
+    def test_reject_bad_photos_without_work(self):
+        cases = [(JPEG, {'Content-Type': 'image/png'}, 415, 'expected_image_jpeg'),
+                 (JPEG, {'Content-Type': 'audio/wav'}, 415, 'expected_image_jpeg'),
+                 (wav(), {'Content-Type': 'image/jpeg'}, 400, None),
+                 (JPEG[:-2], {'Content-Type': 'image/jpeg'}, 400, None),
+                 (JPEG, {'Content-Type': 'image/jpeg', 'Origin': 'https://example.com'}, 403,
+                  'device_api_only'),
+                 (b'', {'Content-Type': 'image/jpeg', 'Content-Length': '0'}, 413,
+                  'image_too_large_or_empty'),
+                 (b'', {'Content-Type': 'image/jpeg', 'Content-Length': str(s.MAX_IMAGE + 1)}, 413,
+                  'image_too_large_or_empty')]
+        for body, headers, expected, error in cases:
+            with self.subTest(headers=headers, size=len(body)):
+                status, _, data = self.request('POST', '/look', body, headers)
+                self.assertEqual(status, expected)
+                if error:
+                    self.assertEqual(json.loads(data), {'error': error})
+        # The largest photo the contract allows is accepted.
+        ok = b'\xff\xd8' + b'\0' * (s.MAX_IMAGE - 4) + b'\xff\xd9'
+        self.assertEqual(len(ok), 512 * 1024)
+        self.assertEqual(self.request('POST', '/look', ok, {'Content-Type': 'image/jpeg'})[0], 202)
+        self.release.set()
+        self.server.jobs.worker.join(3)
+        self.assertEqual(self.looks, [ok])
         self.assertEqual(self.calls, [])
 
     def test_health_and_unknown_job(self):

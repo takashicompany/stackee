@@ -321,6 +321,9 @@ void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
     memset(t, 0, sizeof(*t));
     t->ops = ops;
     snprintf(t->path, sizeof(t->path), "%s", post_path ? post_path : "/talk");
+    if (!stackee_talk_look_path(t->path, t->look_path, sizeof(t->look_path))) {
+        t->look_path[0] = '\0';    // 画像は送れない (reserve が理由を出す)
+    }
     t->page_shown = -1;
     t->state = STACKEE_TALK_IDLE;
     t->since = ops->now_ms();
@@ -444,13 +447,24 @@ static const char *gate_recording(stackee_talk_t *t) {
     return NULL;
 }
 
-static void finish_recording(stackee_talk_t *t) {
+// 1 往復の始まり。数字は前の往復の名残を消してから数え直す
+// (talk.status / camera.look_status が「いまの往復」を読めるように)。
+static void begin_turn(stackee_talk_t *t, bool look) {
     t->turn_started = now(t);
     t->turn_valid = true;
     t->accepted_ms = t->reply_ready_ms = t->audio_ready_ms = 0;
     t->play_setup_ms = t->complete_ms = 0;
     t->polls = 0;
     t->reply[0] = '\0';
+    t->reply_len = 0;
+    t->job[0] = '\0';
+    t->audio_samples = 0;
+    t->audio_duration_ms = 0;
+    t->look = look;
+}
+
+static void finish_recording(stackee_talk_t *t) {
+    begin_turn(t, false);
     t->ops->record_end();
 
     // ★ 誤って触れただけなら**何も起こさない**。一次回答も鳴らさず、
@@ -473,7 +487,8 @@ static void finish_recording(stackee_talk_t *t) {
     t->ops->wav_header(t->samples, t->count);
     const uint8_t *body = (const uint8_t *)t->samples - 44;
     size_t body_len = 44 + (size_t)t->count * 2;
-    if (!t->ops->http_start("POST", t->path, body, body_len, 8192)) {
+    if (!t->ops->http_start("POST", t->path, body, body_len, 8192,
+                            STACKEE_TALK_CTYPE_WAV)) {
         fail(t, "送信を始められません");
         return;
     }
@@ -528,7 +543,7 @@ static void handle_upload_done(stackee_talk_t *t, const char *json) {
 //   録音の 960 KB は受理の時点で返してあるので同時には持たない。
 static void start_audio(stackee_talk_t *t) {
     if (!t->ops->http_start("GET", t->audio_path, NULL, 0,
-                            STACKEE_TALK_REPLY_MAX_BYTES)) {
+                            STACKEE_TALK_REPLY_MAX_BYTES, NULL)) {
         // ここで断られるのはほぼ PSRAM 不足 (3.84 MB が取れない)。
         // 会話だけを失敗させ、キーボードには触らない。
         fail(t, "返答の受け皿を確保できません (メモリ不足)");
@@ -588,6 +603,7 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
                   pages, (unsigned long)t->sub_bytes, t->sub_dropped);
         }
         stackee_json_str(json, "reply", t->reply, sizeof(t->reply));
+        t->reply_len = (int)strlen(t->reply);
         t->reply_ready_ms = since_ms(t, t->turn_started);
         snprintf(t->audio_path, sizeof(t->audio_path), "%s", audio);
         close_http(t);
@@ -596,7 +612,7 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
         // 従来どおり取りに行く。
         if (t->page_count == 0 && t->subs_path[0] != '\0' &&
             t->ops->http_start("GET", t->subs_path, NULL, 0,
-                               STACKEE_TALK_SUB_BYTES)) {
+                               STACKEE_TALK_SUB_BYTES, NULL)) {
             t->http_open = true;
             to(t, STACKEE_TALK_SUBS);
             return;
@@ -664,8 +680,13 @@ static void step_http(stackee_talk_t *t) {
         return;
     }
     if (status != 200 && status != 202) {
-        char why[64];
-        snprintf(why, sizeof(why), "サーバー HTTP %d", status);
+        char why[96];
+        if (status == 409) {
+            // ★ サーバは 1 度に 1 件しか受けない (会話と画像で共有)。
+            snprintf(why, sizeof(why), "サーバーが処理中です (HTTP 409)");
+        } else {
+            snprintf(why, sizeof(why), "サーバー HTTP %d", status);
+        }
         fail(t, why);
         return;
     }
@@ -699,6 +720,21 @@ static void step_http(stackee_talk_t *t) {
     }
 }
 
+static void log_turn_timing(stackee_talk_t *t, bool played) {
+    logf_(t, "[talk-turn-timing] {\"accepted_ms\":%lu,\"reply_ready_ms\":%lu,"
+             "\"audio_ready_ms\":%lu,\"play_setup_ms\":%lu,"
+             "\"audio_duration_ms\":%d,\"polls\":%d,\"complete_ms\":%lu,"
+             "\"sub_pages\":%d,\"sub_src\":\"%s\","
+             "\"first_sample_ms\":%lu,\"rec_ms\":%lu,"
+             "\"look\":%d,\"played\":%d}",
+          (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
+          (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
+          t->audio_duration_ms, t->polls, (unsigned long)t->complete_ms,
+          t->page_count, stackee_talk_sub_src_names[t->sub_src],
+          (unsigned long)t->first_sample_ms,
+          (unsigned long)t->last_rec_ms, t->look ? 1 : 0, played ? 1 : 0);
+}
+
 static void talk_step_inner(stackee_talk_t *t) {
     bool rising = t->pressed && !t->was_pressed;
     t->was_pressed = t->pressed;
@@ -708,7 +744,8 @@ static void talk_step_inner(stackee_talk_t *t) {
 
     switch (t->state) {
         case STACKEE_TALK_IDLE:
-            if (rising && !t->ops->ack_active()) {
+            // ★ 画像のために押さえている間 (撮影中) は会話キーを受け付けない。
+            if (rising && !t->look_reserved && !t->ops->ack_active()) {
                 start_recording(t);
             }
             return;
@@ -762,7 +799,7 @@ static void talk_step_inner(stackee_talk_t *t) {
                 t->poll_sent = now(t);
                 // ★ done には字幕の本文 (4 KB) が混ざる。8 KB では足りない。
                 if (!t->ops->http_start("GET", path, NULL, 0,
-                                        STACKEE_TALK_POLL_LIMIT)) {
+                                        STACKEE_TALK_POLL_LIMIT, NULL)) {
                     fail(t, "状態の取得を始められません");
                     return;
                 }
@@ -773,6 +810,23 @@ static void talk_step_inner(stackee_talk_t *t) {
             return;
 
         case STACKEE_TALK_PLAY_WAIT:
+            // ★ 画像の検証 (play=0) は**ここで止める**。PCM は受け取り終えて
+            //   いる (audio_samples が数えてある) ので、鳴らす直前まで
+            //   全部の段を通ったことになる。音は 1 つも出さない。
+            if (t->look && !t->look_play) {
+                if (t->audio == NULL || t->audio_samples <= 0) {
+                    fail(t, "返答の PCM が無い");
+                    return;
+                }
+                t->complete_ms = since_ms(t, t->turn_started);
+                log_turn_timing(t, false);
+                t->turns++;
+                t->looks_done++;
+                t->looks_unplayed++;
+                cleanup(t);
+                to(t, STACKEE_TALK_IDLE);
+                return;
+            }
             // ★ 最終回答は一次回答の**あと**。ここが両者の排他。
             if (t->ops->ack_active()) {
                 return;
@@ -816,18 +870,11 @@ static void talk_step_inner(stackee_talk_t *t) {
                 return;
             }
             t->complete_ms = since_ms(t, t->turn_started);
-            logf_(t, "[talk-turn-timing] {\"accepted_ms\":%lu,\"reply_ready_ms\":%lu,"
-                     "\"audio_ready_ms\":%lu,\"play_setup_ms\":%lu,"
-                     "\"audio_duration_ms\":%d,\"polls\":%d,\"complete_ms\":%lu,"
-                     "\"sub_pages\":%d,\"sub_src\":\"%s\","
-                     "\"first_sample_ms\":%lu,\"rec_ms\":%lu}",
-                  (unsigned long)t->accepted_ms, (unsigned long)t->reply_ready_ms,
-                  (unsigned long)t->audio_ready_ms, (unsigned long)t->play_setup_ms,
-                  t->audio_duration_ms, t->polls, (unsigned long)t->complete_ms,
-                  t->page_count, stackee_talk_sub_src_names[t->sub_src],
-                  (unsigned long)t->first_sample_ms,
-                  (unsigned long)t->last_rec_ms);
+            log_turn_timing(t, true);
             t->turns++;
+            if (t->look) {
+                t->looks_done++;
+            }
             cleanup(t);
             to(t, STACKEE_TALK_IDLE);
             if (t->ops->play_failed()) {
@@ -914,16 +961,22 @@ void stackee_talk_set_guides(stackee_talk_t *t, const char *recording,
 }
 
 void stackee_talk_step(stackee_talk_t *t) {
+    if (t->look_notice) {
+        t->look_notice = false;
+        char text[STACKEE_TALK_TEXT_MAX];
+        snprintf(text, sizeof(text), "会話エラー: %.200s", t->error);
+        show(t, text);
+    }
     talk_step_inner(t);
     update_guide(t);
 }
 
 bool stackee_talk_busy(const stackee_talk_t *t) {
-    return t->state != STACKEE_TALK_IDLE;
+    return t->state != STACKEE_TALK_IDLE || t->look_reserved;
 }
 
 bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
-    if (t->state != STACKEE_TALK_IDLE || t->ops->ack_active()) {
+    if (t->state != STACKEE_TALK_IDLE || t->look_reserved || t->ops->ack_active()) {
         return false;
     }
     if (pcm == NULL || samples < STACKEE_TALK_MIN_SAMPLES ||
@@ -948,16 +1001,12 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
     t->error[0] = '\0';
     // ★ 録音の道は通らないので record_begin / record_end は呼ばない。
     //   送信から先は普段の会話とまったく同じ道を歩く。
-    t->turn_started = now(t);
-    t->turn_valid = true;
-    t->accepted_ms = t->reply_ready_ms = t->audio_ready_ms = 0;
-    t->play_setup_ms = t->complete_ms = 0;
-    t->polls = 0;
-    t->reply[0] = '\0';
+    begin_turn(t, false);
     t->ops->wav_header(t->samples, t->count);
     const uint8_t *body = (const uint8_t *)t->samples - 44;
     size_t body_len = 44 + (size_t)t->count * 2;
-    if (!t->ops->http_start("POST", t->path, body, body_len, 8192)) {
+    if (!t->ops->http_start("POST", t->path, body, body_len, 8192,
+                            STACKEE_TALK_CTYPE_WAV)) {
         fail(t, "送信を始められません");
         return false;
     }
@@ -965,6 +1014,124 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
     to(t, STACKEE_TALK_UPLOAD);
     show(t, "音声を送信中…");
     t->ops->ack_begin();
+    face(t);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 画像を見せる (POST /look、2026-09-26)
+// ---------------------------------------------------------------------------
+// ★ 受理より後ろ (ポーリング・done・/audio・字幕・再生) は会話と 1 行も
+//   違わない。ここにあるのは「送る前」だけ。
+bool stackee_talk_look_path(const char *talk_path, char *out, size_t cap) {
+    static const char TAIL[] = "/talk";
+    const size_t tail = sizeof(TAIL) - 1;
+    if (talk_path == NULL || out == NULL || cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    size_t len = strlen(talk_path);
+    if (len < tail || len + 1 > cap || !valid_path(talk_path) ||
+        strcmp(talk_path + len - tail, TAIL) != 0) {
+        return false;
+    }
+    memcpy(out, talk_path, len - tail);
+    memcpy(out + len - tail, "/look", tail + 1);
+    return true;
+}
+
+// 送れないと分かっている理由を残す。★ fail() と違ってマイクにも通信にも
+// 触らない (idle のまま。何も持っていない)。画面とログは次の step
+// (audio タスク) が出す — 呼び手の camera タスクはスタックが小さいので、
+// ここでは文字列を 1 つ写すだけにする。
+static void refuse_look(stackee_talk_t *t, const char *why) {
+    snprintf(t->error, sizeof(t->error), "%s", why);
+    t->errors++;
+    t->look_notice = true;
+}
+
+int stackee_talk_look_reserve(stackee_talk_t *t) {
+    // ★ 会話中 (録音/送信/待ち/再生) と、一次回答が鳴っている間と、
+    //   STK_TALK を押している間は撮らない。画面にも何も出さない。
+    if (t->state != STACKEE_TALK_IDLE || t->look_reserved || t->pressed ||
+        t->ops->ack_active()) {
+        return STACKEE_TALK_LOOK_BUSY;
+    }
+    // 送れないなら撮らない (撮影は 4 秒かかり、ALDO3 も入れることになる)。
+    if (t->look_path[0] == '\0') {
+        refuse_look(t, valid_path(t->path)
+                           ? "STACKEE_TALK_URL が /talk で終わっていません"
+                           : "STACKEE_TALK_URL が未設定です");
+        return STACKEE_TALK_LOOK_ERROR;
+    }
+    if (!t->ops->net_ready()) {
+        refuse_look(t, "Wi-Fi 未接続です");
+        return STACKEE_TALK_LOOK_ERROR;
+    }
+    t->look_reserved = true;
+    t->error[0] = '\0';
+    return STACKEE_TALK_LOOK_OK;
+}
+
+void stackee_talk_look_release(stackee_talk_t *t) {
+    t->look_reserved = false;
+}
+
+bool stackee_talk_look(stackee_talk_t *t, const uint8_t *jpeg, size_t len,
+                       bool play) {
+    if (t->state != STACKEE_TALK_IDLE) {
+        t->look_reserved = false;
+        return false;
+    }
+    // ★ 押さえはここで必ず下ろす。この先は状態が idle でなくなる (= busy)
+    //   か、fail で idle に戻るかのどちらか。
+    t->look_reserved = false;
+    begin_turn(t, true);
+    t->look_play = play;
+    t->look_bytes = (uint32_t)len;
+    t->looks++;
+    t->error[0] = '\0';
+    if (t->look_path[0] == '\0') {
+        fail(t, valid_path(t->path) ? "STACKEE_TALK_URL が /talk で終わっていません"
+                                    : "STACKEE_TALK_URL が未設定です");
+        return false;
+    }
+    // JPEG は SOI (FF D8) で始まる。空や壊れたものは送らない。
+    if (jpeg == NULL || len < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) {
+        fail(t, "画像が不正です");
+        return false;
+    }
+    if (len > STACKEE_TALK_LOOK_MAX_BYTES) {
+        fail(t, "画像が大きすぎます (512 KiB まで)");
+        return false;
+    }
+    if (!t->ops->net_ready()) {
+        fail(t, "Wi-Fi 未接続です");
+        return false;
+    }
+    // ★ 録音と同じ領域 (PSRAM) へ写す。録音の道は通らないので、その領域が
+    //   空いていることは idle であることが保証している。受理で返すのも
+    //   録音と同じ (handle_upload_done)。
+    t->samples = t->ops->record_alloc((int)((len + 1) / 2));
+    if (t->samples == NULL) {
+        fail(t, "画像の領域を確保できません");
+        return false;
+    }
+    memcpy(t->samples, jpeg, len);
+    t->count = 0;
+    if (!t->ops->http_start("POST", t->look_path, t->samples, len, 8192,
+                            STACKEE_TALK_CTYPE_JPEG)) {
+        fail(t, "送信を始められません");
+        return false;
+    }
+    t->http_open = true;
+    to(t, STACKEE_TALK_UPLOAD);
+    show(t, "画像を送信中…");
+    // 一次回答は会話と同じく返事を待つ前に鳴らす。★ play=0 (検証) では
+    // 何も鳴らさない。
+    if (play) {
+        t->ops->ack_begin();
+    }
     face(t);
     return true;
 }

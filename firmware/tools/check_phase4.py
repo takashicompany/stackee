@@ -31,6 +31,14 @@
   python3 firmware/tools/check_phase4.py --transport hid   # full プロファイル
   python3 firmware/tools/check_phase4.py --no-camera       # 撮らない (速い)
   python3 firmware/tools/check_phase4.py --record          # UAC で 1 秒録る
+  python3 firmware/tools/check_phase4.py --only look       # 撮って AI に見せる (鳴らさない)
+
+  5. 画像を AI に見せる (--only look を書いたときだけ。**既定では走らない**)
+     `camera.look play=0` で 撮影 → POST /look → 返答待ち → 返答 PCM の受信
+     まで進め、**鳴らす直前で止める**。`camera.look_status` で job id /
+     返答文の長さ / 受け取った PCM のバイト数 / 各段の ms / エラーを読む。
+     撮影中は key.inject を回して打鍵の遅延も見る。先に `audio.null` も立てる。
+     ★ サーバ (STACKEE_TALK_URL の /look) に 1 件の仕事を投げる。
 
 ★ 音は鳴らさない。ここが触るのは**マイク側だけ**で、スピーカーには 1 度も
   触らない (camera も touch も音とは無関係)。
@@ -68,6 +76,12 @@ LEGACY_LOOP = ['loop.stats', 'loop.detail', 'loop.gc',
 
 # 撮影は捨て駒 30 枚で約 4〜5 秒。余裕を見る。
 CAMERA_TIMEOUT_S = 40.0
+# 画像を見せる: 返答待ちの上限 (390 秒) + 撮影 + 受信の余裕。
+LOOK_TIMEOUT_S = 450.0
+INJECT_KEY = 'F24'          # ホスト側で何も起きないキー (check_phase2 と同じ)
+# 打鍵の遅延の合否 (DESIGN.md §3。撮影中も同じ基準)。
+KEY_MED_MS = 2.0
+KEY_MAX_MS = 5.0
 # ★ 内蔵 DMA でやり直すときに要る連続領域 [byte]。
 #   sdkconfig の CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX = 8192 のとき、
 #   QVGA RGB565 (1 行 640 B) では 半バッファ 3,840 × 2 = 7,680。
@@ -180,6 +194,59 @@ def check_camera(client, result, warmup, verbose=True, out_path=None):
 
 
 # ---------------------------------------------------------------------------
+# 5. 画像を AI に見せる (POST /look)。★ 鳴らさない (play=0 + audio.null)
+# ---------------------------------------------------------------------------
+def inject_ms(client, timeout=5.0):
+    """key.inject を 1 回。押下までの遅れ [ms] (失敗なら None)。"""
+    try:
+        reply = client.request('key.inject', timeout=timeout,
+                               kc=INJECT_KEY, hold_ms=20)
+    except Exception:
+        return None
+    if not reply.get('ok'):
+        return None
+    return float(reply.get('press_ms', 0))
+
+
+def check_look(client, result, warmup, verbose=True):
+    # ★ 二重の守り。play=0 で再生の直前に止まるが、ヌル出力も立てておく。
+    result['look_null'] = client.request('audio.null', timeout=5.0, on=True)
+    before = client.request('camera.look_status', timeout=5.0)
+    result['look_before'] = before
+    seq0 = before.get('seq', 0)
+    done0 = (before.get('talk') or {}).get('looks_done', 0) or 0
+    start = client.request('camera.look', timeout=5.0, play=0, warmup=warmup)
+    result['look_start'] = start
+    if start.get('error'):
+        return
+    if verbose:
+        print('  撮影 → /look → 返答待ち (鳴らさない)...')
+    lat = []
+    last = {}
+    t0 = time.time()
+    while time.time() - t0 < LOOK_TIMEOUT_S:
+        last = client.request('camera.look_status', timeout=5.0)
+        phase = last.get('phase')
+        talk = last.get('talk') or {}
+        mine = last.get('seq', 0) > seq0
+        if mine and phase == 'capturing':
+            ms = inject_ms(client)          # 撮影中の打鍵
+            if ms is not None:
+                lat.append(ms)
+            continue
+        if mine and phase in ('ignored', 'error'):
+            break
+        if mine and phase == 'submitted' and talk.get('state') == 'idle' and (
+                (talk.get('looks_done', 0) or 0) > done0 or talk.get('error')):
+            break
+        time.sleep(1.0)
+    result['look_status'] = last
+    result['look_elapsed_s'] = round(time.time() - t0, 1)
+    result['look_key_ms'] = lat
+    result['look_camera'] = client.request('camera.status', timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
 # 3. コンソールの残り
 # ---------------------------------------------------------------------------
 def check_console(client, result, timeout):
@@ -287,6 +354,9 @@ def collect(args):
                          out_path=args.save_jpeg)
         if 'uac' in wanted:
             check_uac(client, result, args.record)
+        # ★ 画像はサーバに仕事を投げるので、書いたときだけ (既定の組に入れない)。
+        if args.only and 'look' in args.only:
+            check_look(client, result, args.warmup, verbose=not args.json)
         result['status_after'] = client.request('status', timeout=args.timeout)
     finally:
         client.close()
@@ -375,6 +445,57 @@ def verdicts(result, args):
                     '(内蔵 DMA でやり直すなら %s B 要る) / 内蔵の空き %s B'
                     % ('あり' if psram else 'なし', largest,
                        CAMERA_FALLBACK_DMA_BYTES, shot.get('internal_free'))))
+
+    # ---- 5. 画像を AI に見せる -------------------------------------------
+    look = result.get('look_status')
+    if result.get('look_start') is not None:
+        start = result.get('look_start') or {}
+        if start.get('error'):
+            out.append(('画像 camera.look', False, '%s' % start.get('error')))
+        else:
+            talk = (look or {}).get('talk') or {}
+            done0 = ((result.get('look_before') or {}).get('talk') or {}).get(
+                'looks_done', 0) or 0
+            ok = ((look or {}).get('phase') == 'submitted' and
+                  talk.get('state') == 'idle' and
+                  (talk.get('looks_done', 0) or 0) > done0 and
+                  not talk.get('error') and talk.get('look') == 1 and
+                  talk.get('play') == 0 and
+                  (talk.get('reply_len', 0) or 0) > 0 and
+                  (talk.get('audio_bytes', 0) or 0) > 0)
+            out.append(('画像 撮影 → /look → 返答 PCM', ok,
+                        'phase=%s job=%s reply_len=%s audio_bytes=%s '
+                        '(%s ms) 撮影 %s ms / 渡す %s ms / 各段 %s / %s 秒 / '
+                        'error="%s" look_err="%s"'
+                        % ((look or {}).get('phase'), talk.get('job_id'),
+                           talk.get('reply_len'), talk.get('audio_bytes'),
+                           talk.get('audio_ms'), (look or {}).get('capture_ms'),
+                           (look or {}).get('submit_ms'),
+                           json.dumps(talk.get('t', {}), ensure_ascii=False),
+                           result.get('look_elapsed_s'), talk.get('error'),
+                           (look or {}).get('look_err'))))
+            out.append(('画像 鳴らしていない', talk.get('play') == 0 and
+                        talk.get('null') is True and
+                        (talk.get('t') or {}).get('play_setup', 0) == 0,
+                        'play=%s null=%s play_setup=%s'
+                        % (talk.get('play'), talk.get('null'),
+                           (talk.get('t') or {}).get('play_setup'))))
+            cam = result.get('look_camera') or {}
+            out.append(('画像 撮影後の ALDO3', cam.get('aldo3') == 0,
+                        'aldo3=%s' % cam.get('aldo3')))
+            lat = result.get('look_key_ms') or []
+            if lat:
+                import statistics
+                med = statistics.median(lat)
+                worst = max(lat)
+                out.append(('画像 撮影中の打鍵', med <= KEY_MED_MS and
+                            worst <= KEY_MAX_MS,
+                            '中央値 %.3f ms / 最大 %.3f ms / %d 回 '
+                            '(合否 ≤%.0f / ≤%.0f ms)'
+                            % (med, worst, len(lat), KEY_MED_MS, KEY_MAX_MS)))
+            else:
+                out.append(('画像 撮影中の打鍵', None,
+                            '撮影中に key.inject を撃てなかった'))
 
     # ---- 3. コンソール --------------------------------------------------
     features = hello.get('features') or []
@@ -507,7 +628,7 @@ def main():
     parser.add_argument('--record', action='store_true',
                         help='UAC で 1 秒録る (sox か ffmpeg が要る)')
     parser.add_argument('--only', nargs='*',
-                        choices=('touch', 'camera', 'console', 'uac'),
+                        choices=('touch', 'camera', 'console', 'uac', 'look'),
                         help='一部だけ見る')
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args()

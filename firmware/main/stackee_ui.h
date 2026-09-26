@@ -34,6 +34,10 @@ void stackee_ui_set_wifi(const char *state_name);
 //   speaking  … 再生中             -> speaking
 void stackee_ui_set_talk(bool recording, bool busy, bool speaking);
 
+// STK_CAMERA の撮影中。顔の状態機械の `camera` に渡る (2026-09-26)。
+// ★ 撮影中は描画を止めるので、実際に描き替わるのは電源を待つ 1 秒の間。
+void stackee_ui_set_camera(bool active);
+
 // 段階 4: 撮影中だけ描画を止める (DESIGN.md §3)。画面はそのまま残る。
 void stackee_ui_pause(bool on);
 bool stackee_ui_paused(void);

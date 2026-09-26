@@ -39,6 +39,7 @@ static struct {
     const void *body;
     size_t      body_len;
     size_t      limit;
+    const char *content_type;   // 呼び手の定数文字列を指すだけ (写さない)
 
     // ワーカーが埋めるもの。
     uint8_t *buf;
@@ -174,7 +175,7 @@ static void worker(void *unused) {
             esp_http_client_set_header(client, "Authorization", header);
         }
         if (config.method == HTTP_METHOD_POST) {
-            esp_http_client_set_header(client, "Content-Type", "audio/wav");
+            esp_http_client_set_header(client, "Content-Type", h.content_type);
             esp_http_client_set_post_field(client, (const char *)h.body, (int)h.body_len);
         }
         esp_err_t err = esp_http_client_perform(client);
@@ -251,7 +252,8 @@ esp_err_t stackee_http_start(void) {
 }
 
 bool stackee_http_request(const char *method, const char *path,
-                          const void *body, size_t body_len, size_t limit) {
+                          const void *body, size_t body_len, size_t limit,
+                          const char *content_type) {
     if (h.task == NULL || h.base[0] == '\0' || path == NULL || path[0] != '/') {
         return false;
     }
@@ -293,6 +295,7 @@ bool stackee_http_request(const char *method, const char *path,
     h.method = (strcmp(method, "POST") == 0) ? "POST" : "GET";
     h.body = body;
     h.body_len = body_len;
+    h.content_type = (content_type != NULL) ? content_type : "audio/wav";
     h.limit = limit;
     atomic_store(&h.received, 0);
     atomic_store(&h.status, 0);

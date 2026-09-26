@@ -235,7 +235,9 @@ void app_main(void) {
         //   走るのは HTTPS が TLS で失敗したときだけ (stackee_http.c)。README §20。
         // 壊れていたら、会話が終わって 5 秒たったところで再起動して戻す。
         if (stackee_cryptocheck_broken()) {
-            if (strcmp(stackee_audio_talk_state(), "idle") != 0) {
+            // ★ 撮影中 (ALDO3 が入っている) にも落とさない。
+            if (strcmp(stackee_audio_talk_state(), "idle") != 0 ||
+                stackee_camera_busy()) {
                 broken_seen = 0;
             } else if (broken_seen == 0) {
                 broken_seen = now;

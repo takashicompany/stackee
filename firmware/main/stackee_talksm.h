@@ -13,6 +13,12 @@
 //                               → {"state":"error"|"ignored", "error":..}
 //   GET  /jobs/<id>/audio       → 16 kHz mono 16bit PCM (生バイト)
 //
+// 画像を見せる (2026-09-26、STK_CAMERA / console の camera.look):
+//   POST /look (image/jpeg)     → 202 {"id":..,"status_url":"/jobs/<id>"}
+//   以降は /talk と**完全に同じ** (ポーリング・done・/audio・字幕)。
+//   送り先は STACKEE_TALK_URL の末尾 "/talk" を "/look" にしたもの。
+//   受理より後ろは会話の道をそのまま歩く (二重に実装しない)。
+//
 // ★ ESP-IDF に依存しない。録音・再生・通信・画面は ops で外から差し込む。
 //   hostbuild (tools/test_talk_host.py) が偽の ops を挿して、タイムアウト・
 //   ポーリング間隔・一次回答と最終回答の排他を時刻つきで確かめる。
@@ -92,6 +98,20 @@
 
 #define STACKEE_TALK_PATH_MAX        160
 #define STACKEE_TALK_TEXT_MAX        256
+
+// ---- 画像を見せる (POST /look、2026-09-26) ---------------------------------
+// ★ サーバとの取り決め: image/jpeg / Content-Length 付き / 上限 512 KiB。
+//   応答は /talk と同じ 202 {id, status_url}。409 は会話と共有 (処理中)。
+#define STACKEE_TALK_LOOK_MAX_BYTES  (512u * 1024u)
+#define STACKEE_TALK_CTYPE_WAV       "audio/wav"
+#define STACKEE_TALK_CTYPE_JPEG      "image/jpeg"
+
+// stackee_talk_look_reserve() の答え。
+typedef enum {
+    STACKEE_TALK_LOOK_OK = 0,   // 押さえた。撮ってよい
+    STACKEE_TALK_LOOK_BUSY,     // 会話中 / 再生中 / STK_TALK 押下中。黙って無視する
+    STACKEE_TALK_LOOK_ERROR,    // 送れない (URL 未設定・Wi-Fi なし)。画面に出した
+} stackee_talk_look_reserve_t;
 
 // ---- 案内の字幕 (2026-09-22) ----------------------------------------------
 // ★ 帯が黒いだけだと「いま何をすればいいか」が分からない。会話の状態を
@@ -213,8 +233,10 @@ typedef struct {
     // ---- 通信 ----
     bool (*net_ready)(void);
     // body は http_close() まで呼び手が持ち続ける (SM は解放しない)。
+    // content_type は POST のときだけ意味を持つ (GET では NULL)。
     bool (*http_start)(const char *method, const char *path,
-                       const void *body, size_t body_len, size_t limit);
+                       const void *body, size_t body_len, size_t limit,
+                       const char *content_type);
     // 0 = 進行中 / 1 = 完了 / -1 = 失敗
     int  (*http_poll)(int *status, const uint8_t **body, size_t *len);
     void (*http_close)(void);
@@ -245,6 +267,7 @@ typedef struct {
     int      count;
 
     char     path[STACKEE_TALK_PATH_MAX];   // POST 先 ("/talk")
+    char     look_path[STACKEE_TALK_PATH_MAX];  // 画像の POST 先 ("/look")。空 = 作れない
     char     job[STACKEE_TALK_PATH_MAX];    // status_url
     char     audio_path[STACKEE_TALK_PATH_MAX];
     char     subs_path[STACKEE_TALK_PATH_MAX];  // 空なら字幕なし (旧サーバ)
@@ -294,6 +317,21 @@ typedef struct {
     uint32_t last_loud;         // voice_rms を越えた窓の数
     // 切り捨ての閾値 (0 = その条件を見ない)。
     uint32_t min_ms, voice_rms, voice_windows;
+
+    // ---- 画像を見せる (POST /look) ----
+    // ★ look_reserved は「撮影に入るので会話キーを受け付けない」印。
+    //   撮影 (約 4 秒) の間は状態機械は idle のままなので、この印で
+    //   STK_TALK と talk.inject を断る。stackee_talk_look() が (成否に
+    //   かかわらず) 下ろす。撮れなかったときは look_release() で下ろす。
+    bool     look_reserved;
+    bool     look_notice;       // reserve で断った理由を、次の step で画面に出す
+    bool     look;              // いまの / 直近の往復は画像 (POST /look)
+    bool     look_play;         // false = 再生の直前で止める (検証用、音を出さない)
+    uint32_t look_bytes;        // 送った JPEG の長さ
+    uint32_t looks;             // 画像の往復を始めた回数
+    uint32_t looks_done;        // そのうち最後まで行った回数 (鳴らさず止めたものを含む)
+    uint32_t looks_unplayed;    // play=0 で再生の直前に止めた回数
+    int      reply_len;         // 返答文の長さ [B] (t->reply に入ったぶん)
 
     // 案内の字幕。文面は差し替えられるようにしておく (将来 settings から)。
     const char *guide_rec, *guide_think;
@@ -357,7 +395,31 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples);
 // 1 周ぶん。呼ぶのは audio タスクだけ。
 void stackee_talk_step(stackee_talk_t *t);
 
+// 会話中か。★ 画像のために押さえている間 (look_reserved) も busy とみなす。
 bool stackee_talk_busy(const stackee_talk_t *t);
+
+// ---- 画像を見せる (POST /look) ---------------------------------------------
+// STACKEE_TALK_URL のパスの末尾 "/talk" を "/look" に置き換える。
+//   "/talk" → "/look" / "/api/talk" → "/api/look"
+// 末尾が "/talk" でなければ false ("/talkx" "/xtalk" "/talk?x=1" も false)。
+bool stackee_talk_look_path(const char *talk_path, char *out, size_t cap);
+
+// 撮影の前に呼ぶ。OK なら会話キーと talk.inject を断るようになる。
+// ★ 会話中なら BUSY を返すだけで何もしない (撮らずに無視する約束)。
+// ★ URL 未設定 / Wi-Fi なしなら ERROR。エラー欄に入れ、画面 (show) には
+//   **次の step で** 出す (撮っても送れないので撮らない)。ここは I2S にも
+//   画面にもログにも触らないので、audio タスク以外 (camera タスク、
+//   スタック 4 KB) から錠を取って呼んでよい。
+int  stackee_talk_look_reserve(stackee_talk_t *t);
+// 撮れなかったときに押さえを外す。
+void stackee_talk_look_release(stackee_talk_t *t);
+// 撮れた JPEG を送り始める。中身は record_alloc した領域へ**写す**ので、
+// 戻ったあと呼び手のバッファは自由に使ってよい。受理 (202) の時点で返す。
+// play=false なら返答の PCM を受け取ったところで止め、鳴らさない
+// (一次回答も鳴らさない)。始められたら true。呼ぶのは audio タスクだけ
+// (一次回答の再生を始めるため)。
+bool stackee_talk_look(stackee_talk_t *t, const uint8_t *jpeg, size_t len,
+                       bool play);
 
 // STACKEE_TALK_URL を「相手」と「パス」に割る。
 //   "https://pi400.example.ts.net:8443/talk"

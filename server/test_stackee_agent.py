@@ -10,6 +10,9 @@ import unittest
 
 from stackee_agent import Agent, CodexAgent, normalize_config
 
+# The smallest thing /look accepts: SOI, a few bytes, EOI.
+JPEG = b'\xff\xd8\xff\xe0' + bytes(range(256)) * 4 + b'\xff\xd9'
+
 
 FAKE_CODEX = r'''
 import json, os, sys, time, uuid
@@ -41,7 +44,15 @@ for line in sys.stdin:
     elif method == 'turn/start':
         assert params['threadId'] == state['id']
         text = params['input'][0]['text']
+        images = [item for item in params['input'][1:]]
         state['messages'].append(text)
+        for item in images:
+            assert item['type'] == 'image', item
+            prefix = 'data:image/jpeg;base64,'
+            assert item['url'].startswith(prefix), item['url'][:40]
+            import base64
+            data = base64.b64decode(item['url'][len(prefix):], validate=True)
+            state['messages'].append('saw %d bytes %s' % (len(data), data[:2].hex()))
         store.write_text(json.dumps(state))
         turn = str(uuid.uuid4())
         if text == 'timeout':
@@ -50,6 +61,8 @@ for line in sys.stdin:
             continue
         if text == 'recall':
             reply = next(x for x in state['messages'] if x.startswith('remember '))
+        elif text == 'recall-image' or images:
+            reply = [x for x in state['messages'] if x.startswith('saw ')][-1]
         elif text == 'instructions':
             reply = instructions
         else:
@@ -74,7 +87,12 @@ args = sys.argv[1:]
 def value(name):
     return args[args.index(name) + 1] if name in args else None
 assert '-p' in args
-assert value('--output-format') == 'json'
+streamed = value('--input-format') == 'stream-json'
+if streamed:
+    # The real CLI refuses stream-json input with any other output format.
+    assert value('--output-format') == 'stream-json' and '--verbose' in args, args
+else:
+    assert value('--output-format') == 'json'
 assert value('--model')
 assert value('--effort')
 assert value('--tools') == 'WebSearch,WebFetch'
@@ -83,12 +101,35 @@ assert '--strict-mcp-config' in args
 assert value('--setting-sources') == 'project'
 assert value('--permission-mode') == 'plan'
 resume = value('--resume')
-text = sys.stdin.read()
+raw = sys.stdin.read()
+seen = None
+if value('--input-format') == 'stream-json':
+    import base64
+    lines = [line for line in raw.splitlines() if line.strip()]
+    assert len(lines) == 1, lines
+    message = json.loads(lines[0])
+    assert message['type'] == 'user' and message['message']['role'] == 'user', message
+    blocks = message['message']['content']
+    text = next(b['text'] for b in blocks if b['type'] == 'text')
+    image = next(b for b in blocks if b['type'] == 'image')
+    assert image['source']['type'] == 'base64'
+    assert image['source']['media_type'] == 'image/jpeg'
+    data = base64.b64decode(image['source']['data'], validate=True)
+    seen = 'saw %d bytes %s' % (len(data), data[:2].hex())
+else:
+    assert '--input-format' not in args
+    text = raw
 store = Path('.state/fake-claude.json')
 store.parent.mkdir(parents=True, exist_ok=True)
 book = json.loads(store.read_text()) if store.exists() else {}
 
 def emit(payload):
+    if streamed:
+        # Events before the result, as the real stream prints them.
+        print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': payload['session_id']}),
+              flush=True)
+        print(json.dumps({'type': 'assistant', 'message': {'content': [
+            {'type': 'text', 'text': 'not the result'}]}}), flush=True)
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 if resume is not None:
@@ -101,6 +142,8 @@ else:
     ident = str(uuid.uuid4())
     book[ident] = []
 book[ident].append(text)
+if seen:
+    book[ident].append(seen)
 store.write_text(json.dumps(book, ensure_ascii=False))
 if text == 'timeout':
     time.sleep(20)
@@ -109,6 +152,8 @@ if text == 'slow':
     time.sleep(1)
 if text == 'recall':
     reply = next(x for x in book[ident] if x.startswith('remember '))
+elif text == 'recall-image' or seen:
+    reply = [x for x in book[ident] if x.startswith('saw ')][-1]
 elif text == 'instructions':
     reply = Path('CLAUDE.md').read_text(encoding='utf-8')
 elif text == 'fail':
@@ -207,6 +252,17 @@ class AgentTests(unittest.TestCase):
         agent.process.wait()
         self.assertEqual(agent.ask('recall'), 'remember persimmon')
         self.assertEqual(agent.thread_id, ident)
+
+    def test_image_joins_the_same_thread_as_a_data_url(self):
+        agent = self.agent()
+        agent.ask('remember persimmon')
+        ident, pid = agent.thread_id, agent.process.pid
+        self.assertEqual(agent.ask('look', JPEG), 'saw %d bytes ffd8' % len(JPEG))
+        # A later spoken turn in the same thread can still refer to the photo.
+        self.assertEqual(agent.ask('recall-image'), 'saw %d bytes ffd8' % len(JPEG))
+        self.assertEqual(agent.ask('recall'), 'remember persimmon')
+        self.assertEqual((agent.thread_id, agent.process.pid), (ident, pid))
+        self.assertEqual(list(self.root.glob('*.jpg')) + list(self.root.glob('*.jpeg')), [])
 
     def test_final_phase_only_and_failed_turn_is_not_spoken(self):
         agent = self.agent()
@@ -355,6 +411,24 @@ class RouterTests(unittest.TestCase):
         self.assertIsNone(agent.backend.process)
         self.assertEqual(agent.ask('recall'), 'remember grape')
         self.assertEqual(agent.backend.session_id, ident)
+
+    def test_claude_image_goes_in_as_a_stream_json_block_in_the_same_session(self):
+        self.configure('claude')
+        agent = self.agent()
+        agent.ask('remember grape')
+        ident = agent.backend.session_id
+        self.assertEqual(agent.ask('look', JPEG), 'saw %d bytes ffd8' % len(JPEG))
+        self.assertEqual(agent.backend.session_id, ident)
+        # The next utterance is plain text again and still sees the photo.
+        self.assertEqual(agent.ask('recall-image'), 'saw %d bytes ffd8' % len(JPEG))
+        self.assertEqual(agent.ask('recall'), 'remember grape')
+
+    def test_claude_first_turn_can_be_an_image(self):
+        self.configure('claude')
+        agent = self.agent()
+        self.assertEqual(agent.ask('look', JPEG), 'saw %d bytes ffd8' % len(JPEG))
+        self.assertTrue(agent.backend.session_id)
+        self.assertEqual(self.session()['claude']['session_id'], agent.backend.session_id)
 
     def test_leading_dash_is_spoken_not_parsed_as_an_option(self):
         self.configure('claude')

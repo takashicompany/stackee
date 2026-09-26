@@ -38,8 +38,12 @@ bool        stackee_http_has_token(void);
 esp_err_t stackee_http_start(void);      // ワーカーを起こす (1 回だけ)
 
 // 送る。path は "/" で始まること。body は完了まで呼び手が持ち続ける。
+// content_type は POST の Content-Type ("audio/wav" / "image/jpeg")。
+// NULL なら "audio/wav" (会話の既定)。GET では使わない。
+// ★ Content-Length は esp_http_client が body_len から付ける。
 bool stackee_http_request(const char *method, const char *path,
-                          const void *body, size_t body_len, size_t limit);
+                          const void *body, size_t body_len, size_t limit,
+                          const char *content_type);
 
 // 進み具合。戻り値は state。
 int stackee_http_state(int *status, size_t *received, int *err, uint32_t *elapsed_ms);

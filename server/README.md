@@ -221,6 +221,7 @@ URL の Web 操作盤からの編集は今後追加します。現在は S3 の�
 | --- | --- |
 | `GET /health` | 稼働状態・処理中かどうか |
 | `POST /talk` | `Content-Type: audio/wav` と `Content-Length` を付け、WAV 本体を送る |
+| `POST /look` | `Content-Type: image/jpeg` と `Content-Length` を付け、カメラの JPEG 本体を送る (下記「写真を見せる」) |
 | `GET /jobs/{id}` | `processing` / `done` / `ignored` / `error` と結果を取得 |
 | `GET /jobs/{id}/audio` | 返答の生 PCM (16kHz、符号付き16bit LE、mono) を取得 |
 | `GET /jobs/{id}/subtitles` | 返答の字幕 (開始ミリ秒とページ本文) を取得 |
@@ -268,9 +269,45 @@ PCM のバイト数から厳密に求まります (無音の150ミリ秒を含�
 処理中は `409`、`ignored` と `error` のジョブ、字幕が空のジョブは `404` です。
 `subtitles` も `subtitles_url` も無ければ字幕なしで従来どおり動作します。
 
-同時処理は1件で、処理中の追加送信は `409`。形式不正は `400`、サイズ超過は `413`、
+同時処理は1件 (`/look` と共有) で、処理中の追加送信は `409`。形式不正は `400`、サイズ超過は `413`、
 MIME不一致は `415`。結果は最大8件・5分間、メモリだけに保持します。
 音声の一時ファイルは処理終了時に削除します。文字起こし結果はエージェントに送信されます。
+
+### 写真を見せる (`POST /look`)
+
+本体のカメラで撮った JPEG を送ると、エージェントが写真を見て話しかけ、その返答を
+`/talk` と同じジョブで返します。受付以降 (`202` と `{id, status_url}`・`Location`、
+`GET /jobs/{id}`・`?wait=`・`/audio`・`/subtitles`、`done` の項目) は `/talk` と完全に同じです。
+違いは入力だけで、文字起こしをしないため `transcript` は空文字、`timings` に `stt_ms` がありません。
+
+| 項目 | 規則 |
+| --- | --- |
+| 本文 | JPEG 1枚。先頭が SOI (`FF D8`)、末尾が EOI (`FF D9`)。違えば `400` |
+| 大きさ | 512 KiB (524288 バイト) まで。超過・空は `413` (`image_too_large_or_empty`) |
+| MIME | `image/jpeg` のみ。違えば `415` (`expected_image_jpeg`) |
+| 同時処理 | `/talk` と共有の1件。会話の処理中に `/look` が来れば `409`、逆も同じ |
+| `Origin` 付き | `403` (`/talk` と同じく本体専用) |
+
+エージェントへの問いは固定文で、`stackee_server.py` の `LOOK_PROMPT` にあります:
+
+> ユーザーが stackee のカメラで今撮った写真です。何が写っているかを見て、短く話しかけてください。
+
+写真は音声会話と**同じ会話** (Codex のスレッド / Claude のセッション) に入ります。
+後の音声会話で「さっきの写真」と言えば通じます。返答は `/talk` と同じ経路で
+URL 除去・文ごとの合成・長さ調整・音量制限・字幕化をしてから返します。
+写真はファイルに書かず、メモリから直接エージェントへ渡します。
+
+- Codex: `turn/start` の `input` に文字と並べて `{"type": "image", "url": "data:image/jpeg;base64,..."}`
+  を入れます (app-server の `UserInput` の `image`。`codex app-server generate-json-schema` の
+  `TurnStartParams` で確認)。読み取り専用サンドボックスに画像を読ませる必要はありません。
+- Claude: 写真のときだけ `claude -p` に `--input-format stream-json` を付け、標準入力へ
+  `{"type":"user","message":{"role":"user","content":[文字, {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":...}}]}}`
+  を1行で渡します。CLI の制約で出力も `--output-format stream-json --verbose` になり、
+  最後の `result` 行を従来の `json` 出力と同じように読みます。道具は Web 検索と Web 取得のままで、
+  `Read` は許可しません。`--resume` で同じ会話を続けます。
+
+写真はエージェントの会話履歴 (Codex は `~/.codex`、Claude Code は `~/.claude/projects/`) に残ります。
+`--echo` のときはエージェントを呼ばず「写真を受け取りました。<n>キロバイトです。」と答えます。
 
 ## 後で外でも使う場合
 
@@ -310,7 +347,7 @@ python3 -m unittest discover -s server -p 'test_*.py'
 ```
 
 音声形式、無音、エージェントの最終出力、返答の長さ調整、会話のリセット、プロセスのタイムアウト、HTTP受付から音声取得、
-処理の競合、失敗・期限切れ、会話の継続・再開・二重起動防止に加えて、
+処理の競合、失敗・期限切れ、`/look` の受付・形式検査・`/talk` との `409` 共有・偽エージェントへの写真の受け渡し、会話の継続・再開・二重起動防止に加えて、
 Codex と Claude の会話が別々に保たれること、旧形式の設定・会話 ID の移行、
 存在しない会話 ID での再開が失敗しても保存が壊れないこと、管理 API の検証・保護を確認します。
 通常のテストは偽のエージェントを使い、実際の Codex / Claude を呼びません。
@@ -321,3 +358,13 @@ python3 server/check_agent.py
 ```
 
 本番とは別の試験用会話で、同じ PID での2往復、再起動後の記憶、指示変更の適用を検証します。
+
+写真の受け渡しは `--image` で確かめます。`/look` と同じ固定文で写真を見せた後、
+同じ会話で「さっきの写真」について文字だけで質問します。音声合成・再生はしません。
+
+```sh
+python3 server/check_agent.py --image test.jpg --agent codex --agent-dir /path/to/test-agent
+python3 server/check_agent.py --image test.jpg --agent claude --agent-dir /path/to/test-agent
+```
+
+`--agent-dir` を省くと一時フォルダで試します。本番の `server/agent/` は指定できません。
