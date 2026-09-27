@@ -303,6 +303,40 @@ static void cleanup(stackee_talk_t *t) {
 
 static void watch_backoff(stackee_talk_t *t, const char *why);
 
+// 常時ポーリングの発話が借りる「直近の往復」の値を写す / 戻す。
+// ★ 発話 (頼まれていないもの) で talk.status・camera.look_status の reply・
+//   音の長さ・各段の時刻が書き換わると、直前の会話・画像の結末が読めなく
+//   なる (error の文言・結末・looks_done などはそもそも触らない)。
+static void watch_keep_save(stackee_talk_t *t) {
+    snprintf(t->watch_keep.reply, sizeof(t->watch_keep.reply), "%s", t->reply);
+    t->watch_keep.reply_len = t->reply_len;
+    t->watch_keep.audio_samples = t->audio_samples;
+    t->watch_keep.audio_duration_ms = t->audio_duration_ms;
+    t->watch_keep.turn_started = t->turn_started;
+    t->watch_keep.reply_ready_ms = t->reply_ready_ms;
+    t->watch_keep.audio_ready_ms = t->audio_ready_ms;
+    t->watch_keep.play_setup_ms = t->play_setup_ms;
+}
+
+static void watch_keep_restore(stackee_talk_t *t) {
+    snprintf(t->reply, sizeof(t->reply), "%s", t->watch_keep.reply);
+    t->reply_len = t->watch_keep.reply_len;
+    t->audio_samples = t->watch_keep.audio_samples;
+    t->audio_duration_ms = t->watch_keep.audio_duration_ms;
+    t->turn_started = t->watch_keep.turn_started;
+    t->reply_ready_ms = t->watch_keep.reply_ready_ms;
+    t->audio_ready_ms = t->watch_keep.audio_ready_ms;
+    t->play_setup_ms = t->watch_keep.play_setup_ms;
+}
+
+// 画像の往復が error / ignored で終わった (結末を 1 度だけ残す)。
+static void look_failed(stackee_talk_t *t, const char *result) {
+    if (t->look && t->look_result == NULL) {
+        t->look_result = result;
+        t->looks_failed++;
+    }
+}
+
 static void fail(stackee_talk_t *t, const char *why) {
     if (t->watch_say) {
         // ★ 常時ポーリングで受けた発話の失敗。ユーザーが頼んだものではない
@@ -312,12 +346,14 @@ static void fail(stackee_talk_t *t, const char *why) {
         logf_(t, "[inbox] 発話を扱えませんでした: %s", why);
         cleanup(t);
         t->watch_say = false;
+        watch_keep_restore(t);
         to(t, STACKEE_TALK_IDLE);
         watch_backoff(t, why);
         return;
     }
     snprintf(t->error, sizeof(t->error), "%s", why);
     t->errors++;
+    look_failed(t, "error");
     // マイクの復帰は必ず試す (stackee_halfduplex の 7..9 段と同じ気持ち)。
     t->ops->record_end();
     cleanup(t);
@@ -521,6 +557,9 @@ static void begin_turn(stackee_talk_t *t, bool look) {
     t->audio_samples = 0;
     t->audio_duration_ms = 0;
     t->look = look;
+    if (look) {
+        t->look_result = NULL;  // 途中
+    }
     t->cstm = false;            // CSTM は stackee_talk_cstm() が立て直す
 }
 
@@ -700,12 +739,31 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
         start_audio(t);
         return;
     }
-    if (strcmp(state, "error") == 0 || strcmp(state, "ignored") == 0) {
+    if (strcmp(state, "error") == 0) {
+        // ★ サーバー側の失敗 (音声合成が 500 など)。通信の失敗と同じく
+        //   **会話エラー** として残す: error に文言・errors を数え・画面に
+        //   「会話エラー: …」・画像なら結末 "error"。
+        //   (2026-09-27 まで ignored と同じ扱いで error が空のまま終わり、
+        //   camera.look_status から結末が読めなかった)
+        char message[STACKEE_TALK_TEXT_MAX - 24];
+        if (!stackee_json_str(json, "error", message, sizeof(message)) ||
+            message[0] == '\0') {
+            snprintf(message, sizeof(message), "サーバーで処理できませんでした");
+        }
+        close_http(t);
+        fail(t, message);
+        if (t->cstm_active) {
+            t->cstm_final = "error";
+        }
+        return;
+    }
+    if (strcmp(state, "ignored") == 0) {
         char message[STACKEE_TALK_TEXT_MAX];
         if (!stackee_json_str(json, "error", message, sizeof(message))) {
             snprintf(message, sizeof(message), "音声を認識できませんでした");
         }
         t->ignored++;
+        look_failed(t, "ignored");
         close_http(t);
         cleanup(t);
         to(t, STACKEE_TALK_IDLE);
@@ -819,7 +877,9 @@ static void notice_step(stackee_talk_t *t) {
     if (!t->notice_on) {
         return;
     }
-    if (t->state != STACKEE_TALK_IDLE) {
+    // ★ 常時ポーリングの play=0 (数えるだけ) の発話は帯に触らない。その間に
+    //   知らせを見捨てると、消す人が居なくなって帯に残り続ける。
+    if (t->state != STACKEE_TALK_IDLE && !(t->watch_say && !t->say_play)) {
         t->notice_on = false;   // 次の往復が帯を持った (案内が上書きしている)
         return;
     }
@@ -967,6 +1027,7 @@ static void say_finished(stackee_talk_t *t, bool played) {
               (unsigned long)t->inbox_seq, (long)t->audio_samples * 2,
               t->page_count, played ? 1 : 0, (unsigned long)t->watch_received);
         t->watch_say = false;
+        watch_keep_restore(t);
     } else {
         logf_(t, "[cstm-say] {\"n\":%lu,\"seq\":%lu,\"audio_bytes\":%ld,"
                  "\"sub_pages\":%d,\"played\":%d}",
@@ -1379,13 +1440,13 @@ static void watch_handle(stackee_talk_t *t, int status, const char *json) {
         logf_(t, "[inbox] 発話を受けた (seq %ld, play=%d)", seq,
               t->watch_play ? 1 : 0);
         // 状態機械に渡す。★ 通信 (受信バッファ) の持ち主もここで移る。
+        // ★ 直前の会話・画像・CSTM の結末 (error・look・cstm・結末の数) には
+        //   触らない。借りる値 (reply など) は写しておき、扱い終えたら戻す。
+        watch_keep_save(t);
         t->watch_say = true;
         t->watch_phase = STACKEE_TALK_WATCH_SAY;
-        t->look = false;
-        t->cstm = false;
         t->inbox_loop = false;
         t->say_play = t->watch_play;
-        t->error[0] = '\0';
         t->turn_started = now(t);
         t->http_open = true;
         take_say(t, json);
@@ -1709,6 +1770,7 @@ static void talk_step_inner(stackee_talk_t *t) {
                 if (t->look) {
                     t->looks_done++;
                     t->looks_unplayed++;
+                    t->look_result = "done";
                 }
                 cleanup(t);
                 to(t, STACKEE_TALK_IDLE);
@@ -1756,6 +1818,7 @@ static void talk_step_inner(stackee_talk_t *t) {
             t->turns++;
             if (t->look) {
                 t->looks_done++;
+                t->look_result = "done";
             }
             cleanup(t);
             to(t, STACKEE_TALK_IDLE);

@@ -1813,7 +1813,13 @@ size_t stackee_audio_look_json(char *buf, size_t cap, size_t at) {
              (unsigned long)t->looks_unplayed, http.status,
              atomic_load(&a.null_out) ? "true" : "false");
     at = put_json_str(buf, cap, at, t->reply);
-    at = put(buf, cap, at, "\",\"error\":\"");
+    // result: 直近の画像の往復の結末 (none = まだ無い / pending = 途中 /
+    //   done / error / ignored)。
+    at = put(buf, cap, at,
+             "\",\"result\":\"%s\",\"looks_failed\":%lu,\"error\":\"",
+             t->look_result ? t->look_result
+                            : (t->looks == 0 ? "none" : "pending"),
+             (unsigned long)t->looks_failed);
     at = put_json_str(buf, cap, at, t->error);
     at = put(buf, cap, at, "\"}");
     talk_unlock();

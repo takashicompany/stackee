@@ -2640,5 +2640,262 @@ cstmprint
         self.assertEqual((info['says'], info['count']), (0, 0))
 
 
+def look_tail(text):
+    """lookprint の最後の行から空白を含む screen= と error= を取り出す。"""
+    rows = re.findall(r'^LOOKINFO .* screen=(.*) error=(.*)$', text, re.M)
+    assert rows, text
+    return {'screen': rows[-1][0], 'error': rows[-1][1]}
+
+
+SERVER_500 = '{"state":"error","error":"HTTP Error 500: Internal Server Error"}'
+
+
+class ServerErrorTest(unittest.TestCase):
+    """サーバーが state:error で終えた往復 (2026-09-27 実機の回帰)。
+
+    /look で音声合成が 500 → ジョブが state:error。本体は error を空のまま
+    idle に戻り、looks_done も増えず、camera.look_status から結末が読めな
+    かった。期待: error に文言・errors を数える・画面に「会話エラー: …」・
+    画像の結末は "error"。そのあと常時ポーリング (受け箱の見張り) が発話を
+    受けても、それらが消えないこと。
+    """
+
+    # 受け箱の見張りを先に回しておく (実機と同じ)。seq を取ったあとの
+    # ロングポーリングは 60 秒握らせ、カメラの押さえ (reserve) が打ち切る。
+    WATCHING = """
+respdelay 10
+resp 200 %s
+watch 1 0
+t 5
+respdelay 60000
+t 20
+respdelay 10
+""" % EMPTY7
+
+    # 往復が終わったあとで見張りが受ける発話 (play=0: 数えるだけ)。
+    # ★ 偽の通信は応答を順に配るだけなので、往復の間は見張りを止めて
+    #   (watchok 0) おき、往復の結末を読んでから応答を積んで再開する。
+    AFTER = """
+resp 200 %s
+resp 200 PCM:3200
+resp 200 %s
+watchok 1
+t 500
+""" % (WSAY8, WEMPTY9)
+
+    def look_error(self, after=True):
+        return run(self.WATCHING + """
+resp 202 %s
+resp 200 %s
+reserve
+watchok 0
+look 1000 0
+t 3000
+lookprint
+""" % (LOOK_ACCEPT, SERVER_500) + (self.AFTER + 'lookprint\nwatchprint\n'
+                                   if after else ''))
+
+    def test_look_error_is_recorded_as_an_error(self):
+        out = self.look_error(after=False)
+        self.assertIn('HABORT', out)                   # 見張りは打ち切られた
+        info = look_info(out)
+        self.assertEqual((info['looks'], info['done'], info['failed']), (1, 0, 1))
+        self.assertEqual(info['result'], 'error')
+        self.assertEqual((info['errors'], info['ignored']), (1, 0))
+        self.assertEqual(info['busy'], 0)
+        tail = look_tail(out)
+        self.assertEqual(tail['error'], 'HTTP Error 500: Internal Server Error')
+        self.assertEqual(tail['screen'],
+                         '会話エラー: HTTP Error 500: Internal Server Error')
+        self.assertIn('SHOW 会話エラー: HTTP Error 500', out)
+        self.assertNotRegex(out, r'(?m)^(ACK|PLAY) ')  # 音なし
+
+    def test_look_error_survives_the_inbox_watcher(self):
+        out = self.look_error()
+        w = watch_info(out)
+        self.assertEqual(w['received'], 1)             # 見張りは発話を受けた
+        self.assertIn('/inbox/8/audio', paths(out))
+        rows = re.findall(r'^LOOKINFO (.*)$', out, re.M)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], rows[1])             # 1 文字も変わらない
+        info = look_info(out)
+        self.assertEqual((info['result'], info['failed'], info['look']),
+                         ('error', 1, 1))
+        self.assertEqual(look_tail(out)['error'],
+                         'HTTP Error 500: Internal Server Error')
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+
+    def test_look_done_result_survives_the_inbox_watcher(self):
+        # play=1 の見張りが鳴らしても、直前の画像の reply / 音の長さ /
+        # 各段の時刻 / 結末はそのまま (画面の 1 行は発話が持ってよい)。
+        out = run(self.WATCHING + """
+resp 202 %s
+resp 200 %s
+resp 200 PCM:16000
+reserve
+watchok 0
+look 12345 0
+t 3000
+lookprint
+watch 1 1
+resp 200 %s
+resp 200 PCM:3200
+resp 200 %s
+watchok 1
+t 800
+lookprint
+watchprint
+""" % (LOOK_ACCEPT, LOOK_DONE, WSAY8, WEMPTY9))
+        self.assertIn('PLAY 3200', out)                # 発話は鳴った
+        self.assertEqual(watch_info(out)['played'], 1)
+        rows = [r.split(' screen=')[0]
+                for r in re.findall(r'^LOOKINFO (.*)$', out, re.M)]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], rows[1])
+        info = look_info(out)
+        self.assertEqual((info['result'], info['done'], info['unplayed']),
+                         ('done', 1, 1))
+        self.assertEqual(info['audio_bytes'], 32000)
+        self.assertEqual(info['reply_len'], len('りんごが見えるのだ'.encode()))
+
+    def test_look_ignored_is_a_result_too(self):
+        out = run(self.WATCHING + """
+resp 202 %s
+resp 200 {"state":"ignored","error":"見えませんでした"}
+reserve
+look 1000 0
+t 3000
+lookprint
+""" % LOOK_ACCEPT)
+        info = look_info(out)
+        self.assertEqual((info['result'], info['failed'], info['done']),
+                         ('ignored', 1, 0))
+        self.assertEqual((info['errors'], info['ignored']), (0, 1))
+        self.assertEqual(look_tail(out)['error'], '-')
+        self.assertIn('SHOW 見えませんでした', out)
+
+    def test_look_transport_failure_is_an_error_result(self):
+        out = run(self.WATCHING + """
+resp 202 %s
+resperr
+reserve
+look 1000 0
+t 3000
+lookprint
+""" % LOOK_ACCEPT)
+        info = look_info(out)
+        self.assertEqual((info['result'], info['failed']), ('error', 1))
+        self.assertIn('通信に失敗', look_tail(out)['error'])
+
+    def test_a_talk_turn_does_not_touch_the_last_look_result(self):
+        out = run(self.WATCHING + """
+resp 202 %s
+resp 200 %s
+reserve
+look 1000 0
+t 3000
+watch 0
+resp 202 %s
+resp 200 %s
+resp 200 PCM:16000
+ackms 1
+mic 40
+press
+t 400
+release
+t 4000
+lookprint
+""" % (LOOK_ACCEPT, SERVER_500, ACCEPT_BODY, DONE_BODY))
+        info = look_info(out)
+        self.assertEqual((info['look'], info['result'], info['failed']),
+                         (0, 'error', 1))
+        self.assertEqual(look_tail(out)['error'], '-')   # 新しい往復は成功
+
+    def test_talk_error_is_recorded_and_survives_the_watcher(self):
+        out = run('mic 40\nackms 1\n' + self.WATCHING + """
+resp 202 %s
+resp 200 %s
+press
+watchok 0
+t 400
+release
+t 3000
+print
+""" % (ACCEPT_BODY, SERVER_500) + self.AFTER + 'print\nlookprint\nwatchprint\n')
+        self.assertIn('SHOW 会話エラー: HTTP Error 500', out)
+        rows = prints(out)
+        self.assertEqual(rows[0]['state'], 'idle')
+        self.assertEqual(rows[0]['error'], 'HTTP Error 500: Internal Server Error')
+        self.assertEqual(rows[1]['error'], rows[0]['error'])
+        self.assertEqual(rows[1]['reply'], rows[0]['reply'])
+        self.assertEqual(watch_info(out)['received'], 1)
+        info = look_info(out)
+        self.assertEqual((info['errors'], info['ignored'], info['result']),
+                         (1, 0, '-'))       # 画像の往復は 1 度も無い
+
+    def test_talk_ignored_is_still_not_an_error(self):
+        out = run("""
+ackms 1
+respdelay 10
+resp 202 %s
+resp 200 {"state":"ignored","error":"音声を認識できませんでした"}
+mic 40
+press
+t 400
+release
+t 4000
+print
+lookprint
+""" % ACCEPT_BODY)
+        self.assertEqual(last_print(out)['error'], '')
+        info = look_info(out)
+        self.assertEqual((info['errors'], info['ignored']), (0, 1))
+
+    def test_an_error_without_a_message_still_says_something(self):
+        out = run("""
+ackms 1
+respdelay 10
+resp 202 %s
+resp 200 {"state":"error"}
+mic 40
+press
+t 400
+release
+t 4000
+print
+""" % ACCEPT_BODY)
+        self.assertEqual(last_print(out)['error'], 'サーバーで処理できませんでした')
+
+    def test_cstm_prompt_error_is_recorded_and_survives_the_watcher(self):
+        out = run(self.WATCHING + """
+resp 202 %s
+resp 200 %s
+cstm 9 0
+watchok 0
+t 3000
+cstmprint
+""" % (PROMPT_ACCEPT, SERVER_500) + self.AFTER + """
+cstmprint
+watchprint
+t 3000
+""")
+        # seq は受け箱と共有 (見張りが進める) なので比べない。
+        rows = [re.sub(r' seq=\d+', '', r)
+                for r in re.findall(r'^CSTMINFO (.*)$', out, re.M)]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], rows[1])
+        info = cstm_info(out)
+        self.assertEqual((info['final'], info['errors'], info['active']),
+                         ('error', 1, 0))
+        self.assertEqual(info['error'], 'HTTP Error 500: Internal Server Error')
+        self.assertIn('SHOW 会話エラー: HTTP Error 500', out)
+        self.assertEqual(watch_info(out)['received'], 1)
+        # 帯の「会話エラー」の知らせは、見張りの発話 (play=0) を挟んでも
+        # 置き去りにならず、2.5 秒で消える。
+        subs = subtitles(out)
+        self.assertTrue(any(s.startswith('会話エラー') for s in subs), subs)
+        self.assertEqual(subs[-1], '-')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

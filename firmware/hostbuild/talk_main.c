@@ -528,7 +528,8 @@ int main(void) {
         } else if (strcmp(line, "lookprint") == 0) {
             printf("LOOKINFO look=%d play=%d reserved=%d busy=%d job=%s "
                    "reply_len=%d audio_bytes=%d bytes=%u looks=%u done=%u "
-                   "unplayed=%u complete_ms=%u audio_ready_ms=%u error=%s\n",
+                   "unplayed=%u complete_ms=%u audio_ready_ms=%u result=%s "
+                   "failed=%u errors=%u ignored=%u screen=%s error=%s\n",
                    g_talk.look ? 1 : 0, g_talk.look_play ? 1 : 0,
                    g_talk.look_reserved ? 1 : 0,
                    stackee_talk_busy(&g_talk) ? 1 : 0,
@@ -537,6 +538,10 @@ int main(void) {
                    (unsigned)g_talk.looks, (unsigned)g_talk.looks_done,
                    (unsigned)g_talk.looks_unplayed,
                    (unsigned)g_talk.complete_ms, (unsigned)g_talk.audio_ready_ms,
+                   g_talk.look_result ? g_talk.look_result : "-",
+                   (unsigned)g_talk.looks_failed, (unsigned)g_talk.errors,
+                   (unsigned)g_talk.ignored,
+                   g_talk.screen[0] ? g_talk.screen : "-",
                    g_talk.error[0] ? g_talk.error : "-");
         } else if (strcmp(line, "cstm") == 0) {
             int n = arg ? atoi(arg) : 0;

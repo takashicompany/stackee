@@ -241,6 +241,10 @@ def _check_look_body(client, result, warmup, verbose):
     result['look_before'] = before
     seq0 = before.get('seq', 0)
     done0 = (before.get('talk') or {}).get('looks_done', 0) or 0
+    # ★ error / ignored で終わった往復も待ち切らずに拾う (2026-09-27 以降の
+    #   ファームは talk.result と talk.looks_failed を出す。古いものは
+    #   talk.error だけが頼り)。
+    failed0 = (before.get('talk') or {}).get('looks_failed', 0) or 0
     start = client.request('camera.look', timeout=5.0, play=0, warmup=warmup)
     result['look_start'] = start
     if start.get('error'):
@@ -263,7 +267,9 @@ def _check_look_body(client, result, warmup, verbose):
         if mine and phase in ('ignored', 'error'):
             break
         if mine and phase == 'submitted' and talk.get('state') == 'idle' and (
-                (talk.get('looks_done', 0) or 0) > done0 or talk.get('error')):
+                (talk.get('looks_done', 0) or 0) > done0 or
+                (talk.get('looks_failed', 0) or 0) > failed0 or
+                talk.get('error')):
             break
         time.sleep(1.0)
     result['look_status'] = last
@@ -595,10 +601,11 @@ def verdicts(result, args):
                   (talk.get('reply_len', 0) or 0) > 0 and
                   (talk.get('audio_bytes', 0) or 0) > 0)
             out.append(('画像 撮影 → /look → 返答 PCM', ok,
-                        'phase=%s job=%s reply_len=%s audio_bytes=%s '
+                        'phase=%s result=%s job=%s reply_len=%s audio_bytes=%s '
                         '(%s ms) 撮影 %s ms / 渡す %s ms / 各段 %s / %s 秒 / '
                         'error="%s" look_err="%s"'
-                        % ((look or {}).get('phase'), talk.get('job_id'),
+                        % ((look or {}).get('phase'), talk.get('result'),
+                           talk.get('job_id'),
                            talk.get('reply_len'), talk.get('audio_bytes'),
                            talk.get('audio_ms'), (look or {}).get('capture_ms'),
                            (look or {}).get('submit_ms'),

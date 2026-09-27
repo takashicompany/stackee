@@ -443,6 +443,12 @@ typedef struct {
     uint32_t looks;             // 画像の往復を始めた回数
     uint32_t looks_done;        // そのうち最後まで行った回数 (鳴らさず止めたものを含む)
     uint32_t looks_unplayed;    // play=0 で再生の直前に止めた回数
+    // 直近の画像の往復の結末。NULL = 途中 (またはまだ無い) / "done" /
+    // "error" (サーバーの state:error・通信の失敗など) / "ignored"。
+    // ★ 2026-09-27: サーバーが state:error を返したとき、どこにも結末が
+    //   残らず camera.look_status が submitted のまま止まって見えた。
+    const char *look_result;
+    uint32_t looks_failed;      // error / ignored で終わった回数
     int      reply_len;         // 返答文の長さ [B] (t->reply に入ったぶん)
 
     // 案内の字幕。文面は差し替えられるようにしておく (将来 settings から)。
@@ -511,6 +517,16 @@ typedef struct {
     uint32_t watch_skipped;     // 見たことのある seq で飛ばした数
     int      watch_status;      // 直近の HTTP の status
     char     watch_error[96];   // 直近のエラー
+    // ★ 常時ポーリングの発話は reply / 音の長さ / 各段の時刻を借りて使う。
+    //   talk.status と camera.look_status は「直近にユーザーが頼んだ往復」を
+    //   読むので、発話を扱う前に写しておき、扱い終えたら戻す。
+    struct {
+        char     reply[STACKEE_TALK_TEXT_MAX];
+        int      reply_len;
+        int      audio_samples, audio_duration_ms;
+        uint32_t turn_started;
+        uint32_t reply_ready_ms, audio_ready_ms, play_setup_ms;
+    } watch_keep;
 } stackee_talk_t;
 
 // 再生位置 [ms] に出すページの番号。無ければ -1。

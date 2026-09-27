@@ -2232,12 +2232,22 @@ SOF の寸法) を確かめる。ALDO3 が落ちていることも見る。
 | コマンド | 中身 |
 |---|---|
 | `camera.look` `{"play":0,"warmup":30}` | キーと同じ流れを起こす。**非同期** (すぐ返る)。**`play` の既定は 0** = 返答の PCM を受け取り終えたところで止め、**一次回答も返答も鳴らさない**。`play:1` でキーと同じく鳴らす |
-| `camera.look_status` | `phase` (`starting` / `capturing` / `submitted` / `ignored` / `error`)、`seq`、`capture_ms` / `submit_ms`、`jpeg_bytes`、`aldo3`、`look_err`、`ignored` / `refused` / `capture_failed` / `submit_failed`、`talk:{state, look, play, reserved, job, job_id, look_bytes, reply_len, reply, audio_bytes, audio_ms, polls, t:{accepted, reply_ready, audio_ready, play_setup, complete}, looks, looks_done, looks_unplayed, http_status, null, error}` |
+| `camera.look_status` | `phase` (`starting` / `capturing` / `submitted` / `ignored` / `error`)、`seq`、`capture_ms` / `submit_ms`、`jpeg_bytes`、`aldo3`、`look_err`、`ignored` / `refused` / `capture_failed` / `submit_failed`、`talk:{state, look, play, reserved, job, job_id, look_bytes, reply_len, reply, audio_bytes, audio_ms, polls, t:{accepted, reply_ready, audio_ready, play_setup, complete}, looks, looks_done, looks_unplayed, http_status, null, result, looks_failed, error}` |
 
 `talk.t` の各 ms は**受け付けた瞬間 (JPEG を写したとき) から**の累積。
 `play:0` では `play_setup` は 0 のまま、`complete` は PCM を受け取り終えた
 時刻。終わりの見分け方: `phase=="submitted"` かつ `talk.state=="idle"` かつ
 `talk.looks_done` が増えた (失敗なら `talk.error` に理由)。
+`talk.result` は直近の画像の往復の結末 (`none` / `pending` / `done` / `error` /
+`ignored`)。error / ignored で終わると `talk.looks_failed` が増える。
+★ サーバーのジョブが `{"state":"error"}` で終わったら (音声合成の 500 など)、
+会話・画像・CSTM の prompt 方式のどれでも**会話エラー**として扱う:
+`talk.error` に文言、`errors` を数え、画面に「会話エラー: …」
+(2026-09-27 まで `ignored` と同じ扱いで `error` が空のまま終わり、
+画像では結末がどこにも残らなかった)。`{"state":"ignored"}` は従来どおり
+`ignored` を数えて文言を出すだけ (`error` は空)。
+★ 常時ポーリング (§17-2e) が発話を受けても、直前の往復の `error`・`look`・
+`reply`・音の長さ・各段の時刻・結末は書き換えない (扱い終えたら戻す)。
 `talk.status` にも `look` / `look_reserved` / `looks` が出る。
 ログには会話と同じ `[talk-turn-timing]` が出て、末尾に `"look":1,"played":0|1`。
 
