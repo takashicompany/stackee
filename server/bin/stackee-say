@@ -4,7 +4,7 @@
 The text is queued in the voice server's inbox and the device picks it up and speaks it
 (or, with --no-voice, only shows it as captions). Without a text argument the text is
 read from standard input. The server is STACKEE_SAY_URL, which the server sets for the
-commands it runs for CSTM keys (default http://127.0.0.1:8766/say). Only a process on the
+commands it runs for Custom keys (default http://127.0.0.1:8766/say). Only a process on the
 server's own machine may use it. Exit status is 0 once the utterance is queued, else 1
 (2 for a usage error).
 """

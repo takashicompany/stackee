@@ -34,8 +34,8 @@
 //   lookpath <path>   "/talk" → "/look" の置き換えだけを聞く。LOOKPATH <結果|->
 //   lookprint         画像の往復の様子 (LOOKINFO …)
 //   init <path>       STACKEE_TALK_URL のパスを変えて作り直す (空 = 未設定)
-//   cstm <n> <play>   CSTM_n を押したのと同じ流れ (stackee_talk_cstm)。CSTM <0|1>
-//   cstmprint         CSTM の様子 (CSTMINFO …)
+//   custom <n> <play>   Custom_n を押したのと同じ流れ (stackee_talk_custom)。Custom <0|1>
+//   customprint         Custom の様子 (CUSTOMINFO …)
 //   saylog            受け取った発話の記録 (SAY …、1 件 1 行)
 //   sibling <path> <name>  "/talk" → "/<name>" の置き換え。SIBLING <結果|->
 //   wrap <cols> <lines> <text>  帯の折り返し。WRAP <行数> <\n で繋いだ結果>
@@ -543,30 +543,30 @@ int main(void) {
                    (unsigned)g_talk.ignored,
                    g_talk.screen[0] ? g_talk.screen : "-",
                    g_talk.error[0] ? g_talk.error : "-");
-        } else if (strcmp(line, "cstm") == 0) {
+        } else if (strcmp(line, "custom") == 0) {
             int n = arg ? atoi(arg) : 0;
             char *second = arg ? strchr(arg, ' ') : NULL;
             bool play = second ? atoi(second + 1) != 0 : true;
-            printf("CSTM %d\n", stackee_talk_cstm(&g_talk, n, play) ? 1 : 0);
-        } else if (strcmp(line, "cstmprint") == 0) {
-            printf("CSTMINFO active=%d n=%d play=%d mode=%s final=%s job=%s "
+            printf("Custom %d\n", stackee_talk_custom(&g_talk, n, play) ? 1 : 0);
+        } else if (strcmp(line, "customprint") == 0) {
+            printf("CUSTOMINFO active=%d n=%d play=%d mode=%s final=%s job=%s "
                    "jobstate=%s says=%u polls=%d seq=%u seqvalid=%d reused=%d "
                    "busy=%u count=%u done=%u ignored=%u errors=%u "
                    "seq_ms=%u key_ms=%u first_say_ms=%u end_ms=%u "
                    "loop=%d uses_audio=%d talkbusy=%d notice=%d error=%s\n",
-                   g_talk.cstm_active ? 1 : 0, g_talk.cstm_n,
-                   g_talk.cstm_play ? 1 : 0,
-                   g_talk.cstm_mode ? stackee_talk_cstm_mode_names[g_talk.cstm_mode] : "-",
-                   g_talk.cstm_final ? g_talk.cstm_final : "-",
-                   g_talk.cstm_job[0] ? g_talk.cstm_job : "-",
-                   g_talk.cstm_job_state[0] ? g_talk.cstm_job_state : "-",
+                   g_talk.custom_active ? 1 : 0, g_talk.custom_n,
+                   g_talk.custom_play ? 1 : 0,
+                   g_talk.custom_mode ? stackee_talk_custom_mode_names[g_talk.custom_mode] : "-",
+                   g_talk.custom_final ? g_talk.custom_final : "-",
+                   g_talk.custom_job[0] ? g_talk.custom_job : "-",
+                   g_talk.custom_job_state[0] ? g_talk.custom_job_state : "-",
                    (unsigned)g_talk.says, g_talk.inbox_polls,
                    (unsigned)g_talk.inbox_seq, g_talk.inbox_seq_valid ? 1 : 0,
-                   g_talk.cstm_seq_reused ? 1 : 0, (unsigned)g_talk.cstm_busy,
-                   (unsigned)g_talk.cstm_count, (unsigned)g_talk.cstm_done,
-                   (unsigned)g_talk.cstm_ignored, (unsigned)g_talk.cstm_errors,
-                   (unsigned)g_talk.cstm_seq_ms, (unsigned)g_talk.cstm_key_ms,
-                   (unsigned)g_talk.cstm_first_say_ms, (unsigned)g_talk.cstm_end_ms,
+                   g_talk.custom_seq_reused ? 1 : 0, (unsigned)g_talk.custom_busy,
+                   (unsigned)g_talk.custom_count, (unsigned)g_talk.custom_done,
+                   (unsigned)g_talk.custom_ignored, (unsigned)g_talk.custom_errors,
+                   (unsigned)g_talk.custom_seq_ms, (unsigned)g_talk.custom_key_ms,
+                   (unsigned)g_talk.custom_first_say_ms, (unsigned)g_talk.custom_end_ms,
                    g_talk.inbox_loop ? 1 : 0,
                    stackee_talk_uses_audio(&g_talk) ? 1 : 0,
                    stackee_talk_busy(&g_talk) ? 1 : 0, g_talk.notice_on ? 1 : 0,

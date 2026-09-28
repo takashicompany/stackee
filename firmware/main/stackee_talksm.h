@@ -19,9 +19,9 @@
 //   送り先は STACKEE_TALK_URL の末尾 "/talk" を "/look" にしたもの。
 //   受理より後ろは会話の道をそのまま歩く (二重に実装しない)。
 //
-// stackee 独自キー CSTM_0〜CSTM_9 (2026-09-27、key.cstm):
+// stackee 独自キー Custom_0〜Custom_9 (2026-09-27、key.custom):
 //   GET  /inbox                 → {"state":"empty","seq":N}  (最後に見た seq の初期値)
-//   POST /key (application/json) {"key":"CSTM_3"}
+//   POST /key (application/json) {"key":"Custom_3"}
 //                               → 200 {"state":"ignored"}      未設定 (音なし)
 //                               → 202 {id,status_url,mode:"prompt"}  /look と同じ後半
 //                               → 202 {id,status_url,mode:"command"} 受け箱を回す
@@ -33,10 +33,10 @@
 //     (第 2 段で「暇なときに常に回す」ときに同じ部品を使う)。
 //
 // 暇なときに受け箱を見る (常時ポーリング、2026-09-27、inbox.status):
-//   会話・写真・CSTM のどれもしておらず、Wi-Fi が上がっている間
+//   会話・写真・Custom のどれもしておらず、Wi-Fi が上がっている間
 //   GET /inbox (起動時・再接続時。最新 seq を得るだけで、それより前は鳴らさない)
 //   GET /inbox?after=<seq>&wait=25   を回し続ける。"say" が来たら
-//   CSTM のコマンドと同じ部品で 1 件鳴らす / 字幕を出す。
+//   Custom のコマンドと同じ部品で 1 件鳴らす / 字幕を出す。
 //   ★ 待っている間は状態機械は idle のまま (busy ではない)。キーは最優先で、
 //     押した瞬間に待ちを打ち切る (通信側がソケットを shutdown して起こす)。
 //     断るのは発話を扱っている間だけ。
@@ -135,7 +135,7 @@ typedef enum {
     STACKEE_TALK_LOOK_ERROR,    // 送れない (URL 未設定・Wi-Fi なし)。画面に出した
 } stackee_talk_look_reserve_t;
 
-// ---- stackee 独自キー CSTM_0〜CSTM_9 (POST /key + 受け箱、2026-09-27) ------
+// ---- stackee 独自キー Custom_0〜Custom_9 (POST /key + 受け箱、2026-09-27) ------
 // ★ サーバとの取り決め (変えないこと):
 //   - 送り先は STACKEE_TALK_URL の末尾 "/talk" を "/key" / "/inbox" にしたもの
 //     (/look と同じ規則。Bearer と HTTPS も同じ)。
@@ -144,15 +144,15 @@ typedef enum {
 //     STACKEE_TALK_INBOX_SEQ_TTL_MS より古ければ取り直す (その間に溜まった
 //     古い発話を鳴らさないため)。
 //   - 409 は会話と同じ「サーバーが処理中です」。
-#define STACKEE_TALK_CSTM_COUNT      10
+#define STACKEE_TALK_CUSTOM_COUNT      10
 #define STACKEE_TALK_CTYPE_JSON      "application/json"
 // 受け箱のロングポーリング。★ 中継側の上限 (MAX_WAIT) と揃えること。
 #define STACKEE_TALK_INBOX_WAIT_S    25
 // コマンド方式の全体の上限 [ms]。サーバのコマンドの時間切れ (最大 600 秒)
 // + 余裕 60 秒。起点はコマンドを受理した時刻。
-#define STACKEE_TALK_CSTM_TIMEOUT_MS 660000
+#define STACKEE_TALK_CUSTOM_TIMEOUT_MS 660000
 #define STACKEE_TALK_INBOX_SEQ_TTL_MS 300000
-// 画面の帯に「CSTM_3 未設定」やエラーを出しておく時間 [ms]。
+// 画面の帯に「Custom_3 未設定」やエラーを出しておく時間 [ms]。
 #define STACKEE_TALK_NOTICE_MS       2500
 // 音の無い発話 (字幕だけ) で、最後のページを出しておく時間 [ms]。
 #define STACKEE_TALK_SAY_HOLD_MS     3000
@@ -160,7 +160,7 @@ typedef enum {
 #define STACKEE_TALK_SAY_PAGE_MS     3000
 // 帯の 1 行の字数 (サーバの割り方と同じ 15 桁)。
 #define STACKEE_TALK_BAND_COLS       15
-// key.cstm_status に残す発話の記録 (先頭からこの数まで。数は says に全部)。
+// key.custom_status に残す発話の記録 (先頭からこの数まで。数は says に全部)。
 #define STACKEE_TALK_SAY_LOG         8
 #define STACKEE_TALK_JOB_ID_MAX      64
 
@@ -186,15 +186,15 @@ typedef enum {
 extern const char *const stackee_talk_watch_phase_names[STACKEE_TALK_WATCH_PHASES];
 
 typedef enum {
-    STACKEE_TALK_CSTM_MODE_NONE = 0,    // まだ分からない (受理の前)
-    STACKEE_TALK_CSTM_MODE_PROMPT,      // /look と同じ後半 (返答待ち → 音声)
-    STACKEE_TALK_CSTM_MODE_COMMAND,     // 受け箱を回す
-    STACKEE_TALK_CSTM_MODES,
-} stackee_talk_cstm_mode_t;
+    STACKEE_TALK_CUSTOM_MODE_NONE = 0,    // まだ分からない (受理の前)
+    STACKEE_TALK_CUSTOM_MODE_PROMPT,      // /look と同じ後半 (返答待ち → 音声)
+    STACKEE_TALK_CUSTOM_MODE_COMMAND,     // 受け箱を回す
+    STACKEE_TALK_CUSTOM_MODES,
+} stackee_talk_custom_mode_t;
 
-extern const char *const stackee_talk_cstm_mode_names[STACKEE_TALK_CSTM_MODES];
+extern const char *const stackee_talk_custom_mode_names[STACKEE_TALK_CUSTOM_MODES];
 
-// 受け取った発話 1 件の記録 (key.cstm_status)。
+// 受け取った発話 1 件の記録 (key.custom_status)。
 typedef struct {
     uint32_t seq;
     uint32_t at_ms;         // 押下からこの発話を受け取るまで
@@ -301,7 +301,7 @@ typedef enum {
     STACKEE_TALK_AUDIO,
     STACKEE_TALK_PLAY_WAIT,
     STACKEE_TALK_PLAYING,
-    // ---- CSTM と受け箱 (2026-09-27)。★ 番号を動かさないよううしろに足す ----
+    // ---- Custom と受け箱 (2026-09-27)。★ 番号を動かさないよううしろに足す ----
     STACKEE_TALK_INBOX_SEQ, // GET /inbox (最後に見た seq の初期値を取る)
     STACKEE_TALK_KEY,       // POST /key の応答待ち
     STACKEE_TALK_INBOX_WAIT,// 次の GET /inbox?after= を撃つまで
@@ -455,27 +455,27 @@ typedef struct {
     const char *guide_rec, *guide_think;
     int guide_shown;            // stackee_talk_guide_t
 
-    // ---- CSTM_0〜CSTM_9 (POST /key、2026-09-27) ----
+    // ---- Custom_0〜Custom_9 (POST /key、2026-09-27) ----
     char     key_path[STACKEE_TALK_PATH_MAX];   // "/key"。空 = 作れない
     char     inbox_path[STACKEE_TALK_PATH_MAX]; // "/inbox"。空 = 作れない
-    char     key_body[32];      // {"key":"CSTM_3"}。http_close まで生かす
-    bool     cstm;              // いまの / 直近の往復は CSTM
-    bool     cstm_active;       // CSTM の流れの途中 (押下 → 終わり)
-    bool     cstm_play;         // false = 鳴らす直前で止める (検証用)
-    int      cstm_n;
-    int      cstm_mode;         // stackee_talk_cstm_mode_t
-    char     cstm_job[STACKEE_TALK_JOB_ID_MAX];  // コマンドの id (受け箱の job=)
-    const char *cstm_final;     // NULL (途中) / "done" / "ignored" / "error"
-    char     cstm_job_state[16];// 受け箱が最後に返した job_state
-    uint32_t cstm_started;      // 押下を受けた時刻
-    uint32_t cstm_cmd_started;  // コマンドを受理した時刻 (全体の上限の起点)
-    uint32_t cstm_seq_ms;       // 押下 → GET /inbox (seq) の応答 (使い回したら 0)
-    uint32_t cstm_key_ms;       // 押下 → POST /key の応答
-    uint32_t cstm_first_say_ms; // 押下 → 最初の発話
-    uint32_t cstm_end_ms;       // 押下 → 終わり
-    bool     cstm_seq_reused;   // 覚えていた seq を使った
-    uint32_t cstm_count, cstm_done, cstm_ignored, cstm_errors;
-    uint32_t cstm_busy;         // 処理中に押されて黙って無視した回数
+    char     key_body[32];      // {"key":"Custom_3"}。http_close まで生かす
+    bool     custom;              // いまの / 直近の往復は Custom
+    bool     custom_active;       // Custom の流れの途中 (押下 → 終わり)
+    bool     custom_play;         // false = 鳴らす直前で止める (検証用)
+    int      custom_n;
+    int      custom_mode;         // stackee_talk_custom_mode_t
+    char     custom_job[STACKEE_TALK_JOB_ID_MAX];  // コマンドの id (受け箱の job=)
+    const char *custom_final;     // NULL (途中) / "done" / "ignored" / "error"
+    char     custom_job_state[16];// 受け箱が最後に返した job_state
+    uint32_t custom_started;      // 押下を受けた時刻
+    uint32_t custom_cmd_started;  // コマンドを受理した時刻 (全体の上限の起点)
+    uint32_t custom_seq_ms;       // 押下 → GET /inbox (seq) の応答 (使い回したら 0)
+    uint32_t custom_key_ms;       // 押下 → POST /key の応答
+    uint32_t custom_first_say_ms; // 押下 → 最初の発話
+    uint32_t custom_end_ms;       // 押下 → 終わり
+    bool     custom_seq_reused;   // 覚えていた seq を使った
+    uint32_t custom_count, custom_done, custom_ignored, custom_errors;
+    uint32_t custom_busy;         // 処理中に押されて黙って無視した回数
 
     // ---- 受け箱 (キー押下に縛られない部品。第 2 段の常時ポーリングでも使う) ----
     bool     inbox_loop;        // 受け箱を回している
@@ -489,7 +489,7 @@ typedef struct {
     uint32_t say_until;         // 字幕だけの発話を出し終える時刻 (since からの ms)
     stackee_talk_say_t say_log[STACKEE_TALK_SAY_LOG];
 
-    // ---- 帯に短く出すお知らせ (CSTM の「未設定」とエラー) ----
+    // ---- 帯に短く出すお知らせ (Custom の「未設定」とエラー) ----
     bool     notice_on;
     uint32_t notice_since;
     char     notice[STACKEE_TALK_SUB_BAND_MAX];
@@ -590,7 +590,7 @@ void stackee_talk_step(stackee_talk_t *t);
 bool stackee_talk_busy(const stackee_talk_t *t);
 
 // 状態機械がマイク / スピーカーを使いうるか (USB マイクに明け渡すかの判断)。
-// ★ busy とは別。CSTM のコマンドを待っている間 (受け箱のロングポーリング、
+// ★ busy とは別。Custom のコマンドを待っている間 (受け箱のロングポーリング、
 //   最大 10 分) は busy だが、音は使わないので USB マイクは止めない。
 bool stackee_talk_uses_audio(const stackee_talk_t *t);
 
@@ -622,16 +622,16 @@ bool stackee_talk_look(stackee_talk_t *t, const uint8_t *jpeg, size_t len,
 bool stackee_talk_sibling_path(const char *talk_path, const char *name,
                                char *out, size_t cap);
 
-// ---- stackee 独自キー CSTM_0〜CSTM_9 -----------------------------------------
+// ---- stackee 独自キー Custom_0〜Custom_9 -----------------------------------------
 // 押下 1 回ぶんの流れを始める (GET /inbox → POST /key → …)。呼ぶのは
 // audio タスクだけ。n は 0..9。play=false なら発話・返答の PCM を受け取った
 // ところで止めて鳴らさない (検証用。一次回答も鳴らさない)。
-// ★ 会話・画像・他の CSTM の途中 (録音/送信/待ち/再生、一次回答が鳴っている、
+// ★ 会話・画像・他の Custom の途中 (録音/送信/待ち/再生、一次回答が鳴っている、
 //   STK_TALK を押している、撮影のために押さえている) なら**何もせず** false
-//   (cstm_busy が増える。画面にも何も出さない)。
+//   (custom_busy が増える。画面にも何も出さない)。
 // ★ URL 未設定や Wi-Fi なしで始められないときは、会話と同じ「会話エラー: …」を
 //   出して true を返す (流れとしては始まって、すぐ error で終わった)。
-bool stackee_talk_cstm(stackee_talk_t *t, int n, bool play);
+bool stackee_talk_custom(stackee_talk_t *t, int n, bool play);
 
 // ---- 暇なときに受け箱を見る (常時ポーリング) ---------------------------------
 // on / play を切り替える (inbox.enable)。off にすると待っている要求を打ち切る。
@@ -640,7 +640,7 @@ void stackee_talk_watch_enable(stackee_talk_t *t, bool on, bool play);
 
 // 発話の扱いを含めて「音を使っている」か (stackee_audio_busy に使う)。
 // ★ 常時ポーリングの待ちと、受けた発話の PCM を取っている間は false。
-//   鳴らしている (PLAY_WAIT / PLAYING) 間だけ true。会話・画像・CSTM は
+//   鳴らしている (PLAY_WAIT / PLAYING) 間だけ true。会話・画像・Custom は
 //   従来どおり busy と同じ答え。
 bool stackee_talk_audio_busy(const stackee_talk_t *t);
 

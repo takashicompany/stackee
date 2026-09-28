@@ -20,6 +20,7 @@
 #include "stackee_touch.h"
 #include "stackee_volume.h"
 #include "stackee_hid_out.h"
+#include "stackee_keymap_migrate.h"
 #include "stackee_perf.h"
 #include "stackee_report_queue.h"
 #include "stackee_tca8418.h"
@@ -82,10 +83,10 @@ void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed) {
     if (!pressed) {
         return;             // 残りはどれも「押した瞬間」だけ効く
     }
-    // ★ CSTM_0..CSTM_9。ここでは送らない。印を 1 つ置くだけ (TLS の握手は
+    // ★ Custom_0..Custom_9。ここでは送らない。印を 1 つ置くだけ (TLS の握手は
     //   秒単位かかる)。実際の送信は audio タスクが会話の状態機械で進める。
-    if (action >= STACKEE_KEY_CSTM_0 && action <= STACKEE_KEY_CSTM_LAST) {
-        stackee_audio_cstm_key((int)(action - STACKEE_KEY_CSTM_0));
+    if (action >= STACKEE_KEY_CUSTOM_0 && action <= STACKEE_KEY_CUSTOM_LAST) {
+        stackee_audio_custom_key((int)(action - STACKEE_KEY_CUSTOM_0));
         return;
     }
     switch (action) {
@@ -334,6 +335,14 @@ void stackee_input_start(void) {
         ESP_LOGE(TAG, "TCA8418 の I2C を用意できない。キー入力なしで続ける");
     }
     stackee_qmk_init();
+    // 保存済みの配列の移行 (stackee_qmk_init の中で当てた) を 1 行残す。
+    // 同じものは `status` の `keys.mig` にも出る。
+    stackee_keymap_migration_report_t mig;
+    stackee_keymap_migration_report(&mig);
+    ESP_LOGI(TAG, "キーマップの移行: 番号 %lu → %lu、書き換え %d 件 "
+             "(旧 MIC 入口 → MIC(kc) %d / 旧 CSTM → Custom %d)",
+             (unsigned long)mig.from_level, (unsigned long)mig.level,
+             mig.changed, mig.mic, mig.custom);
     BaseType_t ok = xTaskCreatePinnedToCore(input_task, "input", INPUT_TASK_STACK,
                                             NULL, INPUT_TASK_PRIO, NULL,
                                             INPUT_TASK_CPU);
@@ -362,4 +371,11 @@ void stackee_input_stats(stackee_input_stats_t *out) {
     out->stray = tca.stray;
     out->keys_down = stackee_qmk_matrix_pressed_count();
     out->custom_keys = stackee_qmk_custom_key_count();
+    stackee_keymap_migration_report_t mig;
+    stackee_keymap_migration_report(&mig);
+    out->mig_from = mig.from_level;
+    out->mig_level = mig.level;
+    out->mig_changed = mig.changed;
+    out->mig_mic = mig.mic;
+    out->mig_custom = mig.custom;
 }

@@ -178,47 +178,57 @@ class ViaDefinitionTest(unittest.TestCase):
     def test_new_custom_keys_go_after_the_mod_taps(self):
         """VIA の番号は NVS に保存されている。途中に足すとうしろがずれる。"""
         names = [c['name'] for c in self.via['customKeycodes']]
-        self.assertEqual(names.index('STK_MT_0'), 7)      # 0x7E07 のまま
-        self.assertEqual(names.index('MIC_F13'), 8)       # 0x7E08 からうしろへ
-        self.assertEqual(names.index('MIC_F24'), 19)      # 0x7E13
-        self.assertEqual(names.index('MIC_F1'), 20)       # 0x7E14 (あとで足した)
-        self.assertEqual(names.index('MIC_F12'), 31)      # 0x7E1F
-        self.assertEqual(names.index('STK_CSTM_0'), 32)   # 0x7E20 (2026-09-27)
-        self.assertEqual(names[-1], 'STK_CSTM_9')         # 0x7E29
+        self.assertEqual(names.index('STK_MT_0'), 7)        # 0x7E07 のまま
+        self.assertEqual(names.index('STK_CUSTOM_0'), 8)    # 0x7E08 (2026-09-29)
+        self.assertEqual(names[-1], 'STK_CUSTOM_9')         # 0x7E11
+        self.assertEqual(len(names), 18)
         # ヘッダの enum と VIA の並びが 1 つずつ同じか。
         for index, name in enumerate(names):
             self.assertIn('%-20s = QK_KB_0 + %d,' % (name, index), self.header)
         self.assertIn('#define STACKEE_KEYCODE_LAST  (QK_KB_0 + %d)'
                       % (len(names) - 1), self.header)
-        # VIA の Custom タブは QK_KB (0x7E00..0x7E3F) の 64 個しか持てない。
-        self.assertLessEqual(len(names), 64)
 
-    def test_the_mic_entries_cover_f1_to_f24(self):
-        """F13..F24 が先、F1..F12 がそのうしろ (番号を動かさないため)。"""
+    def test_every_custom_key_is_visible_in_remap(self):
+        """★ Remap は customKeycodes を先頭 32 個 (0x7E00..0x7E1F) しか出さない。
+
+        2026-09-29 まで Custom (旧 CSTM) は 0x7E20.. にいて Remap に出なかった。
+        """
+        self.assertLessEqual(len(self.via['customKeycodes']),
+                             gen_keymap.REMAP_CUSTOM_MAX)
+        self.assertEqual(gen_keymap.REMAP_CUSTOM_MAX, 32)
+
+    def test_the_named_mic_entries_are_gone(self):
+        """MIC の名前付きの入口 (MIC_F13.. / MIC_F1..) は 2026-09-29 に廃止。
+
+        MIC は Remap の「カスタム」タブで 0x7F00 | kc を手入力する。
+        """
         names = [c['name'] for c in self.via['customKeycodes']]
-        mic = [n for n in names if n.startswith('MIC_F')]
-        self.assertEqual(mic, ['MIC_F%d' % n for n in
-                               list(range(13, 25)) + list(range(1, 13))])
-        for entry in self.via['customKeycodes']:
-            if entry['name'].startswith('MIC_F'):
-                self.assertIn(entry['name'][4:], entry['title'])
-                self.assertEqual(entry['shortName'],
-                                 'Mic' + entry['name'][5:])
+        self.assertFalse([n for n in names if n.startswith('MIC_')])
+        self.assertNotIn('MIC_ALIAS', self.header)
+        self.assertNotIn('MIC_F13', self.header)
 
-    def test_the_cstm_keys_come_last_and_show_as_cstm_n(self):
-        """CSTM_0〜9 は MIC_F1〜F12 のうしろ。VIA のキーキャップは CSTM_n。"""
+    def test_the_custom_keys_show_as_custom_n(self):
+        """Custom_0〜9 は STK_MT_0 のうしろ。VIA のキーキャップは Custom_n。"""
         entries = self.via['customKeycodes']
-        cstm = [e for e in entries if e['name'].startswith('STK_CSTM_')]
-        self.assertEqual([e['name'] for e in cstm],
-                         ['STK_CSTM_%d' % n for n in range(10)])
-        self.assertEqual(entries[-10:], cstm)
-        for n, entry in enumerate(cstm):
-            self.assertEqual(entry['shortName'], 'CSTM_%d' % n)
-            self.assertTrue(entry['title'].startswith('CSTM_%d' % n))
-        self.assertIn('#define STACKEE_CSTM_FIRST    STK_CSTM_0', self.header)
-        self.assertIn('#define STACKEE_CSTM_COUNT    10', self.header)
-        # MIC の入口の範囲は動いていない (CSTM を足しても 0x7E08..0x7E1F)。
-        self.assertIn('#define STACKEE_MIC_ALIAS_LAST  (QK_KB_0 + 31)', self.header)
+        custom = [e for e in entries if e['name'].startswith('STK_CUSTOM_')]
+        self.assertEqual([e['name'] for e in custom],
+                         ['STK_CUSTOM_%d' % n for n in range(10)])
+        self.assertEqual(entries[8:18], custom)
+        self.assertEqual(entries[-10:], custom)
+        for n, entry in enumerate(custom):
+            self.assertEqual(entry['shortName'], 'Custom_%d' % n)
+            self.assertTrue(entry['title'].startswith('Custom_%d' % n))
+        self.assertIn('#define STACKEE_CUSTOM_FIRST  STK_CUSTOM_0', self.header)
+        self.assertIn('#define STACKEE_CUSTOM_COUNT  10', self.header)
+        self.assertIn('STK_CUSTOM_0         = QK_KB_0 + 8,', self.header)
+        self.assertIn('STK_CUSTOM_9         = QK_KB_0 + 17,', self.header)
+        self.assertNotIn('CSTM', self.header)
+
+    def test_a_new_mod_tap_would_stop_the_generator(self):
+        """STK_MT_* が増えると Custom の番号がずれる。生成の段階で止める。"""
+        self.assertEqual(gen_keymap.user_custom_first_index([object()]), 8)
+        with self.assertRaises(SystemExit):
+            gen_keymap.user_custom_first_index([object(), object()])
 
     def test_the_mic_range_does_not_touch_the_other_custom_keys(self):
         """MIC(kc) は QK_USER 側。QK_KB の独自キーと重ならない。"""
@@ -228,17 +238,9 @@ class ViaDefinitionTest(unittest.TestCase):
         # 0x7F00..0x7FFF は QK_USER (0x7E40..0x7FFF) の中、QK_KB の外。
         self.assertGreater(gen_keymap.MIC_BASE, 0x7E3F)
         self.assertLessEqual(gen_keymap.MIC_BASE | 0xFF, 0x7FFF)
-        # 名前付きの入口は F13..F24 + F1..F12 の 24 個ぶん。
-        self.assertEqual(len(gen_keymap.MIC_ALIAS_KEYCODES), 24)
-        self.assertEqual(list(gen_keymap.MIC_ALIAS_KEYCODES),
-                         [0x68 + i for i in range(12)] +
-                         [0x3A + i for i in range(12)])
-        # ヘッダの表と同じ並びか (本体はこれを引いて読み替える)。
-        self.assertIn('    { %s }'
-                      % ', '.join('0x%02Xu' % kc
-                                  for kc in gen_keymap.MIC_ALIAS_KEYCODES),
-                      self.header)
-        self.assertIn('#define STACKEE_MIC_ALIAS_COUNT 24', self.header)
+        # README §0-5 の例: MIC(F13) = 7F68、MIC(F1) = 7F3A。
+        self.assertEqual(gen_keymap.MIC_BASE | 0x68, 0x7F68)
+        self.assertEqual(gen_keymap.MIC_BASE | 0x3A, 0x7F3A)
 
     def test_matrix_is_five_by_ten(self):
         self.assertEqual(self.via['matrix'], {'rows': 5, 'cols': 10})
@@ -264,7 +266,7 @@ class ViaDefinitionTest(unittest.TestCase):
         # ★ VIA は customKeycodes[i] を QK_KB_0 + i に対応づける。
         #   並びがずれると VIA 上で別のキーとして表示される。
         names = [entry['name'] for entry in self.via['customKeycodes']]
-        enum = re.findall(r'^\s+((?:STK|MIC)_\w+)\s+= QK_KB_0 \+ (\d+),',
+        enum = re.findall(r'^\s+(STK_\w+)\s+= QK_KB_0 \+ (\d+),',
                           self.header, flags=re.M)
         self.assertEqual(len(names), len(enum), 'JSON と enum で個数が違う')
         for index, (name, offset) in enumerate(enum):
@@ -287,8 +289,8 @@ class KeycodesDocTest(unittest.TestCase):
             doc = handle.read()
         for name, _kmk, _title, _short in gen_keymap.CUSTOM_KEYS:
             self.assertIn(name, doc, '%s が keycodes.md に無い' % name)
-        self.assertIn('STK_CSTM_0', doc)
-        self.assertIn('STK_CSTM_9', doc)
+        self.assertIn('STK_CUSTOM_0', doc)
+        self.assertIn('STK_CUSTOM_9', doc)
 
 
 if __name__ == '__main__':

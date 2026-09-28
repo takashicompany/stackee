@@ -27,21 +27,6 @@
 
 #define STACKEE_EXT_MT_MAX 8
 
-// VIA の名前付きの入口 (MIC_F13..MIC_F24 / MIC_F1..MIC_F12) を MIC(kc) に
-// 直す。入口でなければそのまま返す。
-//
-// ★ 表は生成物 (stackee_keycodes.h)。並びは via/stackee.json の
-//   customKeycodes と同じ順で、**うしろにしか足さない** — 番号は
-//   保存済みの配列に入っているため。
-static uint16_t mic_resolve(uint16_t keycode) {
-    static const uint8_t inner[STACKEE_MIC_ALIAS_COUNT] =
-        STACKEE_MIC_ALIAS_KEYCODES;
-    if (keycode >= STACKEE_MIC_ALIAS_FIRST && keycode <= STACKEE_MIC_ALIAS_LAST) {
-        return MIC(inner[keycode - STACKEE_MIC_ALIAS_FIRST]);
-    }
-    return keycode;
-}
-
 typedef struct {
     bool     pending;       // 押されたが tap/hold が決まっていない
     bool     held;          // hold 側で確定して修飾キーを押している
@@ -115,10 +100,11 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
     }
 
     // ★ MIC(kc) — 顔を変えつつ、中のキーは普通のキーとして送る。
-    //   VIA の名前付きの入口 (MIC_F13..) もここで同じ形に直す。
-    uint16_t mic = mic_resolve(keycode);
-    if (mic >= STACKEE_MIC_FIRST && mic <= STACKEE_MIC_LAST) {
-        uint8_t inner = STACKEE_MIC_INNER(mic);
+    //   VIA / Remap からは「カスタム」タブで 0x7F00 | kc を直に書く
+    //   (名前付きの入口 MIC_F13.. は 2026-09-29 に廃止。保存済みの配列は
+    //   stackee_keymap_migrate.c の移行 2 が MIC(kc) に書き換える)。
+    if (keycode >= STACKEE_MIC_FIRST && keycode <= STACKEE_MIC_LAST) {
+        uint8_t inner = STACKEE_MIC_INNER(keycode);
         if (record->event.pressed) {
             s_custom_presses++;
             register_code(inner);
@@ -129,14 +115,14 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
         return false;   // 送るのはこちらで済ませた
     }
 
-    // ★ CSTM_0..CSTM_9 — 番号ごと「何をしたいか」に翻訳する (連番)。
-    if (keycode >= STACKEE_CSTM_FIRST &&
-        keycode < STACKEE_CSTM_FIRST + STACKEE_CSTM_COUNT) {
+    // ★ Custom_0..Custom_9 — 番号ごと「何をしたいか」に翻訳する (連番)。
+    if (keycode >= STACKEE_CUSTOM_FIRST &&
+        keycode < STACKEE_CUSTOM_FIRST + STACKEE_CUSTOM_COUNT) {
         if (record->event.pressed) {
             s_custom_presses++;
         }
         stackee_qmk_custom_key(
-            (stackee_key_action_t)(STACKEE_KEY_CSTM_0 + (keycode - STACKEE_CSTM_FIRST)),
+            (stackee_key_action_t)(STACKEE_KEY_CUSTOM_0 + (keycode - STACKEE_CUSTOM_FIRST)),
             record->event.pressed);
         return false;   // ★ HID へは出さない
     }
@@ -184,12 +170,12 @@ const char *stackee_key_action_name(stackee_key_action_t action) {
         case STACKEE_KEY_MIC: return "MIC_KEY";
         default: break;
     }
-    if (action >= STACKEE_KEY_CSTM_0 && action <= STACKEE_KEY_CSTM_LAST) {
+    if (action >= STACKEE_KEY_CUSTOM_0 && action <= STACKEE_KEY_CUSTOM_LAST) {
         static const char *const names[] = {
-            "CSTM_0", "CSTM_1", "CSTM_2", "CSTM_3", "CSTM_4",
-            "CSTM_5", "CSTM_6", "CSTM_7", "CSTM_8", "CSTM_9",
+            "Custom_0", "Custom_1", "Custom_2", "Custom_3", "Custom_4",
+            "Custom_5", "Custom_6", "Custom_7", "Custom_8", "Custom_9",
         };
-        return names[action - STACKEE_KEY_CSTM_0];
+        return names[action - STACKEE_KEY_CUSTOM_0];
     }
     return "?";
 }

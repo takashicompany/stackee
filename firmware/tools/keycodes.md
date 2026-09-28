@@ -130,9 +130,25 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 | 5 | `STK_CAMERA` | (未使用) | 4 |
 | 6 | `STK_TOUCH_SCROLL` | `KC.TOUCH_SCROLL` | 4 (タッチパッド) |
 | 7〜 | `STK_MT_n` | (上の §3) | 済 |
-| 8〜19 | `MIC_F13`〜`MIC_F24` | (KMK 側は `KC.F13` のまま) | 済 (`MIC(kc)` の名前付きの入口) |
-| 20〜31 | `MIC_F1`〜`MIC_F12` | — | 済 (同上。2026-09-21 にうしろへ追加) |
-| 32〜41 | `STK_CSTM_0`〜`STK_CSTM_9` | — | 済 (2026-09-27。VIA の表示は `CSTM_0`〜`CSTM_9`。押した瞬間に `POST /key`。README §17-2c) |
+| 8〜17 | `STK_CUSTOM_0`〜`STK_CUSTOM_9` | — | 済 (VIA / Remap の表示は `Custom_0`〜`Custom_9`、0x7E08〜0x7E11。押した瞬間に `POST /key`。README §17-2c) |
+
+★ customKeycodes は **18 個** (0x7E00〜0x7E11)。Remap は customKeycodes を
+**先頭 32 個 (0x7E00〜0x7E1F) しか出さない**ので、32 個を超えないこと
+(`tools/gen_keymap.py` が生成時に止める)。
+
+経緯 (2026-09-29): それまでは並び 8〜31 に `MIC(kc)` の名前付きの入口
+`MIC_F13`〜`MIC_F24` (0x7E08〜0x7E13)・`MIC_F1`〜`MIC_F12` (0x7E14〜0x7E1F)
+を置き、そのうしろの 32〜41 (0x7E20〜0x7E29) に `STK_CSTM_0`〜`STK_CSTM_9`
+(表示 `CSTM_n`、2026-09-27) を置いていた。Custom (旧 CSTM) が Remap に
+出なかったので入口 24 個を消し、`STK_CUSTOM_n` へ改名して 8〜17 に詰めた。
+保存済みの配列は起動時の**移行 2** が書き換える
+(`main/qmk_port/stackee_keymap_migrate.c`):
+
+| 旧 | 新 |
+|---|---|
+| 0x7E08〜0x7E13 (`MIC_F13`〜`MIC_F24`) | `MIC(KC_F13)`〜`MIC(KC_F24)` = 0x7F68〜0x7F73 |
+| 0x7E14〜0x7E1F (`MIC_F1`〜`MIC_F12`) | `MIC(KC_F1)`〜`MIC(KC_F12)` = 0x7F3A〜0x7F45 |
+| 0x7E20〜0x7E29 (`STK_CSTM_0`〜`9`) | `STK_CUSTOM_0`〜`9` = 0x7E08〜0x7E11 |
 
 ### `MIC(kc)` — 顔を変える包み
 
@@ -149,18 +165,17 @@ MIC(KC_F13) = 0x7F68
 0x7E00..0x7E3F の **64 個しかなく**、VIA の `customKeycodes` はその並び順で
 番号が決まるので、256 個の連続領域はそこに入らない。そこで:
 
-* **VIA / Remap の `Custom` タブ** … `MIC_F13`〜`MIC_F24` (0x7E08..0x7E13) と
-  `MIC_F1`〜`MIC_F12` (0x7E14..0x7E1F) の 24 個を `customKeycodes` の末尾に
-  置く。本体が `MIC(kc)` に読み替える。**足すのはいつもうしろ** —
-  番号は保存済みの配列に入っている。
-* **それ以外のキー** … Remap の「Any」に `0x7F00 | kc` を 16 進で入れる
-  (例: `MIC(KC_A)` = `0x7F04`)。
+* **VIA / Remap** … customKeycodes には出さない。Remap の「カスタム」
+  タブで `0x7F00 | kc` を 16 進で手入力する (例: `MIC(KC_F13)` = `7F68`、
+  `MIC(KC_F1)` = `7F3A`、`MIC(KC_A)` = `7F04`。README §0-5)。
+  名前付きの入口 (`MIC_F13`〜 / `MIC_F1`〜) は 2026-09-29 に廃止。
 
 ★ **新しい独自キーは `STK_MT_n` の "うしろ" に足す。** VIA の
 `customKeycodes` は並び順がそのままキーコードの番号になり、その番号は
 **VIA で変えた配列として NVS に保存されている**。途中に足すとうしろが
 1 つずつずれて、保存済みの配列の意味が黙って変わる。
-`tools/gen_keymap.py` の `TRAILING_CUSTOM_KEYS` がその置き場。
+`tools/gen_keymap.py` の `USER_CUSTOM_KEYS` (`STK_MT_n` の直後、並び 8〜) が
+いまの末尾。番号を動かすときは移行を 1 段足す (上の経緯を参照)。
 
 ★ **既定配列を変えたら「移行」を足す。** VIA で配列を変えた本体は
 保存済みの配列で動くので、**新しい既定は黙って無視される**

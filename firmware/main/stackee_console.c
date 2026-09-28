@@ -45,7 +45,12 @@
 // ★ 512 では `fs.put` (base64 360 バイト = 480 文字 + 枠) が入り切らず、
 //   黙って捨てていた (2026-09-16 full 像で発覚。応答が無いので 30 秒待ちになる)。
 #define CONSOLE_LINE_MAX  1024
-#define REPLY_MAX   1800
+// ★ 1800 → 2048 (2026-09-29)。実機の status が 1697 バイトまで来ていて、
+//   keys.mig (キーマップの移行) を足すと余白が 50 バイトを切るため。
+//   入り切らないと status は黙って捨てられる (s_drops が増えるだけ)。
+//   main タスクのスタックの残りは heap.info の実測で 2140 バイト (足した
+//   248 バイトを引いても 1.8 KB 強残る)。
+#define REPLY_MAX   2048
 
 // このファームの版。CircuitPython 版は "stackee-console/2"。
 // ★ 段階ごとに上げる。実機にどちらの像が載っているかが hello / status で
@@ -356,7 +361,7 @@ static void reply_hello(long id) {
                 "\"touch.status\",\"touch.inject\",\"touch.scroll\","
                 "\"camera.capture\",\"camera.power\",\"camera.dump\","
                 "\"camera.status\",\"camera.look\",\"camera.look_status\","
-                "\"key.cstm\",\"key.cstm_status\","
+                "\"key.custom\",\"key.custom_status\","
                 "\"inbox.status\",\"inbox.enable\",\"heap.info\","
                 "\"app.info\",\"app.boot_factory\",\"ota.begin\",\"ota.status\","
                 "\"ota.end\",\"ota.commit\",\"ota.abort\"],"
@@ -472,11 +477,15 @@ static void reply_status(long id) {
                 ble.have_bond_peer ? "true" : "false");
     at = append(buf, sizeof(buf), at,
                 ",\"keys\":{\"tca\":%s,\"events\":%lu,\"down\":%u,"
-                "\"ovf\":%lu,\"iofail\":%lu,\"stray\":%lu,\"custom\":%lu}",
+                "\"ovf\":%lu,\"iofail\":%lu,\"stray\":%lu,\"custom\":%lu,"
+                "\"mig\":{\"from\":%lu,\"level\":%lu,\"changed\":%d,"
+                "\"mic\":%d,\"custom\":%d}}",
                 input.tca_connected ? "true" : "false",
                 (unsigned long)input.key_events, input.keys_down,
                 (unsigned long)input.overflows, (unsigned long)input.io_fails,
-                (unsigned long)input.stray, (unsigned long)input.custom_keys);
+                (unsigned long)input.stray, (unsigned long)input.custom_keys,
+                (unsigned long)input.mig_from, (unsigned long)input.mig_level,
+                input.mig_changed, input.mig_mic, input.mig_custom);
     at = append(buf, sizeof(buf), at,
                 ",\"hidq\":{\"pushed\":%lu,\"usb\":%lu,\"ble\":%lu,"
                 "\"dropped\":%lu,\"failed\":%lu,\"depth\":%u}",
@@ -625,7 +634,7 @@ static void reply_log_tail(long id, const char *request) {
 // `{"cmd":"key.inject"}`                       既定 (F24 を 30 ms)
 // `{"cmd":"key.inject","kc":"F13","hold_ms":50}`
 // `{"cmd":"key.inject","kc":115}`              数値でも指定できる
-// `{"cmd":"key.inject","kc":32264,"hold_ms":1500,"wait":false}`
+// `{"cmd":"key.inject","kc":32616,"hold_ms":1500,"wait":false}`   MIC(KC_F13) = 0x7F68
 //                                              押し始めてすぐ返る (最大 3000 ms)
 //
 // ★ 既定を F24 にしてあるのは、**ホスト側で何も起きないキー**だから。

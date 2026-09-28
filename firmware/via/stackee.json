@@ -112,174 +112,54 @@
       "shortName": "MT0"
     },
     {
-      "name": "MIC_F13",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F13 を送る)",
-      "shortName": "Mic13"
+      "name": "STK_CUSTOM_0",
+      "title": "Custom_0: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_0"
     },
     {
-      "name": "MIC_F14",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F14 を送る)",
-      "shortName": "Mic14"
+      "name": "STK_CUSTOM_1",
+      "title": "Custom_1: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_1"
     },
     {
-      "name": "MIC_F15",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F15 を送る)",
-      "shortName": "Mic15"
+      "name": "STK_CUSTOM_2",
+      "title": "Custom_2: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_2"
     },
     {
-      "name": "MIC_F16",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F16 を送る)",
-      "shortName": "Mic16"
+      "name": "STK_CUSTOM_3",
+      "title": "Custom_3: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_3"
     },
     {
-      "name": "MIC_F17",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F17 を送る)",
-      "shortName": "Mic17"
+      "name": "STK_CUSTOM_4",
+      "title": "Custom_4: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_4"
     },
     {
-      "name": "MIC_F18",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F18 を送る)",
-      "shortName": "Mic18"
+      "name": "STK_CUSTOM_5",
+      "title": "Custom_5: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_5"
     },
     {
-      "name": "MIC_F19",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F19 を送る)",
-      "shortName": "Mic19"
+      "name": "STK_CUSTOM_6",
+      "title": "Custom_6: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_6"
     },
     {
-      "name": "MIC_F20",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F20 を送る)",
-      "shortName": "Mic20"
+      "name": "STK_CUSTOM_7",
+      "title": "Custom_7: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_7"
     },
     {
-      "name": "MIC_F21",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F21 を送る)",
-      "shortName": "Mic21"
+      "name": "STK_CUSTOM_8",
+      "title": "Custom_8: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_8"
     },
     {
-      "name": "MIC_F22",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F22 を送る)",
-      "shortName": "Mic22"
-    },
-    {
-      "name": "MIC_F23",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F23 を送る)",
-      "shortName": "Mic23"
-    },
-    {
-      "name": "MIC_F24",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F24 を送る)",
-      "shortName": "Mic24"
-    },
-    {
-      "name": "MIC_F1",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F1 を送る)",
-      "shortName": "Mic1"
-    },
-    {
-      "name": "MIC_F2",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F2 を送る)",
-      "shortName": "Mic2"
-    },
-    {
-      "name": "MIC_F3",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F3 を送る)",
-      "shortName": "Mic3"
-    },
-    {
-      "name": "MIC_F4",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F4 を送る)",
-      "shortName": "Mic4"
-    },
-    {
-      "name": "MIC_F5",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F5 を送る)",
-      "shortName": "Mic5"
-    },
-    {
-      "name": "MIC_F6",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F6 を送る)",
-      "shortName": "Mic6"
-    },
-    {
-      "name": "MIC_F7",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F7 を送る)",
-      "shortName": "Mic7"
-    },
-    {
-      "name": "MIC_F8",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F8 を送る)",
-      "shortName": "Mic8"
-    },
-    {
-      "name": "MIC_F9",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F9 を送る)",
-      "shortName": "Mic9"
-    },
-    {
-      "name": "MIC_F10",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F10 を送る)",
-      "shortName": "Mic10"
-    },
-    {
-      "name": "MIC_F11",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F11 を送る)",
-      "shortName": "Mic11"
-    },
-    {
-      "name": "MIC_F12",
-      "title": "押している間だけ「聞き取り中」の顔にする (キーは F12 を送る)",
-      "shortName": "Mic12"
-    },
-    {
-      "name": "STK_CSTM_0",
-      "title": "CSTM_0: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_0"
-    },
-    {
-      "name": "STK_CSTM_1",
-      "title": "CSTM_1: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_1"
-    },
-    {
-      "name": "STK_CSTM_2",
-      "title": "CSTM_2: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_2"
-    },
-    {
-      "name": "STK_CSTM_3",
-      "title": "CSTM_3: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_3"
-    },
-    {
-      "name": "STK_CSTM_4",
-      "title": "CSTM_4: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_4"
-    },
-    {
-      "name": "STK_CSTM_5",
-      "title": "CSTM_5: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_5"
-    },
-    {
-      "name": "STK_CSTM_6",
-      "title": "CSTM_6: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_6"
-    },
-    {
-      "name": "STK_CSTM_7",
-      "title": "CSTM_7: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_7"
-    },
-    {
-      "name": "STK_CSTM_8",
-      "title": "CSTM_8: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_8"
-    },
-    {
-      "name": "STK_CSTM_9",
-      "title": "CSTM_9: 押すとサーバーに知らせる (何をするかはサーバー次第)",
-      "shortName": "CSTM_9"
+      "name": "STK_CUSTOM_9",
+      "title": "Custom_9: 押すとサーバーに知らせる (何をするかはサーバー次第)",
+      "shortName": "Custom_9"
     }
   ]
 }

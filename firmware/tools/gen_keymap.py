@@ -100,56 +100,46 @@ N_FIXED_CUSTOM = len(CUSTOM_KEYS)
 #   VIA の customKeycodes は並び順がそのままキーコードの番号になり、その番号は
 #   VIA で変えた配列として **NVS に保存されている**。途中に足すとうしろが
 #   1 つずつずれ、保存済みの配列の意味が黙って変わる。だから新しい独自キーは
-#   いちばんうしろに足す (STK_MT_0 = 0x7E07 は動かない)。
-# いまの中身は `MIC(kc)` の名前付きの入口 24 個 (F13〜F24 のあとに F1〜F12)。
-# VIA / Remap の `Custom` タブから選べるのはここに並べたものだけなので、
-# よく使う F キーを名前で出しておく。**それ以外のキーは Remap の「Any」に
-# 16 進で `0x7F00 | kc` を入れれば使える** (README §10-1)。
+#   いちばんうしろに足す (STK_MT_0 = 0x7E07 は動かない)。番号を動かすときは
+#   main/qmk_port/stackee_keymap_migrate.c に移行を 1 段足すこと。
 #
-# ★ 並びは **F13〜F24 が先**。あとから足した F1〜F12 をうしろに置くため
-#   (2026-09-21)。VIA の番号は並び順で決まり、保存済みの配列に入っている。
-#   途中に足すと、保存済みの `MIC_F13` (0x7E08) が別のキーに化ける。
-_MIC_ALIAS_F = tuple(range(13, 25)) + tuple(range(1, 13))
-
-
-def _mic_alias_entry(n):
-    return ('MIC_F%d' % n, None,
-            '押している間だけ「聞き取り中」の顔にする (キーは F%d を送る)' % n,
-            'Mic%d' % n)
-
-
-TRAILING_CUSTOM_KEYS = tuple(_mic_alias_entry(n) for n in _MIC_ALIAS_F)
-
-# stackee 独自キー CSTM_0〜CSTM_9 (2026-09-27)。押した瞬間に 1 回、サーバへ
-# 「CSTM_n が押された」と送る (POST /key)。何をするかはサーバ次第で、本体は
+# stackee 独自キー Custom_0〜Custom_9 (2026-09-27 に CSTM_n の名前で入れ、
+# 2026-09-29 に Custom_n へ改名)。押した瞬間に 1 回、サーバへ
+# 「Custom_n が押された」と送る (POST /key)。何をするかはサーバ次第で、本体は
 # 返ってきた指示どおりに動く (README §17-2c)。
 #
-# ★ **MIC_F1〜F12 のうしろ** (0x7E20〜0x7E29)。番号は保存済みの配列に
-#   入っているので、うしろにしか足さない (CUSTOM_KEYS の上の注記)。
-# ★ C の名前は STK_CSTM_n、VIA / Remap のキーキャップの表示は CSTM_n。
-CSTM_COUNT = 10
+# ★ 並び 8〜17 (0x7E08〜0x7E11、2026-09-29)。Remap は customKeycodes を
+#   **先頭 32 個 (QK_KB_0..31 = 0x7E00..0x7E1F) しか出さない**。それまで
+#   8〜31 に並べていた MIC の名前付きの入口 (MIC_F13〜F24 / MIC_F1〜F12)
+#   のうしろ (0x7E20〜) だと Custom (旧 CSTM) が Remap に出なかったので、入口 24 個を
+#   消して STK_MT_0 の直後へ詰めた。保存済みの配列は移行 2 が新しい番号へ
+#   書き換える (旧 0x7E08〜0x7E1F → MIC(kc)、旧 0x7E20〜0x7E29 → 0x7E08〜)。
+# ★ C の名前は STK_CUSTOM_n、VIA / Remap のキーキャップの表示は Custom_n。
+USER_CUSTOM_COUNT = 10
+# Custom_0 の並び。STK_MT_* が増えるとここに食い込むので、生成時に確かめる。
+USER_CUSTOM_FIRST_INDEX = 8
 
 
-def _cstm_entry(n):
-    return ('STK_CSTM_%d' % n, None,
-            'CSTM_%d: 押すとサーバーに知らせる (何をするかはサーバー次第)' % n,
-            'CSTM_%d' % n)
+def _user_custom_entry(n):
+    return ('STK_CUSTOM_%d' % n, None,
+            'Custom_%d: 押すとサーバーに知らせる (何をするかはサーバー次第)' % n,
+            'Custom_%d' % n)
 
 
-CSTM_KEYS = tuple(_cstm_entry(n) for n in range(CSTM_COUNT))
+USER_CUSTOM_KEYS = tuple(_user_custom_entry(n) for n in range(USER_CUSTOM_COUNT))
+
+# Remap が customKeycodes を出すのは先頭 32 個まで (QK_KB_0..31)。
+REMAP_CUSTOM_MAX = 32
 
 # MIC(kc) の本体側の符号 (main/qmk_port/stackee_holdtap.c)。
 #
 # ★ QK_KB (0x7E00〜0x7E3F) は 64 個しかなく、VIA の customKeycodes は
 #   その並び順で番号が決まる。「MIC + 基本キーコード 8 bit」の 256 個の
 #   連続領域はそこに入らないので、**QK_USER (0x7E40〜0x7FFF) の上半分**に
-#   置く。VIA からは上の 12 個の名前付きの入口を通って届く (本体が
-#   MIC(kc) に読み替える)。Remap の「Any」なら MIC(kc) を直に書ける。
+#   置く。VIA の customKeycodes には出さない。Remap の「カスタム」タブで
+#   16 進を手入力する (`0x7F00 | kc`、例: MIC(F13) = 7F68、MIC(F1) = 7F3A。
+#   README §0-5)。
 MIC_BASE = 0x7F00
-# 入口の並びに合わせた基本キーコード。F1..F12 = 0x3A..0x45、
-# F13..F24 = 0x68..0x73 (QMK の keycodes.h)。
-MIC_ALIAS_KEYCODES = tuple(
-    (0x68 + (n - 13)) if n >= 13 else (0x3A + (n - 1)) for n in _MIC_ALIAS_F)
 
 # 既定配列の差し替え。KMK 側 (firmware/kmk/keymap.py) を触らずに、
 # **この木だけ**で位置と独自キーを結びつける。
@@ -674,6 +664,24 @@ def render_keymap_c(grid, holdtap, ext_mods):
     }
 
 
+def user_custom_first_index(ext_mods):
+    """Custom_0 の並び。STK_MT_* が増えて Custom に食い込んだら止める。
+
+    ★ Custom の番号は保存済みの配列に入っている。STK_MT_* が 1 つ増えると
+      Custom が黙って 1 つずれるので、生成の段階で気づけるようにする
+      (ずらすなら stackee_keymap_migrate.c に移行を足してから)。
+    """
+    index = N_FIXED_CUSTOM + len(ext_mods)
+    if index != USER_CUSTOM_FIRST_INDEX:
+        raise SystemExit('STK_MT_* が %d 個になり、Custom_0 の並びが %d → %d に'
+                         'ずれる。移行を足してから USER_CUSTOM_FIRST_INDEX を変えること'
+                         % (len(ext_mods), USER_CUSTOM_FIRST_INDEX, index))
+    if index + len(USER_CUSTOM_KEYS) > REMAP_CUSTOM_MAX:
+        raise SystemExit('customKeycodes が %d 個を超え、Remap に出ないキーができる'
+                         % REMAP_CUSTOM_MAX)
+    return index
+
+
 def render_keycodes_h(ext_mods):
     lines = [
         '// ★ 生成物。手で編集しない (tools/gen_keymap.py)。',
@@ -695,14 +703,10 @@ def render_keycodes_h(ext_mods):
     for index in range(len(ext_mods)):
         lines.append('    %-20s = QK_KB_0 + %d,'
                      % ('STK_MT_%d' % index, N_FIXED_CUSTOM + index))
-    trailing_base = N_FIXED_CUSTOM + len(ext_mods)
-    for index, (name, _kmk, _title, _short) in enumerate(TRAILING_CUSTOM_KEYS):
-        lines.append('    %-20s = QK_KB_0 + %d,' % (name, trailing_base + index))
-    mic_last = trailing_base + len(TRAILING_CUSTOM_KEYS) - 1
-    cstm_base = mic_last + 1
-    for index, (name, _kmk, _title, _short) in enumerate(CSTM_KEYS):
-        lines.append('    %-20s = QK_KB_0 + %d,' % (name, cstm_base + index))
-    last = cstm_base + len(CSTM_KEYS) - 1
+    custom_base = user_custom_first_index(ext_mods)
+    for index, (name, _kmk, _title, _short) in enumerate(USER_CUSTOM_KEYS):
+        lines.append('    %-20s = QK_KB_0 + %d,' % (name, custom_base + index))
+    last = custom_base + len(USER_CUSTOM_KEYS) - 1
     lines += [
         '};',
         '',
@@ -710,10 +714,10 @@ def render_keycodes_h(ext_mods):
         '#define STACKEE_KEYCODE_LAST  (QK_KB_0 + %d)' % last,
         '#define STK_MT_BASE           (QK_KB_0 + %d)' % N_FIXED_CUSTOM,
         '',
-        '// stackee 独自キー CSTM_0..CSTM_9 (押した瞬間にサーバへ POST /key)。',
-        '// 並びは customKeycodes と同じ順。MIC_F1..F12 のうしろ。',
-        '#define STACKEE_CSTM_FIRST    STK_CSTM_0',
-        '#define STACKEE_CSTM_COUNT    %d' % len(CSTM_KEYS),
+        '// stackee 独自キー Custom_0..Custom_9 (押した瞬間にサーバへ POST /key)。',
+        '// 並びは customKeycodes と同じ順。STK_MT_* のうしろ (0x7E08..、2026-09-29)。',
+        '#define STACKEE_CUSTOM_FIRST  STK_CUSTOM_0',
+        '#define STACKEE_CUSTOM_COUNT  %d' % len(USER_CUSTOM_KEYS),
         '',
         '// ---------------------------------------------------------------',
         '// MIC(kc) — 押している間だけ顔を「聞き取り中」にする包み',
@@ -724,24 +728,14 @@ def render_keycodes_h(ext_mods):
         '//',
         '// ★ 置き場は QK_USER (0x7E40..0x7FFF) の上半分。QK_KB は 0x7E00..',
         '//   0x7E3F の 64 個しかなく、256 個の連続領域が入らないため。',
-        '//   VIA の Custom タブには上の MIC_F13..MIC_F24 / MIC_F1..MIC_F12 が',
-        '//   並び、本体がそれを MIC(kc) に読み替える。Remap の「Any」なら',
-        '//   0x7F00 | kc を直に書ける。',
+        '//   VIA の customKeycodes には出さない。Remap の「カスタム」タブで',
+        '//   0x7F00 | kc を 16 進で手入力する (例: MIC(F13) = 7F68)。',
         '#define STACKEE_MIC_BASE      0x7F00u',
         '#define STACKEE_MIC_KC_MIN    0x04u      // KC_A。これ未満は包まない',
         '#define STACKEE_MIC_FIRST     (STACKEE_MIC_BASE | STACKEE_MIC_KC_MIN)',
         '#define STACKEE_MIC_LAST      (STACKEE_MIC_BASE | 0xFFu)',
         '#define MIC(kc)               (STACKEE_MIC_BASE | ((kc) & 0xFFu))',
         '#define STACKEE_MIC_INNER(code) ((uint8_t)((code) & 0xFFu))',
-        '',
-        '// VIA の名前付きの入口 (MIC_F13..MIC_F24、そのうしろに MIC_F1..MIC_F12)。',
-        '// 並びは customKeycodes と同じ順。うしろにしか足さない。',
-        '#define STACKEE_MIC_ALIAS_FIRST %s' % ('(QK_KB_0 + %d)' % trailing_base),
-        '#define STACKEE_MIC_ALIAS_LAST  %s' % ('(QK_KB_0 + %d)' % mic_last),
-        '#define STACKEE_MIC_ALIAS_COUNT %d' % len(TRAILING_CUSTOM_KEYS),
-        '// 入口 i が送る基本キーコード (i = keycode - STACKEE_MIC_ALIAS_FIRST)。',
-        '#define STACKEE_MIC_ALIAS_KEYCODES \\',
-        '    { %s }' % ', '.join('0x%02Xu' % kc for kc in MIC_ALIAS_KEYCODES),
         '',
         '// 修飾つきタップの HoldTap (default_keymap.c が中身を持つ)。',
         'typedef struct {',
@@ -792,9 +786,8 @@ def render_via(keymap_module, ext_mods, kle=None):
             'shortName': 'MT%d' % index,
         })
     # ★ STK_MT_* のうしろ (番号を動かさないため。CUSTOM_KEYS の上の注記)。
-    for name, _kmk, title, short in TRAILING_CUSTOM_KEYS:
-        custom.append({'name': name, 'title': title, 'shortName': short})
-    for name, _kmk, title, short in CSTM_KEYS:
+    user_custom_first_index(ext_mods)
+    for name, _kmk, title, short in USER_CUSTOM_KEYS:
         custom.append({'name': name, 'title': title, 'shortName': short})
 
     return {

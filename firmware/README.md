@@ -189,6 +189,41 @@ python3 tools/check_phase4.py     # 周辺機能と本番構成
 4. 再起動しても残る。元に戻すには VIA の「Reset Keymap」
 
 ★ Remap のカタログには登録していない (定義 JSON の手動読み込みで使う)。
+★ **Remap は customKeycodes を先頭 32 個 (0x7E00〜0x7E1F) しか出さない。**
+   独自キーは 18 個 (0x7E00〜0x7E11) にしてある (2026-09-29)。
+
+独自キーの番号 (customKeycodes の並び = キーコード):
+
+| キーコード | 名前 (表示) |
+|---|---|
+| 0x7E00〜0x7E06 | `STK_TALK` `STK_VOLUP` `STK_VOLDN` `STK_HID_SWITCH` `STK_BLE_REFRESH` `STK_CAMERA` `STK_TOUCH_SCROLL` |
+| 0x7E07 | `STK_MT_0` (修飾つきタップの HoldTap) |
+| 0x7E08〜0x7E11 | `STK_CUSTOM_0`〜`STK_CUSTOM_9` (`Custom_0`〜`Custom_9`、§17-2c) |
+
+**`MIC(kc)` (押している間だけ顔を「聞き取り中」にする包み、§10-1) は
+customKeycodes に並ばない。** Remap の「カスタム」タブで **16 進を手入力**
+する: `7F00` + キー番号 (HID の使用番号)。
+
+| キー | 入力する値 | キー | 入力する値 |
+|---|---|---|---|
+| `MIC(F1)` | `7F3A` | `MIC(F13)` | `7F68` (既定配列の右下) |
+| `MIC(F2)` | `7F3B` | `MIC(F14)` | `7F69` |
+| `MIC(F3)` | `7F3C` | `MIC(F15)` | `7F6A` |
+| `MIC(F4)` | `7F3D` | `MIC(F16)` | `7F6B` |
+| `MIC(F5)` | `7F3E` | `MIC(F17)` | `7F6C` |
+| `MIC(F6)` | `7F3F` | `MIC(F18)` | `7F6D` |
+| `MIC(F7)` | `7F40` | `MIC(F19)` | `7F6E` |
+| `MIC(F8)` | `7F41` | `MIC(F20)` | `7F6F` |
+| `MIC(F9)` | `7F42` | `MIC(F21)` | `7F70` |
+| `MIC(F10)` | `7F43` | `MIC(F22)` | `7F71` |
+| `MIC(F11)` | `7F44` | `MIC(F23)` | `7F72` |
+| `MIC(F12)` | `7F45` | `MIC(F24)` | `7F73` |
+
+ほかのキーも同じ (例: `MIC(A)` = `7F04`)。2026-09-29 までは VIA に
+`MIC_F13`〜`MIC_F24` / `MIC_F1`〜`MIC_F12` の名前付きの入口 (0x7E08〜0x7E1F)
+があったが、Custom を Remap に出すために消した。**それを置いていた保存済みの
+配列は、起動時の移行 2 が上の `7Fxx` に書き換える** (§10-1)。
+
 ★ BLE 越しの VIA は**動かない** (BLE 側に Raw HID を出していない)。
 ★ full プロファイルでも VIA は動く。コンソールが同じ Raw HID に相乗りするが、
    VIA が使う command id (0x00〜0x0F) とは別の id (0xC0〜) を使っている。
@@ -218,7 +253,7 @@ python3 tools/flash.py --rollback           # CircuitPython の像を書き戻�
 |---|---|
 | 基本 | `hello` `status` `reset` `bootloader` |
 | ログ | `log.tail` `log.burst` |
-| キー | `key.inject` `hid.switch` `hid.set` `key.cstm` `key.cstm_status` |
+| キー | `key.inject` `hid.switch` `hid.set` `key.custom` `key.custom_status` |
 | 受け箱 | `inbox.status` `inbox.enable` (§17-2e) |
 | BLE | `ble.refresh` `ble.clear_bonds` `ble.drop_cccd` `ble.svc_changed` |
 | 画面 | `lcd.crc` `lcd.dump` `lcd.status` `lcd.full` `face.set` `face.auto` `bar.set` `bar.auto` `ui.selftest` `ui.status` `ui.assets` `ui.subtitle` |
@@ -300,7 +335,7 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | タッチパッド | **段階 4**。FT6336 を 5 ms 周期で読み、なぞり = ポインタ / タップ = クリック / `STK_TOUCH_SCROLL` 中はスクロール。Report ID 2 で USB・BLE 両方に出る |
 | カメラ | **段階 4**。GC0308 を ALDO3 で起こして撮り、software で JPEG に畳む。`camera.*` と `STK_CAMERA` キー |
 | カメラ → AI | **2026-09-26**。`STK_CAMERA` で撮った JPEG を `POST /look` で見せ、返答を会話と同じく音声 + 字幕で鳴らす。撮影中の顔は `camera`、返答待ちは `thinking` (§17-2b) |
-| 独自キー CSTM_0〜9 | **2026-09-27**。`STK_CSTM_0`〜`STK_CSTM_9` (VIA の表示は `CSTM_0`〜`CSTM_9`)。押した瞬間に `POST /key` で「CSTM_n が押された」と送り、サーバの返事どおりに動く (未設定 / 返答を鳴らす / コマンドの発話を受け箱から取って鳴らす)。会話・カメラと排他 (§17-2c) |
+| 独自キー Custom_0〜9 | **2026-09-27** (2026-09-29 に `CSTM_n` から改名、キーコード 0x7E08〜0x7E11)。`STK_CUSTOM_0`〜`STK_CUSTOM_9` (VIA の表示は `Custom_0`〜`Custom_9`)。押した瞬間に `POST /key` で「Custom_n が押された」と送り、サーバの返事どおりに動く (未設定 / 返答を鳴らす / コマンドの発話を受け箱から取って鳴らす)。会話・カメラと排他 (§17-2c) |
 | USB マイク (UAC) | **段階 4 / full プロファイルのみ**。16 kHz モノラル。会話が優先で、録音中は無音を送る |
 | Raw HID コンソール | **段階 4**。VIA の独自 command id 0xC0〜。**dev でも有効** (CDC と同じバイト列を両方へ流す) |
 | FAT への書き込み | **段階 4**。`settings.set` と `fs.put`。書くときだけ読み書き可能で付け直す |
@@ -778,18 +813,20 @@ python3 firmware/kmk/tools/stackee_console_client.py status
 ★ **新しい独自キーは並びの "うしろ" に足す。** customKeycodes の並び順は
 そのままキーコードの番号 (`0x7E00` から) になり、**VIA で変えた配列として
 NVS に保存されている**。途中に足すとうしろが 1 つずつずれ、保存済みの配列の
-意味が黙って変わる。置き場は `tools/gen_keymap.py` の
-`TRAILING_CUSTOM_KEYS` (2026-09-21 の `MIC_F13`〜`MIC_F24`、そのあとに
-足した `MIC_F1`〜`MIC_F12` がそれ。`STK_MT_0` = `0x7E07` は動かしていない)
-と、そのうしろの `CSTM_KEYS` (2026-09-27 の `STK_CSTM_0`〜`STK_CSTM_9` =
-`0x7E20`〜`0x7E29`)。
+意味が黙って変わる。番号を動かすときは移行を 1 段足す (§10-1、2026-09-29 の
+移行 2 がその例)。いまの末尾は `tools/gen_keymap.py` の `USER_CUSTOM_KEYS`
+(`STK_CUSTOM_0`〜`STK_CUSTOM_9` = `0x7E08`〜`0x7E11`)。★ Remap が出すのは
+先頭 32 個 (`0x7E00`〜`0x7E1F`) までなので、それを超えないこと
+(`gen_keymap.py` が生成時に止める)。
 
 | 並び | 名前 (VIA の表示) | 中身 |
 |---|---|---|
 | 0〜6 | `STK_TALK` (Talk) `STK_VOLUP` `STK_VOLDN` `STK_HID_SWITCH` `STK_BLE_REFRESH` `STK_CAMERA` (Cam) `STK_TOUCH_SCROLL` | 会話 / 音量 / 送信先 / BLE / カメラ → AI / スクロール |
 | 7 | `STK_MT_0` | 修飾つきタップの HoldTap |
-| 8〜31 | `MIC_F13`〜`MIC_F24`、`MIC_F1`〜`MIC_F12` | 押している間だけ顔を「聞き取り中」に (§10-1) |
-| 32〜41 | `STK_CSTM_0`〜`STK_CSTM_9` (`CSTM_0`〜`CSTM_9`) | 押した瞬間にサーバへ知らせる (§17-2c) |
+| 8〜17 | `STK_CUSTOM_0`〜`STK_CUSTOM_9` (`Custom_0`〜`Custom_9`) | 押した瞬間にサーバへ知らせる (§17-2c) |
+
+`MIC(kc)` は customKeycodes に並ばない (Remap の「カスタム」タブで
+`7F00` + キー番号を手入力。§0-5 の表)。
 
 一覧の正は `tools/keycodes.md`。
 
@@ -970,7 +1007,7 @@ python3 firmware/tools/nvs_dump.py nvs.bin
 ```
 python3 firmware/kmk/tools/stackee_console_client.py key.inject
 # {"cmd":"key.inject","kc":"F24","hold_ms":30}
-# {"cmd":"key.inject","kc":32264,"hold_ms":1500,"wait":false}   押し始めてすぐ返る
+# {"cmd":"key.inject","kc":32616,"hold_ms":1500,"wait":false}   MIC(KC_F13) = 0x7F68 を押し始めてすぐ返る
 ```
 
 配線の無いスロット (ROW4 / COL0) にキーコードを一時的に置き、**TCA8418 の
@@ -979,7 +1016,7 @@ python3 firmware/kmk/tools/stackee_console_client.py key.inject
 
 ★ **`"wait":false` は押し始めてすぐ返る** (2026-09-21 に足した)。既定は
 離し終わるまで待つので、その間コンソールのタスクが止まり **`ui.status` や
-`lcd.crc` を読めない**。押している最中の画面を見たいとき (`STK_MIC_KEY` の
+`lcd.crc` を読めない**。押している最中の画面を見たいとき (`MIC(kc)` の
 表情など) に使う。**遅延は返らない**ので、遅延を測るときは既定のまま。
 
 ★ 押している時間の上限は **3000 ms**。2026-09-21 まで 2 つの落とし穴があり、
@@ -1109,17 +1146,17 @@ MIC(KC_F13) = 0x7F68                  既定配列の右下 (レイヤー 0 / ro
 
 | 使い方 | どうするか |
 |---|---|
-| VIA / Remap の `Custom` タブ | **`MIC_F13`〜`MIC_F24`** と **`MIC_F1`〜`MIC_F12`** の 24 個が並ぶ (この順。うしろにしか足さない) |
-| それ以外のキー | Remap の **「Any」** に `0x7F00 \| kc` を 16 進で入れる (例: `MIC(KC_A)` = `0x7F04`) |
+| VIA / Remap | Remap の **「カスタム」タブ**に `7F00` + キー番号を 16 進で手入力する (例: `MIC(F13)` = `7F68`、`MIC(F1)` = `7F3A`、`MIC(A)` = `7F04`。F1〜F24 の表は §0-5) |
 
-★ **なぜ 2 通りあるのか。** VIA の `customKeycodes` は並び順がそのまま
-キーコードの番号 (`QK_KB_0` = 0x7E00 から) になり、`QK_KB` は
+★ **なぜ customKeycodes に並べないのか。** VIA の `customKeycodes` は並び順が
+そのままキーコードの番号 (`QK_KB_0` = 0x7E00 から) になり、`QK_KB` は
 **0x7E00..0x7E3F の 64 個しかない**。「MIC + 8 bit」の 256 個の連続領域は
-そこに入らないので、領域は `QK_USER` (0x7E40..0x7FFF) の上半分に置き、
-VIA からは 24 個の名前付きの入口を通す (本体が `MIC(kc)` に読み替える)。
-入口の並びは **`MIC_F13`〜`MIC_F24`、そのうしろに `MIC_F1`〜`MIC_F12`**。
-F1〜F12 はあとから足したので (2026-09-21)、先にあった F13〜F24 の番号
-(0x7E08〜0x7E13) は動かしていない — **保存済みの配列がその番号で入っている**。
+そこに入らないので、領域は `QK_USER` (0x7E40..0x7FFF) の上半分に置いた。
+2026-09-21〜09-28 は VIA に名前付きの入口 `MIC_F13`〜`MIC_F24` (0x7E08〜0x7E13)
+と `MIC_F1`〜`MIC_F12` (0x7E14〜0x7E1F) を並べ、本体が `MIC(kc)` に読み替えて
+いた。**2026-09-29 に入口を消した** — Remap は customKeycodes を先頭 32 個
+しか出さず、そのうしろにいた Custom_0〜9 が Remap に出なかったため。
+保存済みの配列に入っていた入口は、下の移行 2 が `MIC(kc)` に書き換える。
 
 #### ★ 既定配列を変えても、保存済みの配列は変わらない (2026-09-21 に実機で踏んだ)
 
@@ -1143,6 +1180,17 @@ F1〜F12 はあとから足したので (2026-09-21)、先にあった F13〜F24
 | 移行 | 中身 |
 |---|---|
 | 1 (2026-09-21) | レイヤー 0 / row 3 / col 9 が `KC_F13` (旧い既定) か `0x7E08` (同じ日に一度だけ存在した `STK_MIC_KEY`) なら `MIC(KC_F13)` にする |
+| 2 (2026-09-29) | **全レイヤー・全キー**の旧い番号を付け替える: `0x7E08`〜`0x7E13` (旧 `MIC_F13`〜`F24`) → `MIC(F13)`〜`MIC(F24)` = `0x7F68`〜`0x7F73`、`0x7E14`〜`0x7E1F` (旧 `MIC_F1`〜`F12`) → `MIC(F1)`〜`MIC(F12)` = `0x7F3A`〜`0x7F45`、`0x7E20`〜`0x7E29` (旧 `CSTM_0`〜`9`) → `Custom_0`〜`9` = `0x7E08`〜`0x7E11` |
+
+★ **移行 2 は、旧 `MIC_F13` と新 `Custom_0` が同じ `0x7E08`。** 1 キーを
+1 回だけ読み、**読んだ旧い値だけで**行き先を決めて書く (書いた値をもう一度
+表に通さない)。だから旧 `CSTM_0` (0x7E20) が 0x7E08 を経て `MIC(F13)` に
+化けることはない。二度目は番号 (2) で止まる — 当て直すと新しい `Custom_0` を
+旧 `MIC_F13` と読んでしまうので、番号で守るのが要。
+★ 起動時に当てた結果はログ (`input: キーマップの移行: 番号 1 → 2、書き換え N 件
+(旧 MIC 入口 → MIC(kc) M / 旧 CSTM → Custom C)`) と、`status` の
+`keys.mig` (`{"from":1,"level":2,"changed":N,"mic":M,"custom":C}`) に出る。
+移行の番号そのものは VIA からは読めない。
 
 ★ **既定配列を変えたら、ここに 1 段足すこと。** 足さないと、VIA を使った
 ことのある本体にだけ新しい既定が届かない、という見つけにくい形で壊れる。
@@ -1171,7 +1219,7 @@ t[ms]  state      grp frm cur  mic    crc32        顔 (CRC で特定)
 |---|---|---|
 | `MIC(KC_F14)` = `0x7F69` | **True** | `listening` |
 | `MIC(KC_F24)` = `0x7F73` | **True** | `listening` |
-| VIA の入口 `MIC_F14` = `0x7E09` | **True** | `listening` (本体が `MIC(F14)` に読み替えた) |
+| VIA の入口 `MIC_F14` = `0x7E09` (当時。2026-09-29 に廃止) | **True** | `listening` (本体が `MIC(F14)` に読み替えた) |
 | 素の `F14` = `0x0069` | False | `idle` (包んでいないので顔は変わらない) |
 
 聞き取り中の 3 コマ (`listening/a_00` `a_01` `a_02` = 顔 10/11/12) が
@@ -2284,7 +2332,7 @@ SOF の寸法) を確かめる。ALDO3 が落ちていることも見る。
 `talk.result` は直近の画像の往復の結末 (`none` / `pending` / `done` / `error` /
 `ignored`)。error / ignored で終わると `talk.looks_failed` が増える。
 ★ サーバーのジョブが `{"state":"error"}` で終わったら (音声合成の 500 など)、
-会話・画像・CSTM の prompt 方式のどれでも**会話エラー**として扱う:
+会話・画像・Custom の prompt 方式のどれでも**会話エラー**として扱う:
 `talk.error` に文言、`errors` を数え、画面に「会話エラー: …」
 (2026-09-27 まで `ignored` と同じ扱いで `error` が空のまま終わり、
 画像では結末がどこにも残らなかった)。`{"state":"ignored"}` は従来どおり
@@ -2305,18 +2353,27 @@ python3 tools/check_phase4.py --transport hid --only look
 
 ★ `STACKEE_CAMERA_PATH` / `/image` は使わなくなった (送り先は `/look` に決まった)。
 
-### 17-2c. stackee 独自キー CSTM_0〜CSTM_9 (2026-09-27)
+### 17-2c. stackee 独自キー Custom_0〜Custom_9 (2026-09-27)
 
-`STK_CSTM_n` (VIA / Remap の `Custom` タブでは `CSTM_n`) を押した瞬間に 1 回、
-サーバへ「CSTM_n が押された」と送る。**何をするかはサーバ次第**で、本体は
+`STK_CUSTOM_n` (VIA / Remap の customKeycodes では `Custom_n`) を押した瞬間に 1 回、
+サーバへ「Custom_n が押された」と送る。**何をするかはサーバ次第**で、本体は
 返ってきた指示どおりに動く。離したときには何も送らない。
+
+★ 2026-09-27 に `CSTM_n` の名前で入れ、2026-09-29 に `Custom_n` へ改名した
+(本文 `{"key":"CSTM_3"}` → `{"key":"Custom_3"}`、コンソールの `key.cstm` →
+`key.custom`)。同じ日にキーコードも 0x7E20〜0x7E29 → **0x7E08〜0x7E11** へ
+移した (Remap に出すため。§0-5)。
+
+| キー | キーコード | Remap の「カスタム」タブ |
+|---|---|---|
+| `Custom_0`〜`Custom_9` | 0x7E08〜0x7E11 (`STK_CUSTOM_0` = 0x7E08 … `STK_CUSTOM_9` = 0x7E11) | 名前で並ぶ (手入力なら `7E08`〜`7E11`) |
 
 | 決まり (サーバとの取り決め) | 値 |
 |---|---|
 | 送り先 | `/look` と同じ規則。`STACKEE_TALK_URL` の末尾 `/talk` を `/key` / `/inbox` にしたもの。Bearer と HTTPS も同じ |
 | 押した直後 | **送る前に** `GET /inbox` → `{"state":"empty","seq":N}` で「最後に見た seq」を得る。覚えておき、5 分以内の次の押下では使い回す (TLS の握手を 1 回省く)。受け箱の応答で seq が分かるたびに覚え直す |
-| 送信 | `POST /key`、`Content-Type: application/json`、本文 `{"key":"CSTM_3"}` |
-| `200 {"state":"ignored"}` | 未設定。**音なし**で、帯に「CSTM_3 未設定」を 2.5 秒出して終わる |
+| 送信 | `POST /key`、`Content-Type: application/json`、本文 `{"key":"Custom_3"}` |
+| `200 {"state":"ignored"}` | 未設定。**音なし**で、帯に「Custom_3 未設定」を 2.5 秒出して終わる |
 | `409` | 「会話エラー: サーバーが処理中です (HTTP 409)」 |
 | `202 {id, status_url, mode:"prompt"}` | **/look と完全に同じ後半** (返答待ち → 一次回答 → 音声 + 字幕)。状態機械の同じ道を歩く |
 | `202 {id, status_url, mode:"command"}` | 受け箱を回す: `GET /inbox?after=<seq>&wait=25&job=<id>` を繰り返す |
@@ -2336,8 +2393,8 @@ python3 tools/check_phase4.py --transport hid --only look
 
 | いつ | 何が起きる |
 |---|---|
-| 会話中 (録音 / 送信 / 返答待ち / 再生、一次回答が鳴っている、`STK_TALK` を押している)・撮影中・画像の往復中・他の CSTM の処理中に `STK_CSTM_n` | **黙って無視** (画面にも何も出さない。`key.cstm_status` の `counts.busy` が増える) |
-| CSTM の処理中 (発話の再生中を含む) に `STK_TALK` / `STK_CAMERA` | 受け付けない (録音しない / 撮らない) |
+| 会話中 (録音 / 送信 / 返答待ち / 再生、一次回答が鳴っている、`STK_TALK` を押している)・撮影中・画像の往復中・他の Custom の処理中に `STK_CUSTOM_n` | **黙って無視** (画面にも何も出さない。`key.custom_status` の `counts.busy` が増える) |
+| Custom の処理中 (発話の再生中を含む) に `STK_TALK` / `STK_CAMERA` | 受け付けない (録音しない / 撮らない) |
 | 同じ間の `talk.inject` / `audio.play` / `audio.selftest` | `busy` で断る |
 
 ★ **USB マイク (UAC、full) は、コマンドの受け箱を待っている間は止めない**
@@ -2349,27 +2406,27 @@ python3 tools/check_phase4.py --transport hid --only look
 
 **第 2 段**: 受け箱の取得と発話 1 件の再生 (`take_say` → 再生 / 字幕) は
 キー押下に縛られない形にしてあり、暇なときの常時ポーリング (§17-2e) が
-同じ部品を使う。★ 常時ポーリングが seq を新しく保つので、CSTM を押したとき
+同じ部品を使う。★ 常時ポーリングが seq を新しく保つので、Custom を押したとき
 は `GET /inbox` を省いてすぐ `POST /key` を送る (`seq_reused=1`)。
 
 #### console (人手ゼロ・無音で確かめる)
 
 | コマンド | 中身 |
 |---|---|
-| `key.cstm` `{"n":3,"play":0}` | キーと同じ流れを起こす。**非同期** (すぐ返る)。**`play` の既定は 0** = 発話・返答の PCM を受け取り終えたところで止め、**一次回答も含めて何も鳴らさない**。`play:1` でキーと同じく鳴らす。処理中なら `busy` |
-| `key.cstm_status` | `state` `active` `seq` (押下の回数) `n` `play` `mode` (`prompt` / `command`) `final` (`done` / `ignored` / `error`) `job_id` `job_state` `says` `polls` `inbox_seq` `seq_valid` `seq_reused`、`t:{seq, key, accepted, reply_ready, audio_ready, first_say, end}` (押下からの ms)、`reply_len` `audio_bytes`、`counts:{count, done, ignored, errors, busy}`、`http_status` `null`、`say:[{seq, at, sub, pages, audio, audio_bytes, got, reply_len, played}]` (先頭 8 件)、`error` |
+| `key.custom` `{"n":3,"play":0}` | キーと同じ流れを起こす。**非同期** (すぐ返る)。**`play` の既定は 0** = 発話・返答の PCM を受け取り終えたところで止め、**一次回答も含めて何も鳴らさない**。`play:1` でキーと同じく鳴らす。処理中なら `busy` |
+| `key.custom_status` | `state` `active` `seq` (押下の回数) `n` `play` `mode` (`prompt` / `command`) `final` (`done` / `ignored` / `error`) `job_id` `job_state` `says` `polls` `inbox_seq` `seq_valid` `seq_reused`、`t:{seq, key, accepted, reply_ready, audio_ready, first_say, end}` (押下からの ms)、`reply_len` `audio_bytes`、`counts:{count, done, ignored, errors, busy}`、`http_status` `null`、`say:[{seq, at, sub, pages, audio, audio_bytes, got, reply_len, played}]` (先頭 8 件)、`error` |
 
 終わりの見分け方: `seq` が増えて `active == 0`。ログには 1 回ごとに
-`[cstm] {…}`、発話ごとに `[cstm-say] {…}`。
+`[custom] {…}`、発話ごとに `[custom-say] {…}`。
 
 ```
-python3 tools/check_phase4.py --only cstm --cstm-key 9                    # 鳴らさない
-python3 tools/check_phase4.py --transport hid --only cstm --cstm-key 9 --cstm-expect command
+python3 tools/check_phase4.py --only custom --custom-key 9                    # 鳴らさない
+python3 tools/check_phase4.py --transport hid --only custom --custom-key 9 --custom-expect command
 ```
 
-`--only cstm` を書いたときだけ走る (サーバに仕事を 1 件投げるので既定の組には
-入れていない)。**サーバ側に `--cstm-key` のキーの試験用の設定が要る**
-(未設定なら `ignored` で NG)。先に `audio.null` を立て、`key.cstm play=0` で
+`--only custom` を書いたときだけ走る (サーバに仕事を 1 件投げるので既定の組には
+入れていない)。**サーバ側に `--custom-key` のキーの試験用の設定が要る**
+(未設定なら `ignored` で NG)。先に `audio.null` を立て、`key.custom play=0` で
 流し、待っている間は `key.inject` を回して打鍵の遅延も見る。**終わったら
 `audio.null` を元の値に戻す** (立てたままだと返答が鳴らなくなる)。
 
@@ -2435,7 +2492,7 @@ esp_http_client の送受信の作業領域は **4,100 B** にして PSRAM に�
 
 ### 17-2e. 暇なときに受け箱を見る (常時ポーリング、2026-09-27)
 
-会話・写真・CSTM・OTA 書き込みのどれもしておらず、Wi-Fi が上がっていて
+会話・写真・Custom・OTA 書き込みのどれもしておらず、Wi-Fi が上がっていて
 `STACKEE_TALK_URL` があれば、受け箱を回し続ける。サーバ (ubook の
 `stackee-say` など) が置いた発話を、キーを押さなくても鳴らす / 字幕に出す。
 
@@ -2444,16 +2501,16 @@ esp_http_client の送受信の作業領域は **4,100 B** にして PSRAM に�
 | 起動時・Wi-Fi の再接続時 | `GET /inbox` | 最新の `seq` を覚えるだけ。**それより前の発話は鳴らさない** |
 | 待つ | `GET /inbox?after=<seq>&wait=25` | 中継が 25 秒握る。空なら `seq` を覚え直してすぐ撃ち直す |
 | 接続が無いとき (張り直しの最初の 1 本) | `GET /inbox?after=<seq>` | 待たない要求にする。張っている最中にキーで打ち切られても、張れた接続を次の要求 (会話の POST など) に回せる |
-| `state:"say"` | CSTM のコマンドと同じ部品 | `audio_url` があれば PCM を取って字幕つきで鳴らす。無ければ字幕だけ。`seq` を進めてまた待つ |
+| `state:"say"` | Custom のコマンドと同じ部品 | `audio_url` があれば PCM を取って字幕つきで鳴らす。無ければ字幕だけ。`seq` を進めてまた待つ |
 
 ★ **待っている間は「暇」のまま。** 状態機械は `idle` のままなので、
-会話キー・カメラ・CSTM・`talk.inject` はいつでも入る。**押した瞬間に待ちを
+会話キー・カメラ・Custom・`talk.inject` はいつでも入る。**押した瞬間に待ちを
 打ち切る** (通信タスクがソケットを `shutdown` し、データ待ちで止まっている
 `recv` をすぐ返らせる。以前の取り消しはデータが来るまで最大 40 秒効かなかった)。
 打ち切った接続は捨てて張り直す。`seq` で続きから聞くので取りこぼしは無い
 (サーバは 5 分・16 件保持)。
 ★ **断るのは受けた発話を扱っている間だけ** (PCM の取得〜鳴り終わり / 字幕を
-出している間。会話キーは録音しない・カメラは撮らない・CSTM は無視、の
+出している間。会話キーは録音しない・カメラは撮らない・Custom は無視、の
 いつもの排他)。
 ★ USB マイク (UAC)・音量の保存・Wi-Fi の走査の「後回し」は、待っているだけでは
 発動しない。発話の PCM を取っている間も発動しない。**鳴らしている間だけ**
@@ -3556,7 +3613,7 @@ PSRAM でよい。PSRAM が取れない機体では内蔵 RAM に落ちる (動�
   コンソールを持つ main タスク (CPU0 の優先度 1) が長く止められている。
   `status` は集める項目がいちばん多いので最初に現れる。**原因は未調査。**
 
-### 24-5. CSTM を入れた版で内蔵 RAM が 13 KB 減っていた件 (2026-09-27)
+### 24-5. CSTM (いまの Custom) を入れた版で内蔵 RAM が 13 KB 減っていた件 (2026-09-27)
 
 実機 (43e0cbf、起動 410 秒): `heap_internal` **17,711** / 最大の塊 8,192 /
 最小 8,016。86a6bf5 / 818614a では 30〜33 KB だった。繰り返しても減り続けは

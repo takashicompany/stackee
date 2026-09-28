@@ -27,6 +27,8 @@ void stackee_lcd_stats(uint32_t*a,uint32_t*b,uint32_t*c){*a=3;*b=320;*c=41;}
 void stackee_input_stats(stackee_input_stats_t *out){
     out->tca_connected=true; out->key_events=12; out->keys_down=1;
     out->overflows=0; out->io_fails=0; out->stray=0; out->custom_keys=2;
+    out->mig_from=1; out->mig_level=2; out->mig_changed=3;
+    out->mig_mic=2; out->mig_custom=1;
 }
 void stackee_usb_request_rom_download(void){printf("ROM\n");}
 void stackee_usb_request_restart(void){printf("RESET\n");}
@@ -199,7 +201,7 @@ int main(void) {
     emit();
     reply_key_inject(14, "{\"id\":14,\"cmd\":\"key.inject\",\"kc\":\"NOPE\"}");
     // `"wait":false` — 押し始めてすぐ返る道 (遅延は返らない)。
-    reply_key_inject(15, "{\"id\":15,\"cmd\":\"key.inject\",\"kc\":32264,"
+    reply_key_inject(15, "{\"id\":15,\"cmd\":\"key.inject\",\"kc\":32616,"
                          "\"hold_ms\":1500,\"wait\":false}");
     // ★ 文字列の取り出し。stackee_console_client.py は ensure_ascii=True で
     //   送るので、日本語の SSID は \uXXXX で来る。パスワードに `"` が入る

@@ -20,6 +20,12 @@ typedef struct {
     uint32_t io_fails;
     uint32_t stray;
     uint32_t custom_keys;       // 独自キー (STK_*) が押された回数
+    // 起動時のキーマップの移行 (qmk_port/stackee_keymap_migrate.c)。
+    uint32_t mig_from;          // 起動したときの移行番号
+    uint32_t mig_level;         // 当てたあとの番号
+    int      mig_changed;       // 書き換えたキーの総数
+    int      mig_mic;           // 移行 2: 旧 MIC 入口 → MIC(kc)
+    int      mig_custom;        // 移行 2: 旧 CSTM_n → Custom_n
 } stackee_input_stats_t;
 
 void stackee_input_stats(stackee_input_stats_t *out);

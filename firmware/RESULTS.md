@@ -1704,6 +1704,10 @@ python3 firmware/tools/check_phase4.py --transport hid --only look
 
 ## stackee 独自キー CSTM_0〜CSTM_9 (POST /key + 受け箱) 2026-09-27 — **予定 (まだ書き込んでいない)**
 
+★ 2026-09-29 に `CSTM_n` → **`Custom_n`** へ改名し、キーコードを 0x7E20〜 →
+**0x7E08〜0x7E11** へ詰めた (下の「予定」節)。ここのビルド・テストの数字は当時の
+もの。書き込み後の確認手順は新しい名前 (`key.custom` / `--only custom`) に直してある。
+
 README §17-2c。`STK_CSTM_n` → `GET /inbox` (seq) → `POST /key` → 未設定 / prompt
 (/look と同じ後半) / command (受け箱の発話を鳴らす)。**実機には書き込んでいない**。
 下の数字はビルドとホストテストだけ。
@@ -1741,30 +1745,30 @@ seq の使い回しと 5 分での取り直し・次のコマンドへの seq �
 
 ### 書き込み後に回す確認 (人手ゼロ・無音)
 
-★ **サーバ側に試験用のキー設定が要る** (例: CSTM_9 を prompt、CSTM_8 を
+★ **サーバ側に試験用のキー設定が要る** (例: Custom_9 を prompt、Custom_8 を
 command に)。未設定のキーでは `final=ignored` になる (それはそれで
 「未設定」の確認になる)。
 
 ```
-python3 firmware/tools/check_phase4.py --transport hid --only cstm --cstm-key 9 --cstm-expect prompt
-python3 firmware/tools/check_phase4.py --transport hid --only cstm --cstm-key 8 --cstm-expect command
+python3 firmware/tools/check_phase4.py --transport hid --only custom --custom-key 9 --custom-expect prompt
+python3 firmware/tools/check_phase4.py --transport hid --only custom --custom-key 8 --custom-expect command
 ```
 
 check スクリプトは先に `audio.null` を立て、**終わったら元の値に戻す**
-(`CSTM_n audio.null を戻した` の行で確かめる)。手で撃つなら:
+(`Custom_n audio.null を戻した` の行で確かめる)。手で撃つなら:
 
 ```
 {"cmd":"audio.status"}                   -> null の元の値を控える
 {"cmd":"audio.null","on":true}
-{"cmd":"key.cstm","n":9,"play":0}        -> {"ok":1,"n":9,"play":0,"seq":N,...} (すぐ返る)
-{"cmd":"key.cstm_status"}                -> 1 秒おきに。seq が N で active=0 になるまで
-{"cmd":"log.tail"}                       -> [cstm] {...} / [cstm-say] {...}
+{"cmd":"key.custom","n":9,"play":0}        -> {"ok":1,"n":9,"play":0,"seq":N,...} (すぐ返る)
+{"cmd":"key.custom_status"}                -> 1 秒おきに。seq が N で active=0 になるまで
+{"cmd":"log.tail"}                       -> [custom] {...} / [custom-say] {...}
 {"cmd":"audio.null","on":false}          -> ★ 元が false なら必ず戻す
 ```
 
 | 見るもの | 期待値 |
 |---|---|
-| `key.cstm_status.final` | `done` (未設定のキーなら `ignored`) |
+| `key.custom_status.final` | `done` (未設定のキーなら `ignored`) |
 | `mode` | サーバの設定どおり (`prompt` / `command`) |
 | `t.seq` / `t.key` | 初回は `seq` > 0 (GET /inbox)、5 分以内の 2 回目は `seq_reused=1` で `t.seq=0` |
 | prompt: `reply_len` / `audio_bytes` | 0 より大きい (返答文と PCM を受け取った) |
@@ -1778,18 +1782,18 @@ check スクリプトは先に `audio.null` を立て、**終わったら元の�
 
 | 手順 | 期待値 |
 |---|---|
-| `talk.inject` の直後 (返答待ちの間) に `key.cstm` | `{"error":"busy"}`、`counts.busy` が 1 増える、何も送らない |
-| `key.cstm` の処理中 (`active=1`) に `talk.inject` / `camera.look` / `audio.play` | `busy` / `camera.look_status.phase=ignored` / `busy` |
-| `key.cstm` の処理中にもう一度 `key.cstm` | `{"error":"busy"}` |
-| `wifi.off` のあと `key.cstm` | `final=error`、`error="Wi-Fi 未接続です"`、何も送らない |
+| `talk.inject` の直後 (返答待ちの間) に `key.custom` | `{"error":"busy"}`、`counts.busy` が 1 増える、何も送らない |
+| `key.custom` の処理中 (`active=1`) に `talk.inject` / `camera.look` / `audio.play` | `busy` / `camera.look_status.phase=ignored` / `busy` |
+| `key.custom` の処理中にもう一度 `key.custom` | `{"error":"busy"}` |
+| `wifi.off` のあと `key.custom` | `final=error`、`error="Wi-Fi 未接続です"`、何も送らない |
 
 ### 未確認のまま
 
 | 項目 | なぜ |
 |---|---|
 | **実機で 1 往復通るか** | 書き込んでいない。サーバ側の `/key` と `/inbox` も別の作業者が作っている最中 |
-| **本物のキーを指で押したとき** | キーは `play=1` で鳴らす。無音の約束があるので `key.cstm play=0` で代わりに見る (状態機械の入口は同じ `stackee_talk_cstm`) |
-| **帯の「CSTM_n 未設定」とエラーの見え方** | 帯に置く文字列はホストテストで見た。`lcd.crc` / `ui.status` の字幕で無音のまま確かめられる |
+| **本物のキーを指で押したとき** | キーは `play=1` で鳴らす。無音の約束があるので `key.custom play=0` で代わりに見る (状態機械の入口は同じ `stackee_talk_custom`) |
+| **帯の「Custom_n 未設定」とエラーの見え方** | 帯に置く文字列はホストテストで見た。`lcd.crc` / `ui.status` の字幕で無音のまま確かめられる |
 | **受け箱を待っている間の USB マイク** | full のとき、コマンドの待ち (最大 10 分) では UAC を止めない作りにした。実機の UAC では未確認 |
 | **中継の `&wait=` の扱い** | 本体は `?after=…&wait=25&job=…` の `wait` も見て、その秒数 + 15 秒まで待つ (従来は `?wait=` だけ)。中継が `wait` を読んで握るかはサーバ側次第 |
 
@@ -1872,8 +1876,8 @@ python3 tools/console_hid.py inbox.status    # phase=poll, seq_known=1, http.con
 ```
 python3 tools/console_hid.py inbox.enable on=1 play=0
 python3 tools/check_phase4.py --transport hid --only look
-python3 tools/check_phase4.py --transport hid --only cstm --cstm-key 9 --cstm-expect prompt
-python3 tools/check_phase4.py --transport hid --only cstm --cstm-key 8 --cstm-expect command
+python3 tools/check_phase4.py --transport hid --only custom --custom-key 9 --custom-expect prompt
+python3 tools/check_phase4.py --transport hid --only custom --custom-key 8 --custom-expect command
 # 会話 (無音): audio.null を立てて talk.inject
 python3 tools/console_hid.py audio.null on=true
 python3 tools/console_hid.py talk.inject ms=2000
@@ -1884,12 +1888,12 @@ python3 tools/console_hid.py heap.info       # 毎回ここで marks と interna
 
 | 見るもの | 期待値 |
 |---|---|
-| look / cstm prompt / cstm command / 会話 | 前の版と同じく通る (final=done、reply_len > 0、audio_bytes > 0、played=0) |
+| look / custom prompt / custom command / 会話 | 前の版と同じく通る (final=done、reply_len > 0、audio_bytes > 0、played=0) |
 | `log.tail` の `[talk-http-timing]` | 会話 1 回: POST は `reused=0` (キーで待ちを打ち切った直後なので張る。`connect_ms` ≈ 4,000〜5,000)、続く `GET /jobs/…?wait=25` と `GET …/audio` は **`reused=1`・`connect_ms=0`** |
 | 返答までの時間 (`[talk-turn-timing]`) | 受理 `accepted_ms` は前と同じ ~7〜8 s (POST は張る)。**`audio_ready_ms` は前の ~24〜26 s より握手 2 回ぶん (約 9 s) 短い見込み** |
-| CSTM | `seq_reused=1` (常時ポーリングが seq を新しく保つので `GET /inbox` を省く)、`t.key` が前より短い |
+| Custom | `seq_reused=1` (常時ポーリングが seq を新しく保つので `GET /inbox` を省く)、`t.key` が前より短い |
 | `heap.info.marks` | 1 往復で 1 KB 以上減った要求があれば `-<B> <path>` が残る。**ここに約 12 KB の目印が出れば、それが §24-5 の原因** |
-| `heap_internal` | **30 KB 台を割らない** (look / cstm / 会話を一通り回したあと) |
+| `heap_internal` | **30 KB 台を割らない** (look / custom / 会話を一通り回したあと) |
 | `heap_internal_min` | 前の版の 8,016 より大きい |
 
 **3. 常時ポーリング**
@@ -1899,7 +1903,7 @@ python3 tools/console_hid.py heap.info       # 毎回ここで marks と interna
 | `inbox.status` を 30 秒あけて 2 回 | `polls` が増える、`fails=0`、`http.reused` が増える、`http.connects` は増えない |
 | ubook で `server/bin/stackee-say --no-voice "テスト"` → `inbox.status` | `received` が 1 増える、`played` は増えない (play=0)、`seq` が進む |
 | 待っている最中に会話キーを短く押す (`key.inject kc=32256 hold_ms=200`。32256 = `STK_TALK`) → `inbox.status` | `aborts` が 1 増える、`http.shutdowns` が 1 増える。短押しは「送信しませんでした」で戻り、受け箱はまた待ち始める |
-| 同じく `key.cstm n=9 play=0` / `camera.look play=0` | `aborts` が増え、それぞれ前と同じく最後まで通る |
+| 同じく `key.custom n=9 play=0` / `camera.look play=0` | `aborts` が増え、それぞれ前と同じく最後まで通る |
 | 押下 → 録音開始の遅れ | 上の短押しのあとの `talk.status.first_sample_ms` が前の版と同じ桁 (録音を始めてから待ちを打ち切る作りなので増えないはず)。★ `audio.selftest` は使わない |
 | 待っている間の打鍵・タッチ | `key.inject` を 20 回 → `press_ms` 中央値 ≤ 2 ms / 最大 ≤ 5 ms。`status.perf.input_loop.max_us` / `perf.main.max_us` が前の版と同じ桁 (待っているだけでは CPU を使わない) |
 | `ota.*` の最中 (Web 操作盤から書き込むとき) | `inbox.status.phase=wait`・`waiting=0` (止まっている)。書き込みは前と同じ時間で終わる |
@@ -1915,3 +1919,52 @@ python3 tools/console_hid.py heap.info       # 毎回ここで marks と interna
 | **ISRG Root YE を信頼点に足す (握手の計算を 1 回減らす)** | 入れていない。接続を使い回すと握手そのものが減るので効果が小さく、書き込み前に効果を測れないため |
 | **本物のキーを指で押したとき** | `key.inject` で代わりに見る (入口は同じ) |
 | **握手の最中の打ち切り** | TLS の握手中はソケットを起こせない。持っていた接続が死んでいて張り直し中の待ちをキーで打ち切ると、次の要求がその握手のぶん待つ (まれ。独立レビューの指摘、直していない) |
+
+## VIA の独自キーを詰める・CSTM を Custom に改名 2026-09-29 — **予定 (まだ書き込んでいない)**
+
+README §0-5 / §10-1 (移行 2) / §17-2c。Remap は customKeycodes を先頭 32 個
+(0x7E00〜0x7E1F) しか出さず、0x7E20〜 にいた CSTM_0〜9 が出なかった。
+MIC の名前付きの入口 24 個 (0x7E08〜0x7E1F) を消し、`STK_CUSTOM_0`〜`9`
+(表示 `Custom_0`〜`9`) を **0x7E08〜0x7E11** に詰めた (customKeycodes は 18 個)。
+MIC は Remap の「カスタム」タブで `7F00` + キー番号を手入力する。
+本体が送る本文は `{"key":"Custom_3"}`、コンソールは `key.custom` / `key.custom_status`。
+
+保存済みの配列は起動時の **移行 2** が書き換える (1 回だけ。番号 1 → 2):
+旧 0x7E08〜0x7E13 → MIC(F13〜F24) = 0x7F68〜0x7F73、旧 0x7E14〜0x7E1F →
+MIC(F1〜F12) = 0x7F3A〜0x7F45、旧 0x7E20〜0x7E29 → 0x7E08〜0x7E11。
+
+### 書き込み前の実機 (VIA の読み出し 0x11 / 0x12 だけ。書いていない)
+
+6 レイヤー 300 キーのうち 0x7E00 以上のもの:
+
+| 位置 | 値 |
+|---|---|
+| L0 r3 c0 / c1 | 0x7E02 (STK_VOLDN) / 0x7E01 (STK_VOLUP) |
+| L0 r3 c9 | 0x7F68 (MIC(F13)) |
+| L0 r4 c4 / c5 | 0x7E06 (STK_TOUCH_SCROLL) / 0x7E00 (STK_TALK) |
+| L1 r2 c0 | 0x7E07 (STK_MT_0) |
+| L5 r2 c3 / c4 | 0x7E04 (STK_BLE_REFRESH) / 0x7E03 (STK_HID_SWITCH) |
+
+**旧い番号 (0x7E08〜0x7E29) は 1 つも入っていない** → この本体では移行 2 は
+0 件のはず (番号だけ 1 → 2 に進む)。
+
+### ビルド・ホストテスト
+
+| | dev | full |
+|---|---:|---:|
+| 像 (`stackee.bin`) | 1,417,504 B (67%) | 1,419,024 B (67%) |
+
+ホストテスト **650 件** (`tools/test_*.py` をファイルごとに、全部 OK)。
+`test_keyseq_host` に移行 2 (旧 MIC 入口・旧 CSTM・取り違えなし・二度目は無変更・
+関係ないキー 300 個不変・番号 0 からの 2 段・既定配列) と MIC(F1〜F24)・Custom_0〜9。
+`gen_keymap.py --check` は「生成物は最新」。
+
+### 書き込み後に回す確認 (人手ゼロ・無音)
+
+| 見るもの | 期待値 |
+|---|---|
+| `status` の `keys.mig` | `{"from":1,"level":2,"changed":0,"mic":0,"custom":0}` (この本体は旧い番号が無い) |
+| ログ | `キーマップの移行: 番号 1 → 2、書き換え 0 件 …` |
+| VIA の読み出し (0x12) | 上の表と 300 キーすべて同じ (書き換え 0 件なので) |
+| 再起動をもう 1 回 | `keys.mig` が `from=2 level=2 changed=0` (二度目は当たらない) |
+| `hello` の features | `key.custom` / `key.custom_status` がある (`key.cstm` は無い) |

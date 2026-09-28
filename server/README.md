@@ -126,7 +126,7 @@ systemctl --user disable --now stackee-talk stackee-voicevox
 | `server/agent/defaults/AGENTS.md` / `CLAUDE.md` / `agent.json` | Git 追跡。出荷時の既定値 |
 | `server/agent/AGENTS.md` / `CLAUDE.md` / `agent.json` | 実行時ファイル。Git 管理外 |
 | `server/agent/.state/session.json` | 継続する会話の ID。Git 管理外 |
-| `server/agent/defaults/keys.json` / `server/agent/keys.json` | 独自キー CSTM_0〜9 の設定 (既定は全キー未設定)。実行時ファイルは Git 管理外 |
+| `server/agent/defaults/keys.json` / `server/agent/keys.json` | 独自キー Custom_0〜9 の設定 (既定は全キー未設定)。実行時ファイルは Git 管理外。旧名 CSTM_n のファイルも読める |
 
 サーバー起動時、実行時ファイルが無ければ `defaults/` からコピーします。あれば触りません。
 初回配置や、誤って消した場合はサービスを再起動すれば復元されます。
@@ -228,7 +228,7 @@ URL の Web 操作盤からの編集は今後追加します。現在は S3 の�
 | `GET /jobs/{id}/audio` | 返答の生 PCM (16kHz、符号付き16bit LE、mono) を取得 |
 | `GET /jobs/{id}/subtitles` | 返答の字幕 (開始ミリ秒とページ本文) を取得 |
 | `GET /admin` ほか | 管理画面と設定 API (上記「管理画面」を参照) |
-| `POST /key` | 独自キー CSTM_0〜9 の押下 (下記「独自キーと受け箱」) |
+| `POST /key` | 独自キー Custom_0〜9 の押下 (下記「独自キーと受け箱」) |
 | `GET /inbox` | 受け箱。本体が取りに来る発話 (下記「独自キーと受け箱」) |
 | `GET /inbox/{seq}/audio` | 受け箱の発話の生 PCM |
 | `POST /say` | 受け箱に発話を積む。**このマシンからだけ** (`stackee-say` が使う) |
@@ -317,12 +317,16 @@ URL 除去・文ごとの合成・長さ調整・音量制限・字幕化をし�
 
 ## 独自キーと受け箱 (`POST /key`・`stackee-say`・`GET /inbox`)
 
-本体の独自キー CSTM_0〜CSTM_9 を押すと、本体はサーバーに「CSTM_n が押された」とだけ伝えます。
+本体の独自キー Custom_0〜Custom_9 を押すと、本体はサーバーに「Custom_n が押された」とだけ伝えます。
 何をするかはキーごとに管理画面で決めます。
+
+旧名 `CSTM_0`〜`CSTM_9` (2026-09-29 に改名) は互換のため受け、`Custom_n` として扱います
+(改名前のファームの本体・改名前に保存した `keys.json` のため)。応答・ログ・エラー文・環境変数・管理画面は
+すべて新名です。
 
 | 方式 | 動き |
 | --- | --- |
-| 未設定 | 何もしない。サーバーのログに記録するだけ (`200 {"state":"ignored","key":"CSTM_3"}`) |
+| 未設定 | 何もしない。サーバーのログに記録するだけ (`200 {"state":"ignored","key":"Custom_3"}`) |
 | プロンプト | 設定した文を会話エージェントの**同じ会話**に送り、返答を音声と字幕で返す。`/look` と同じジョブ (`transcript` は空) |
 | コマンド | このサーバーでコマンドラインを実行する。喋らせる・字幕を出すかはコマンドが `stackee-say` で決める |
 
@@ -333,37 +337,39 @@ URL 除去・文ごとの合成・長さ調整・音量制限・字幕化をし�
 (会話プロセスの再起動は不要)。中身は `server/agent/keys.json`:
 
 ```json
-{"CSTM_0": {"mode": "command", "prompt": "", "command": "stackee-say \"$(date +%H時%M分)です\"", "timeout": 300},
- "CSTM_1": {"mode": "prompt", "prompt": "今日の東京の天気を短く教えて", "command": "", "timeout": 300}}
+{"Custom_0": {"mode": "command", "prompt": "", "command": "stackee-say \"$(date +%H時%M分)です\"", "timeout": 300},
+ "Custom_1": {"mode": "prompt", "prompt": "今日の東京の天気を短く教えて", "command": "", "timeout": 300}}
 ```
 
 `mode` は `none` / `prompt` / `command`。書いていないキーは未設定です。方式を変えても反対側の文は残ります。
+旧名 `CSTM_n` で書かれた `keys.json` はそのまま読み、`Custom_n` として扱います (ファイルは書き換えません。
+新旧両方あれば新名を優先)。管理画面から保存すると新名で書き直されます。`PUT /admin/api/keys` に旧名が来ても同様です。
 認証はありません (LAN と Tailscale の中だけの前提)。コマンドはサーバーの実行ユーザーの権限で動くので、
 管理画面に届く人は誰でもこのマシンでコマンドを実行できます。
 
 ### `POST /key`
 
-`Content-Type: application/json`、本文 `{"key":"CSTM_3"}` (256 バイトまで)。`Origin` 付きは `403`。
+`Content-Type: application/json`、本文 `{"key":"Custom_3"}` (256 バイトまで)。旧名 `{"key":"CSTM_3"}` も互換のため受け、`Custom_3` として扱います。`Origin` 付きは `403`。
 
 | 応答 | 場合 |
 | --- | --- |
-| `200 {"state":"ignored","key":"CSTM_3"}` | 未設定のキー (処理中でもこちら) |
+| `200 {"state":"ignored","key":"Custom_3"}` | 未設定のキー (処理中でもこちら) |
 | `202 {id, status_url, mode:"prompt"}` | プロンプト方式。以降は `/look` と同じジョブ |
 | `202 {id, status_url, mode:"command"}` | コマンド方式 |
 | `409 {"error":"busy"}` | `/talk`・`/look`・`/key` のジョブが処理中 (同時処理 1 件の枠を共有) |
-| `400` / `413` / `415` | CSTM_0〜9 以外・JSON 不正 / 大きさ / MIME |
+| `400` / `413` / `415` | Custom_0〜9 (と旧名 CSTM_0〜9) 以外・JSON 不正 / 大きさ / MIME |
 | `500 {"error":"keys_unreadable"}` | `keys.json` が壊れている |
 
 コマンド方式のジョブ:
 
 - `/bin/sh -c '<コマンドライン>'` で実行します。作業ディレクトリは `server/agent/`。
-  環境変数 `STACKEE_KEY=CSTM_3`、`STACKEE_SAY_URL` (このサーバーの `/say`) を足し、
+  環境変数 `STACKEE_KEY=Custom_3` (旧名で押されても新名)、`STACKEE_SAY_URL` (このサーバーの `/say`) を足し、
   `PATH` の先頭に `server/bin/` (`stackee-say` の場所) を足します。標準入力は空です。
 - 実行中は `processing`。**コマンドが終わるまでジョブの枠を握ります** (その間の `/talk` などは `409`)。
 - 正常終了 → `done` で `{"state":"done","reply":"","exit_code":0}`。`audio_url` はありません
   (本体は何も鳴らさずに終わります。`/audio` と `/subtitles` は `404`)。
-- 終了コード≠0 → `error` で `"CSTM_3 失敗 (終了コード 2)"`、シグナルで終了 → `"CSTM_3 失敗 (シグナル 9)"`、
-  時間切れ → `"CSTM_3 時間切れ"`。時間切れのときはコマンドのプロセスグループごと止めます。
+- 終了コード≠0 → `error` で `"Custom_3 失敗 (終了コード 2)"`、シグナルで終了 → `"Custom_3 失敗 (シグナル 9)"`、
+  時間切れ → `"Custom_3 時間切れ"`。時間切れのときはコマンドのプロセスグループごと止めます。
 - 標準出力・標準エラーは一時ファイルに受け、それぞれ末尾 4 KB をログの `key-command` 行に残します。
 - コマンドが裏で子プロセスを残して終わるのは自由です (`sleep 60 && stackee-say 終わった &` など)。
   パイプではなくファイルに受けているので、残った子がジョブを引き止めることはありません。

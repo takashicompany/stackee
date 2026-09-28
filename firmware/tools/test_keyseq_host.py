@@ -143,23 +143,22 @@ POS_LANG1 = (3, 6)      # レイヤー 0: LT(1, LANG1)
 POS_TALK = (4, 5)       # レイヤー 0: KC.TALK (独自キー)
 POS_SPC = (4, 6)        # レイヤー 0: LT(2, SPC, prefer_hold=True)
 POS_VOLDN = (3, 0)      # レイヤー 0: KC.STK_VOLDN (独自キー)
-POS_MIC = (3, 9)        # レイヤー 0: STK_MIC_KEY (F13 を送る独自キー)
+POS_MIC = (3, 9)        # レイヤー 0: MIC(KC_F13) (F13 を送り、顔を変える)
 
 # 独自キーは「何をしたいか」で出る (qmk_port.h の stackee_key_action_t)。
 STK_TALK = 'TALK'
 STK_VOLDN = 'VOLDN'
 STK_MIC = 'MIC_KEY'
-CSTM_0 = 0x7E20          # STK_CSTM_0 (MIC_F12 = 0x7E1F のうしろ)
+CUSTOM_0 = 0x7E08        # STK_CUSTOM_0 (STK_MT_0 = 0x7E07 のうしろ、2026-09-29)
 KC_F13 = 0x68
+KC_F1 = 0x3A
 KC_A = 0x04
 # MIC(kc) = 0x7F00 | kc (main/qmk_port/stackee_keycodes.h)。
 MIC_BASE = 0x7F00
-MIC_ALIAS_F13 = 0x7E08          # VIA の名前付きの入口 (MIC_F13)
-MIC_ALIAS_F1 = 0x7E14           # そのうしろに足した MIC_F1
-# 入口の並び (via/stackee.json の customKeycodes と同じ順)。
-# F13..F24 = 0x68..0x73、F1..F12 = 0x3A..0x45。
-MIC_ALIAS_INNER = ([0x68 + i for i in range(12)] +
-                   [0x3A + i for i in range(12)])
+# 2026-09-29 に廃止した番号 (保存済みの配列にだけ残りうる。移行 2 が直す)。
+OLD_MIC_F13 = 0x7E08            # 旧 MIC_F13..MIC_F24 = 0x7E08..0x7E13
+OLD_MIC_F1 = 0x7E14             # 旧 MIC_F1..MIC_F12  = 0x7E14..0x7E1F
+OLD_CSTM_0 = 0x7E20             # 旧 CSTM_0..CSTM_9   = 0x7E20..0x7E29
 
 
 def MIC(kc):
@@ -356,33 +355,33 @@ class CustomKeyTest(unittest.TestCase):
                                    'CUSTOM %s 0' % STK_MIC,
                                    NONE], hex(kc))
 
-    def test_every_via_alias_resolves_to_its_key(self):
-        """名前付きの入口 24 個 (F13..F24 → F1..F12) が全部読み替わるか。
+    def test_mic_wraps_f13_to_f24_and_f1_to_f12(self):
+        """Remap の「カスタム」タブで手入力する MIC(F13..F24 / F1..F12)。
 
-        ★ 並びは customKeycodes と同じ順。**うしろにしか足さない** —
-          番号は保存済みの配列に入っているので、途中に足すと
-          保存済みの MIC_F13 (0x7E08) が別のキーに化ける。
+        ★ 名前付きの入口 (MIC_F13.. = 0x7E08..) は 2026-09-29 に廃止。
+          README §0-5 の表の番号 (7F68.. / 7F3A..) がそのまま効くこと。
         """
-        self.assertEqual(len(MIC_ALIAS_INNER), 24)
-        for index, kc in enumerate(MIC_ALIAS_INNER):
-            code = MIC_ALIAS_F13 + index
-            lines = run('kc 3 9 0x%04X\n' % code
+        inner = [KC_F13 + i for i in range(12)] + [KC_F1 + i for i in range(12)]
+        for kc in inner:
+            lines = run('kc 3 9 0x%04X\n' % MIC(kc)
                         + 't 100\nmark a\n' + tap(POS_MIC, 100, 50) + 't 400\n')
-            out = after(lines, 'a')
-            self.assertEqual(out, ['CUSTOM %s 1' % STK_MIC,
-                                   kb(0, kc),
-                                   'CUSTOM %s 0' % STK_MIC,
-                                   NONE],
-                             '入口 0x%04X → MIC(0x%02X)' % (code, kc))
+            self.assertEqual(after(lines, 'a'), ['CUSTOM %s 1' % STK_MIC,
+                                                 kb(0, kc),
+                                                 'CUSTOM %s 0' % STK_MIC,
+                                                 NONE], hex(kc))
+        self.assertEqual(MIC(KC_F13), 0x7F68)
+        self.assertEqual(MIC(KC_F1), 0x7F3A)
 
-    def test_the_existing_alias_numbers_did_not_move(self):
-        # F1..F12 を足しても、先にあった F13..F24 の番号は動かない。
-        self.assertEqual(MIC_ALIAS_F13, 0x7E08)
-        self.assertEqual(MIC_ALIAS_INNER[0], KC_F13)          # 0x7E08 = MIC(F13)
-        self.assertEqual(MIC_ALIAS_INNER[11], KC_F13 + 11)    # 0x7E13 = MIC(F24)
-        self.assertEqual(MIC_ALIAS_F1, MIC_ALIAS_F13 + 12)    # 0x7E14
-        self.assertEqual(MIC_ALIAS_INNER[12], 0x3A)           # 0x7E14 = MIC(F1)
-        self.assertEqual(MIC_ALIAS_INNER[23], 0x45)           # 0x7E1F = MIC(F12)
+    def test_the_old_mic_entry_numbers_are_no_longer_mic(self):
+        """旧 MIC_F13 (0x7E08) は Custom_0、旧 MIC_F12 (0x7E1F) は何でもない。"""
+        lines = run('kc 3 9 0x%04X\n' % OLD_MIC_F13
+                    + 't 100\nmark a\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        self.assertEqual(after(lines, 'a'), ['CUSTOM Custom_0 1',
+                                             'CUSTOM Custom_0 0'])
+        for code in (0x7E12, 0x7E1F, OLD_CSTM_0, 0x7E29):
+            lines = run('kc 3 9 0x%04X\n' % code
+                        + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+            self.assertEqual(after(lines, 'z'), [], hex(code))
 
     def test_a_plain_f_key_is_not_wrapped(self):
         # 素の F1 は顔を変えない (包んでいないので独自キーですらない)。
@@ -392,24 +391,16 @@ class CustomKeyTest(unittest.TestCase):
         self.assertEqual(out, [kb(0, 0x3A), NONE])
         self.assertFalse([l for l in out if l.startswith('CUSTOM ')])
 
-    def test_the_slot_after_the_last_alias_is_not_wrapped(self):
-        # 入口の 1 つうしろ (0x7E20) は MIC ではない (2026-09-27 から CSTM_0)。
-        lines = run('kc 3 9 0x%04X\n' % (MIC_ALIAS_F13 + len(MIC_ALIAS_INNER))
-                    + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
-        out = after(lines, 'z')
-        self.assertNotIn('CUSTOM %s 1' % STK_MIC, out)
-        self.assertFalse([l for l in out if l.startswith('KB ')])
-
-    def test_cstm_keys_do_not_reach_hid(self):
-        """CSTM_0〜9 (0x7E20..0x7E29) は押し離しが独自キーとして届き、HID に出ない。"""
+    def test_custom_keys_do_not_reach_hid(self):
+        """Custom_0〜9 (0x7E08..0x7E11) は押し離しが独自キーとして届き、HID に出ない。"""
         for n in range(10):
-            lines = run('kc 3 9 0x%04X\n' % (CSTM_0 + n)
+            lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + n)
                         + 't 100\nmark c\n' + tap(POS_MIC, 100, 50) + 't 400\n')
-            self.assertEqual(after(lines, 'c'), ['CUSTOM CSTM_%d 1' % n,
-                                                 'CUSTOM CSTM_%d 0' % n], n)
+            self.assertEqual(after(lines, 'c'), ['CUSTOM Custom_%d 1' % n,
+                                                 'CUSTOM Custom_%d 0' % n], n)
 
-    def test_the_slot_after_cstm_9_is_nothing(self):
-        lines = run('kc 3 9 0x%04X\n' % (CSTM_0 + 10)
+    def test_the_slot_after_custom_9_is_nothing(self):
+        lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + 10)
                     + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         self.assertEqual(after(lines, 'z'), [])
 
@@ -428,6 +419,27 @@ class CustomKeyTest(unittest.TestCase):
             lines = run('kc 3 9 0x%04X\n' % code
                         + 't 100\nmark x\n' + tap(POS_MIC, 100, 50) + 't 400\n')
             self.assertEqual(after(lines, 'x'), [], hex(code))
+
+
+# いまの移行番号 (main/qmk_port/stackee_keymap_migrate.h)。
+LATEST = 2
+N_LAYERS = 6
+
+
+def dump_script():
+    """全レイヤー・全キーを getkc する台本。"""
+    return ''.join('getkc %d %d %d\n' % (l, r, c)
+                   for l in range(N_LAYERS) for r in range(5) for c in range(10))
+
+
+def parse_dump(lines):
+    """KC 行を {(層, 行, 列): キーコード} にする (後勝ち)。"""
+    out = {}
+    for line in lines:
+        if line.startswith('KC '):
+            _k, l, r, c, v = line.split()
+            out[(int(l), int(r), int(c))] = int(v, 16)
+    return out
 
 
 class KeymapMigrationTest(unittest.TestCase):
@@ -461,20 +473,21 @@ class KeymapMigrationTest(unittest.TestCase):
         # 移行は「当てるものが無い」で番号だけ進む。
         changed, level, kc = self.migrate('')
         self.assertEqual(changed, 0)
-        self.assertEqual(level, 1)
+        self.assertEqual(level, LATEST)
         self.assertEqual(kc, MIC(KC_F13))
 
     def test_the_old_default_is_replaced(self):
         # ユーザーの本体と同じ状態: 保存済みの配列が素の KC_F13。
         changed, level, kc = self.migrate('miglevel 0\nsetkc 0 3 9 0x0068\n')
         self.assertEqual(changed, 1)
-        self.assertEqual(level, 1)
+        self.assertEqual(level, LATEST)
         self.assertEqual(kc, MIC(KC_F13))
 
     def test_the_short_lived_custom_key_is_replaced_too(self):
         # 同じ日に一度だけ存在した STK_MIC_KEY (0x7E08) も 1 つの形にそろえる。
+        # (移行 1 が MIC(F13) にし、移行 2 はもう触らない = 合計 1 件)
         changed, _level, kc = self.migrate(
-            'miglevel 0\nsetkc 0 3 9 0x%04X\n' % MIC_ALIAS_F13)
+            'miglevel 0\nsetkc 0 3 9 0x%04X\n' % OLD_MIC_F13)
         self.assertEqual(changed, 1)
         self.assertEqual(kc, MIC(KC_F13))
 
@@ -484,7 +497,7 @@ class KeymapMigrationTest(unittest.TestCase):
             changed, level, kc = self.migrate(
                 'miglevel 0\nsetkc 0 3 9 0x%04X\n' % code)
             self.assertEqual(changed, 0, hex(code))
-            self.assertEqual(level, 1, hex(code))
+            self.assertEqual(level, LATEST, hex(code))
             self.assertEqual(kc, code, hex(code))
 
     def test_it_only_runs_once(self):
@@ -509,7 +522,116 @@ class KeymapMigrationTest(unittest.TestCase):
         # 番号は EEPROM の「キーボード用 4 バイト」。VIA はここを触らない。
         lines = run('miglevel 0\nmigrate\nmiglevel\n')
         self.assertEqual([l for l in lines if l.startswith('MIGLEVEL ')][-1],
-                         'MIGLEVEL 1')
+                         'MIGLEVEL %d' % LATEST)
+
+
+class KeymapMigration2Test(unittest.TestCase):
+    """移行 2 (2026-09-29): VIA の独自キーを詰める。
+
+      旧 0x7E08..0x7E13 (MIC_F13..F24) → MIC(F13..F24) = 0x7F68..0x7F73
+      旧 0x7E14..0x7E1F (MIC_F1..F12)  → MIC(F1..F12)  = 0x7F3A..0x7F45
+      旧 0x7E20..0x7E29 (CSTM_0..9)    → Custom_0..9   = 0x7E08..0x7E11
+
+    ★ 旧 0x7E08 (MIC_F13) と新 Custom_0 (0x7E08) は同じ番号。取り違えない
+      こと・連鎖しないこと (旧 CSTM_0 → 0x7E08 → MIC(F13) にならない)。
+    """
+
+    # (層, 行, 列): (旧, 新)。わざと全レイヤー・端のキーにばらまく。
+    CASES = {
+        (0, 0, 0): (0x7E08, 0x7F68),     # 旧 MIC_F13
+        (1, 1, 1): (0x7E13, 0x7F73),     # 旧 MIC_F24
+        (2, 2, 2): (0x7E14, 0x7F3A),     # 旧 MIC_F1
+        (5, 4, 9): (0x7E1F, 0x7F45),     # 旧 MIC_F12
+        (0, 2, 5): (0x7E11, 0x7F71),     # 旧 MIC_F22 (= 新 Custom_9 と同じ番号)
+        (3, 0, 5): (0x7E20, 0x7E08),     # 旧 CSTM_0 → Custom_0
+        (4, 1, 7): (0x7E29, 0x7E11),     # 旧 CSTM_9 → Custom_9
+        (5, 0, 0): (0x7E23, 0x7E0B),     # 旧 CSTM_3 → Custom_3
+    }
+    # 触ってはいけないもの。
+    KEEP = {
+        (1, 0, 0): 0x7E07,               # STK_MT_0
+        (1, 0, 1): 0x7E00,               # STK_TALK
+        (2, 0, 0): 0x7E2A,               # 旧 CSTM_9 のうしろ (何でもない)
+        (2, 0, 1): 0x7E3F,               # QK_KB の最後 (何でもない)
+        (3, 3, 3): 0x7F68,               # すでに MIC(F13)
+        (4, 4, 4): 0x7E30,               # QK_KB の未使用
+        (5, 3, 3): 0x0068,               # 素の F13 (移行 1 の位置ではない)
+    }
+
+    def run_migration(self, level, cells, extra=''):
+        script = 'miglevel %d\n' % level
+        for (l, r, c), code in cells.items():
+            script += 'setkc %d %d %d 0x%04X\n' % (l, r, c, code)
+        script += 'mark before\n' + dump_script()
+        script += 'migrate\nmigreport\nmark after\n' + dump_script() + extra
+        lines = run(script)
+        before = parse_dump(after(lines, 'before'))
+        after_ = parse_dump(after(lines, 'after'))
+        report = [l for l in lines if l.startswith('MIGREPORT ')][0]
+        return before, after_, report, lines
+
+    def cells(self):
+        out = {pos: old for pos, (old, _new) in self.CASES.items()}
+        out.update(self.KEEP)
+        return out
+
+    def test_old_codes_become_new_codes_everywhere(self):
+        before, got, report, _ = self.run_migration(1, self.cells())
+        for pos, (old, new) in self.CASES.items():
+            self.assertEqual(before[pos], old, pos)
+            self.assertEqual(got[pos], new, '%r: 0x%04X → 0x%04X のはず'
+                             % (pos, old, new))
+        for pos, code in self.KEEP.items():
+            self.assertEqual(got[pos], code, pos)
+        # 関係ないキーは 1 つも変わらない (全 300 キーを突き合わせる)。
+        self.assertEqual(len(got), N_LAYERS * 50)
+        for pos, code in before.items():
+            if pos not in self.CASES:
+                self.assertEqual(got[pos], code, pos)
+        # 件数: MIC 5 件 + Custom 3 件。
+        self.assertEqual(report,
+                         'MIGREPORT from=1 level=2 changed=8 mic=5 custom=3')
+
+    def test_old_cstm_0_is_not_mistaken_for_old_mic_f13(self):
+        # 旧 MIC_F13 と旧 CSTM_0 を隣に置く。1 回の走査で別々の行き先へ。
+        cells = {(0, 0, 0): 0x7E08, (0, 0, 1): 0x7E20}
+        _b, got, report, _ = self.run_migration(1, cells)
+        self.assertEqual(got[(0, 0, 0)], 0x7F68)    # MIC(F13)
+        self.assertEqual(got[(0, 0, 1)], 0x7E08)    # Custom_0 (MIC(F13) ではない)
+        self.assertIn('changed=2 mic=1 custom=1', report)
+
+    def test_a_second_run_changes_nothing(self):
+        # 2 度目 (もう新しい配列になった本体) は何もしない。新しい Custom_0 =
+        # 0x7E08 を旧 MIC_F13 と読んで MIC(F13) にしてはいけない。
+        extra = ('migrate\nmigreport\nmark again\n' + dump_script())
+        _b, first, _r, lines = self.run_migration(1, self.cells(), extra)
+        again = parse_dump(after(lines, 'again'))
+        self.assertEqual(again, first)
+        self.assertEqual(again[(3, 0, 5)], 0x7E08)
+        reports = [l for l in lines if l.startswith('MIGREPORT ')]
+        self.assertEqual(reports[1],
+                         'MIGREPORT from=2 level=2 changed=0 mic=0 custom=0')
+
+    def test_a_device_at_level_0_gets_both_steps(self):
+        # 移行 1 も当たっていない古い本体 (右下が素の F13) でも順に当たる。
+        cells = {(0, 3, 9): 0x0068, (0, 4, 5): 0x7E20, (4, 1, 1): 0x7E15}
+        _b, got, report, _ = self.run_migration(0, cells)
+        self.assertEqual(got[(0, 3, 9)], 0x7F68)    # 移行 1
+        self.assertEqual(got[(0, 4, 5)], 0x7E08)    # 移行 2: 旧 CSTM_0
+        self.assertEqual(got[(4, 1, 1)], 0x7F3B)    # 移行 2: 旧 MIC_F2
+        self.assertEqual(report,
+                         'MIGREPORT from=0 level=2 changed=3 mic=1 custom=1')
+
+    def test_the_default_keymap_has_no_old_codes(self):
+        # 保存済みの配列が無い本体 (既定がそのまま入る) では何も書き換えない。
+        lines = run('migreport\nmark d\n' + dump_script())
+        got = parse_dump(after(lines, 'd'))
+        self.assertEqual([l for l in lines if l.startswith('MIGREPORT ')][0],
+                         'MIGREPORT from=0 level=2 changed=0 mic=0 custom=0')
+        # 既定配列にも旧い番号 (新しい Custom のうしろ〜旧 CSTM_9) は無い。
+        olds = [pos for pos, code in got.items() if 0x7E12 <= code <= 0x7E29]
+        self.assertEqual(olds, [])
+        self.assertEqual(got[(0, 3, 9)], 0x7F68)
 
 
 class ExtendedModTapTest(unittest.TestCase):

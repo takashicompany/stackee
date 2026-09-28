@@ -116,6 +116,10 @@ class ConsoleOutputTest(unittest.TestCase):
                     'talk_token', 'screen'):
             self.assertIn(key, status, '%s が無い' % key)
         self.assertEqual(status['fw'], 'stackee-idf/5')
+        # 起動時のキーマップの移行 (2026-09-29)。値は代役のもの。
+        self.assertEqual(status['keys']['mig'],
+                         {'from': 1, 'level': 2, 'changed': 3,
+                          'mic': 2, 'custom': 1})
         # 送信先の既定は BLE (現行 CircuitPython 版と同じ)。
         self.assertEqual(status['hid'], 'BLE')
         self.assertEqual(status['hid_sel'], 'BLE')
@@ -176,13 +180,13 @@ class ConsoleOutputTest(unittest.TestCase):
 
         ★ これが無いと、押している最中に `ui.status` や `lcd.crc` を
           読めない (コンソールのタスクが hold_ms のあいだ止まるため)。
-          STK_MIC_KEY の表情を実機で確かめるのに要る。
+          MIC(kc) の表情を実機で確かめるのに要る。
         """
         frame = [f for f in self.frames if f.get('id') == 15][0]
         self.assertEqual(frame['ok'], 1)
         self.assertIs(frame['started'], True)
         self.assertIs(frame['wait'], False)
-        self.assertEqual(frame['kc'], 0x7E08)       # STK_MIC_KEY
+        self.assertEqual(frame['kc'], 0x7F68)       # MIC(KC_F13)
         self.assertEqual(frame['hold_ms'], 1500)
         # 遅延は返さない (測るなら既定の待つほうを使う)。
         self.assertNotIn('press_ms', frame)
@@ -325,7 +329,7 @@ class Phase4CommandTest(unittest.TestCase):
                      'usb.status', 'touch.status', 'touch.inject',
                      'camera.capture', 'camera.power', 'camera.dump',
                      'camera.look', 'camera.look_status',
-                     'key.cstm', 'key.cstm_status',
+                     'key.custom', 'key.custom_status',
                      'inbox.status', 'inbox.enable', 'heap.info'):
             self.assertIn(name, features, name)
 

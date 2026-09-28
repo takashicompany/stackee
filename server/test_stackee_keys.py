@@ -1,4 +1,4 @@
-"""CSTM keys (POST /key), the inbox (GET /inbox), POST /say and stackee-say.
+"""Custom keys (POST /key), the inbox (GET /inbox), POST /say and stackee-say.
 
 Fake synthesis and fake agents only: nothing here speaks, and no real Codex / Claude runs.
 """
@@ -27,7 +27,7 @@ class KeySettingsTests(unittest.TestCase):
     def test_the_shipped_defaults_leave_every_key_unset(self):
         raw = json.loads((HERE / 'agent/defaults/keys.json').read_text(encoding='utf-8'))
         self.assertEqual(s.normalize_keys(raw), s.default_keys())
-        self.assertEqual(list(raw), ['CSTM_%d' % n for n in range(10)])
+        self.assertEqual(list(raw), ['Custom_%d' % n for n in range(10)])
 
     def test_missing_runtime_file_is_restored_from_defaults_and_edits_are_kept(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,27 +36,69 @@ class KeySettingsTests(unittest.TestCase):
             shutil.copyfile(HERE / 'agent/defaults/keys.json', root / 'defaults/keys.json')
             keys = s.KeySettings(root)
             self.assertTrue((root / 'keys.json').is_file())
-            keys.write({'CSTM_1': {'mode': 'command', 'command': 'true'}})
+            keys.write({'Custom_1': {'mode': 'command', 'command': 'true'}})
             s.KeySettings(root)
-            self.assertEqual(keys.read()['CSTM_1']['mode'], 'command')
-            self.assertEqual(keys.read()['CSTM_1']['timeout'], 300)
-            self.assertEqual(keys.read()['CSTM_0']['mode'], 'none')
+            self.assertEqual(keys.read()['Custom_1']['mode'], 'command')
+            self.assertEqual(keys.read()['Custom_1']['timeout'], 300)
+            self.assertEqual(keys.read()['Custom_0']['mode'], 'none')
 
     def test_validation(self):
-        good = {'CSTM_0': {'mode': 'prompt', 'prompt': 'やあ', 'command': 'x', 'timeout': 600}}
-        self.assertEqual(s.normalize_keys(good)['CSTM_0'],
+        good = {'Custom_0': {'mode': 'prompt', 'prompt': 'やあ', 'command': 'x', 'timeout': 600}}
+        self.assertEqual(s.normalize_keys(good)['Custom_0'],
                          {'mode': 'prompt', 'prompt': 'やあ', 'command': 'x', 'timeout': 600})
-        for bad in ([], {'CSTM_10': {}}, {'KC_A': {}}, {'CSTM_0': 'prompt'},
-                    {'CSTM_0': {'mode': 'shell'}},
-                    {'CSTM_0': {'mode': 'prompt', 'prompt': '  '}},
-                    {'CSTM_0': {'mode': 'command', 'command': ''}},
-                    {'CSTM_0': {'mode': 'command', 'command': 'a\0b'}},
-                    {'CSTM_0': {'prompt': 3}},
-                    {'CSTM_0': {'timeout': 0}}, {'CSTM_0': {'timeout': 601}},
-                    {'CSTM_0': {'timeout': 1.5}}, {'CSTM_0': {'timeout': True}},
-                    {'CSTM_0': {'timeout': '300'}}):
+        for bad in ([], {'Custom_10': {}}, {'CSTM_10': {}}, {'custom_0': {}}, {'KC_A': {}}, {'Custom_0': 'prompt'},
+                    {'Custom_0': {'mode': 'shell'}},
+                    {'Custom_0': {'mode': 'prompt', 'prompt': '  '}},
+                    {'Custom_0': {'mode': 'command', 'command': ''}},
+                    {'Custom_0': {'mode': 'command', 'command': 'a\0b'}},
+                    {'Custom_0': {'prompt': 3}},
+                    {'Custom_0': {'timeout': 0}}, {'Custom_0': {'timeout': 601}},
+                    {'Custom_0': {'timeout': 1.5}}, {'Custom_0': {'timeout': True}},
+                    {'Custom_0': {'timeout': '300'}}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 s.normalize_keys(bad)
+
+    # Former names CSTM_n (before 2026-09-29) ---------------------------------------
+
+    def test_former_names_are_read_as_the_new_ones(self):
+        old = {'CSTM_1': {'mode': 'command', 'command': 'true'},
+               'CSTM_9': {'mode': 'prompt', 'prompt': 'やあ'}}
+        keys = s.normalize_keys(old)
+        self.assertEqual(list(keys), ['Custom_%d' % n for n in range(10)])
+        self.assertEqual(keys['Custom_1']['command'], 'true')
+        self.assertEqual(keys['Custom_9']['prompt'], 'やあ')
+        self.assertEqual(keys['Custom_0']['mode'], 'none')
+        with self.assertRaises(ValueError) as caught:
+            s.normalize_keys({'CSTM_2': {'mode': 'prompt', 'prompt': ''}})
+        self.assertIn('Custom_2', str(caught.exception))
+
+    def test_the_new_name_wins_when_both_are_present(self):
+        both = {'CSTM_3': {'mode': 'command', 'command': 'old'},
+                'Custom_3': {'mode': 'command', 'command': 'new'},
+                'CSTM_4': {'mode': 'command', 'command': 'only-old'}}
+        keys = s.normalize_keys(both)
+        self.assertEqual(keys['Custom_3']['command'], 'new')
+        self.assertEqual(keys['Custom_4']['command'], 'only-old')
+        # Order does not matter either.
+        keys = s.normalize_keys(dict(reversed(list(both.items()))))
+        self.assertEqual(keys['Custom_3']['command'], 'new')
+
+    def test_an_old_runtime_file_is_read_untouched_and_saved_with_new_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = {'CSTM_%d' % n: {'mode': 'none', 'prompt': '', 'command': '', 'timeout': 300}
+                   for n in range(10)}
+            old['CSTM_5'] = {'mode': 'command', 'prompt': '', 'command': 'echo hi', 'timeout': 30}
+            text = json.dumps(old, ensure_ascii=False, indent=2) + '\n'
+            (root / 'keys.json').write_text(text, encoding='utf-8')
+            keys = s.KeySettings(root)
+            read = keys.read()
+            self.assertEqual(read['Custom_5'], old['CSTM_5'])
+            self.assertEqual((root / 'keys.json').read_text(encoding='utf-8'), text)
+            keys.write(read)
+            saved = json.loads((root / 'keys.json').read_text(encoding='utf-8'))
+            self.assertEqual(list(saved), ['Custom_%d' % n for n in range(10)])
+            self.assertEqual(saved['Custom_5']['command'], 'echo hi')
 
     def test_say_url_is_built_from_the_listening_address(self):
         self.assertEqual(s.say_url(('0.0.0.0', 8766)), 'http://127.0.0.1:8766/say')
@@ -193,7 +235,7 @@ class KeyHttpTests(unittest.TestCase):
         self.server.jobs.worker.join(10)
         return json.loads(self.request('GET', created['status_url'])[2])
 
-    def hold(self, key='CSTM_2'):
+    def hold(self, key='Custom_2'):
         """A command that keeps the slot until the test touches the release file."""
         self.set_key(key, mode='command',
                      command='while [ ! -e "%s" ]; do sleep 0.02; done' % self.release)
@@ -205,20 +247,38 @@ class KeyHttpTests(unittest.TestCase):
 
     def test_an_unset_key_is_only_logged(self):
         with self.assertLogs(level='INFO') as logs:
-            status, _, body = self.press('CSTM_3')
-        self.assertEqual((status, body), (200, {'state': 'ignored', 'key': 'CSTM_3'}))
-        self.assertTrue(any('key-press' in line and 'CSTM_3' in line for line in logs.output))
+            status, _, body = self.press('Custom_3')
+        self.assertEqual((status, body), (200, {'state': 'ignored', 'key': 'Custom_3'}))
+        self.assertTrue(any('key-press' in line and 'Custom_3' in line for line in logs.output))
         self.assertIsNone(self.server.jobs.worker)
         self.assertEqual(self.server.jobs.recent_presses()[0]['result'], 'ignored')
+
+    def test_a_former_name_is_handled_as_the_new_one(self):
+        with self.assertLogs(level='INFO') as logs:
+            status, _, body = self.press('CSTM_3')
+        self.assertEqual((status, body), (200, {'state': 'ignored', 'key': 'Custom_3'}))
+        self.assertFalse(any('CSTM' in line for line in logs.output))
+        self.assertEqual(self.server.jobs.recent_presses()[0]['key'], 'Custom_3')
+        self.set_key('Custom_6', mode='command', command='echo "key=$STACKEE_KEY"; exit 4')
+        with self.assertLogs(level='INFO') as logs:
+            status, _, created = self.press('CSTM_6')
+            self.assertEqual(status, 202)
+            state = self.job(created)
+        self.assertEqual(state, {'state': 'error', 'error': 'Custom_6 失敗 (終了コード 4)'})
+        line = next(line for line in logs.output if 'key-command ' in line)
+        self.assertEqual(json.loads(line.split('key-command ', 1)[1])['stdout'], 'key=Custom_6\n')
+        self.assertEqual(self.server.jobs.recent_presses()[0]['key'], 'Custom_6')
 
     def test_bad_key_requests_do_no_work(self):
         json_type = {'Content-Type': 'application/json'}
         for body, headers, expected in (
-                ({'key': 'CSTM_10'}, json_type, 400), ({'key': 'KC_A'}, json_type, 400),
+                ({'key': 'Custom_10'}, json_type, 400), ({'key': 'KC_A'}, json_type, 400),
+                ({'key': 'CSTM_10'}, json_type, 400), ({'key': 'custom_1'}, json_type, 400),
+                ({'key': 'CSTM_'}, json_type, 400),
                 ({'key': 3}, json_type, 400), ([], json_type, 400), (b'{', json_type, 400),
-                ({'key': 'CSTM_1'}, {'Content-Type': 'text/plain'}, 415),
-                ({'key': 'CSTM_1'}, dict(json_type, Origin='http://evil.example'), 403),
-                ({'key': 'CSTM_1', 'pad': 'x' * 300}, json_type, 413),
+                ({'key': 'Custom_1'}, {'Content-Type': 'text/plain'}, 415),
+                ({'key': 'Custom_1'}, dict(json_type, Origin='http://evil.example'), 403),
+                ({'key': 'Custom_1', 'pad': 'x' * 300}, json_type, 413),
                 (b'', dict(json_type, **{'Content-Length': '0'}), 413)):
             with self.subTest(body=body, headers=headers):
                 self.assertEqual(self.request('POST', '/key', body, headers)[0], expected)
@@ -226,11 +286,11 @@ class KeyHttpTests(unittest.TestCase):
         self.assertIsNone(self.server.jobs.worker)
 
     def test_a_prompt_key_is_a_look_without_the_photo(self):
-        self.set_key('CSTM_0', mode='prompt', prompt='今日の予定を教えて')
+        self.set_key('Custom_0', mode='prompt', prompt='今日の予定を教えて')
         self.pipeline.echo = False
         self.pipeline.agent = Mock()
         self.pipeline.agent.ask.return_value = '予定は2件です。[詳細](https://example.com)を見てね。'
-        status, headers, created = self.press('CSTM_0')
+        status, headers, created = self.press('Custom_0')
         self.assertEqual(status, 202)
         self.assertEqual(set(created), {'id', 'status_url', 'mode'})
         self.assertEqual(created['mode'], 'prompt')
@@ -270,11 +330,11 @@ class KeyHttpTests(unittest.TestCase):
             pipeline.close()
 
     def test_a_command_runs_in_the_agent_directory_with_its_environment(self):
-        self.set_key('CSTM_3', mode='command', command=(
+        self.set_key('Custom_3', mode='command', command=(
             'echo "key=$STACKEE_KEY"; echo "url=$STACKEE_SAY_URL"; pwd; '
             'command -v stackee-say; echo oops >&2'))
         with self.assertLogs(level='INFO') as logs:
-            status, headers, created = self.press('CSTM_3')
+            status, headers, created = self.press('Custom_3')
             self.assertEqual((status, created['mode']), (202, 'command'))
             self.assertEqual(headers['Location'], created['status_url'])
             state = self.job(created)
@@ -284,7 +344,7 @@ class KeyHttpTests(unittest.TestCase):
         line = next(line for line in logs.output if 'key-command ' in line)
         logged = json.loads(line.split('key-command ', 1)[1])
         out = logged['stdout'].splitlines()
-        self.assertEqual(out[0], 'key=CSTM_3')
+        self.assertEqual(out[0], 'key=Custom_3')
         self.assertEqual(out[1], 'url=http://127.0.0.1:%d/say' % self.server.server_address[1])
         self.assertEqual(Path(out[2]).resolve(), self.root)
         self.assertEqual(Path(out[3]), s.BIN_DIR / 'stackee-say')
@@ -292,24 +352,24 @@ class KeyHttpTests(unittest.TestCase):
         self.assertEqual(self.server.jobs.recent_presses()[0]['result'], 'done')
 
     def test_a_failing_command_is_a_short_error(self):
-        self.set_key('CSTM_3', mode='command', command='echo failing >&2; exit 2')
-        state = self.job(self.press('CSTM_3')[2])
-        self.assertEqual(state, {'state': 'error', 'error': 'CSTM_3 失敗 (終了コード 2)'})
-        self.assertEqual(self.server.jobs.recent_presses()[0]['error'], 'CSTM_3 失敗 (終了コード 2)')
+        self.set_key('Custom_3', mode='command', command='echo failing >&2; exit 2')
+        state = self.job(self.press('Custom_3')[2])
+        self.assertEqual(state, {'state': 'error', 'error': 'Custom_3 失敗 (終了コード 2)'})
+        self.assertEqual(self.server.jobs.recent_presses()[0]['error'], 'Custom_3 失敗 (終了コード 2)')
 
     def test_a_command_past_its_time_is_killed(self):
-        self.set_key('CSTM_4', mode='command', command='sleep 30; echo never', timeout=1)
+        self.set_key('Custom_4', mode='command', command='sleep 30; echo never', timeout=1)
         started = time.monotonic()
-        state = self.job(self.press('CSTM_4')[2])
-        self.assertEqual(state, {'state': 'error', 'error': 'CSTM_4 時間切れ'})
+        state = self.job(self.press('Custom_4')[2])
+        self.assertEqual(state, {'state': 'error', 'error': 'Custom_4 時間切れ'})
         self.assertLess(time.monotonic() - started, 5)
         self.assertFalse(self.server.jobs.busy)
 
     def test_huge_output_only_leaves_its_tail_in_the_log(self):
-        self.set_key('CSTM_5', mode='command',
+        self.set_key('Custom_5', mode='command',
                      command='i=0; while [ $i -lt 2000 ]; do echo "line $i"; i=$((i+1)); done')
         with self.assertLogs(level='INFO') as logs:
-            self.job(self.press('CSTM_5')[2])
+            self.job(self.press('Custom_5')[2])
         line = next(line for line in logs.output if 'key-command ' in line)
         stdout = json.loads(line.split('key-command ', 1)[1])['stdout']
         self.assertTrue(stdout.startswith('…'))
@@ -317,22 +377,22 @@ class KeyHttpTests(unittest.TestCase):
         self.assertLessEqual(len(stdout.encode()), s.KEY_OUTPUT_TAIL + 3)
 
     def test_a_background_child_does_not_hold_the_slot(self):
-        self.set_key('CSTM_6', mode='command', command='sleep 5 & echo started')
+        self.set_key('Custom_6', mode='command', command='sleep 5 & echo started')
         started = time.monotonic()
-        state = self.job(self.press('CSTM_6')[2])
+        state = self.job(self.press('Custom_6')[2])
         self.assertEqual(state['state'], 'done')
         self.assertLess(time.monotonic() - started, 3)
 
     def test_a_command_holds_the_slot_shared_with_talk_and_look(self):
         created = self.hold()
         json_type = {'Content-Type': 'application/json'}
-        self.set_key('CSTM_0', mode='prompt', prompt='x')
-        self.assertEqual(self.request('POST', '/key', {'key': 'CSTM_0'}, json_type)[0], 409)
-        self.assertEqual(self.request('POST', '/key', {'key': 'CSTM_2'}, json_type)[0], 409)
+        self.set_key('Custom_0', mode='prompt', prompt='x')
+        self.assertEqual(self.request('POST', '/key', {'key': 'Custom_0'}, json_type)[0], 409)
+        self.assertEqual(self.request('POST', '/key', {'key': 'Custom_2'}, json_type)[0], 409)
         self.assertEqual(self.request('POST', '/talk', wav(), {'Content-Type': 'audio/wav'})[0], 409)
         self.assertEqual(self.request('POST', '/look', JPEG, {'Content-Type': 'image/jpeg'})[0], 409)
         # An unset key and the inbox never need the slot.
-        self.assertEqual(self.press('CSTM_9')[0], 200)
+        self.assertEqual(self.press('Custom_9')[0], 200)
         self.assertEqual(json.loads(self.request('GET', '/inbox')[2]), {'state': 'empty', 'seq': 0})
         self.assertEqual(self.say('処理中でも話せます。')[0], 200)
         self.assertEqual(json.loads(self.request('GET', created['status_url'])[2]),
@@ -346,26 +406,26 @@ class KeyHttpTests(unittest.TestCase):
         released = threading.Event()
         self.pipeline.run = lambda *args, **kwargs: (released.wait(5), 'test')[1]
         self.assertEqual(self.request('POST', '/talk', wav(), {'Content-Type': 'audio/wav'})[0], 202)
-        self.set_key('CSTM_1', mode='command', command='true')
-        self.assertEqual(self.press('CSTM_1')[0], 409)
+        self.set_key('Custom_1', mode='command', command='true')
+        self.assertEqual(self.press('Custom_1')[0], 409)
         released.set()
         self.server.jobs.worker.join(5)
-        self.assertEqual(self.press('CSTM_1')[0], 202)
+        self.assertEqual(self.press('Custom_1')[0], 202)
         self.server.jobs.worker.join(5)
 
     def test_a_saved_setting_applies_to_the_next_press(self):
-        self.assertEqual(self.press('CSTM_7')[0], 200)
-        self.set_key('CSTM_7', mode='command', command='true')
-        self.assertEqual(self.press('CSTM_7')[0], 202)
+        self.assertEqual(self.press('Custom_7')[0], 200)
+        self.set_key('Custom_7', mode='command', command='true')
+        self.assertEqual(self.press('Custom_7')[0], 202)
         self.server.jobs.worker.join(5)
 
     # stackee-say → inbox → device ------------------------------------------------
 
     def test_a_command_speaks_through_stackee_say_and_one_long_poll_sees_both(self):
-        self.set_key('CSTM_8', mode='command',
+        self.set_key('Custom_8', mode='command',
                      command='stackee-say "ビルドが終わりました。" && stackee-say --no-voice "字幕だけ"')
         before = json.loads(self.request('GET', '/inbox')[2])['seq']
-        created = self.press('CSTM_8')[2]
+        created = self.press('Custom_8')[2]
         status, _, body = self.request(
             'GET', '/inbox?after=%d&wait=10&job=%s' % (before, created['id']), timeout=15)
         first = json.loads(body)
@@ -454,12 +514,12 @@ class KeyHttpTests(unittest.TestCase):
         self.assertEqual(body, {'state': 'empty', 'seq': 0, 'job_state': 'done'})
         self.assertLess(time.monotonic() - started, 3)
         timer.join()
-        self.set_key('CSTM_2', mode='command', command='exit 3')
-        created = self.press('CSTM_2')[2]
+        self.set_key('Custom_2', mode='command', command='exit 3')
+        created = self.press('Custom_2')[2]
         body = json.loads(self.request(
             'GET', '/inbox?after=0&wait=10&job=' + created['id'], timeout=15)[2])
         self.assertEqual(body, {'state': 'empty', 'seq': 0, 'job_state': 'error',
-                                'error': 'CSTM_2 失敗 (終了コード 3)'})
+                                'error': 'Custom_2 失敗 (終了コード 3)'})
         self.assertEqual(json.loads(self.request('GET', '/inbox?after=0&wait=10&job=' + 'f' * 32)[2]),
                          {'state': 'empty', 'seq': 0, 'job_state': 'not_found'})
 
@@ -580,7 +640,7 @@ class KeyAdminTests(unittest.TestCase):
         return self.request('PUT', '/admin/api/keys', json.dumps(keys, ensure_ascii=False).encode(), extra)
 
     def test_state_carries_keys_presses_and_the_inbox(self):
-        self.request('POST', '/key', json.dumps({'key': 'CSTM_4'}),
+        self.request('POST', '/key', json.dumps({'key': 'Custom_4'}),
                      {'Content-Type': 'application/json'})
         self.server.jobs.inbox.put('やあ', b'', '0\tやあ\n'.encode())
         data = json.loads(self.request('GET', '/admin/api/state')[1])
@@ -589,7 +649,7 @@ class KeyAdminTests(unittest.TestCase):
         self.assertEqual(data['choices']['key_modes'], ['none', 'prompt', 'command'])
         self.assertEqual(data['choices']['key_timeout_max'], 600)
         press = data['key_presses'][0]
-        self.assertEqual((press['key'], press['mode'], press['result']), ('CSTM_4', 'none', 'ignored'))
+        self.assertEqual((press['key'], press['mode'], press['result']), ('Custom_4', 'none', 'ignored'))
         self.assertTrue(press['at'])
         self.assertEqual(data['inbox'], {'count': 1, 'seq': 1})
         # The existing fields are all still there.
@@ -598,8 +658,8 @@ class KeyAdminTests(unittest.TestCase):
 
     def test_keys_are_saved_at_once(self):
         keys = s.default_keys()
-        keys['CSTM_1'] = {'mode': 'prompt', 'prompt': '天気は？', 'command': '', 'timeout': 300}
-        keys['CSTM_2'] = {'mode': 'command', 'command': 'make -C ~/x', 'prompt': '', 'timeout': 45}
+        keys['Custom_1'] = {'mode': 'prompt', 'prompt': '天気は？', 'command': '', 'timeout': 300}
+        keys['Custom_2'] = {'mode': 'command', 'command': 'make -C ~/x', 'prompt': '', 'timeout': 45}
         status, body = self.put(keys)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['keys'], keys)
@@ -607,14 +667,30 @@ class KeyAdminTests(unittest.TestCase):
         self.assertEqual(saved, keys)
         self.assertEqual(json.loads(self.request('GET', '/admin/api/state')[1])['keys'], keys)
 
+    def test_former_names_sent_to_the_admin_api_are_saved_with_new_names(self):
+        status, body = self.put({'CSTM_1': {'mode': 'command', 'command': 'true'},
+                                 'Custom_2': {'mode': 'prompt', 'prompt': 'やあ'}})
+        self.assertEqual(status, 200)
+        saved = json.loads((self.root / 'keys.json').read_text(encoding='utf-8'))
+        self.assertEqual(json.loads(body)['keys'], saved)
+        self.assertEqual(list(saved), ['Custom_%d' % n for n in range(10)])
+        self.assertEqual((saved['Custom_1']['command'], saved['Custom_2']['prompt']), ('true', 'やあ'))
+
+    def test_an_old_keys_file_shows_new_names_on_the_admin_page(self):
+        old = {'CSTM_4': {'mode': 'command', 'command': 'true'}}
+        (self.root / 'keys.json').write_text(json.dumps(old), encoding='utf-8')
+        keys = json.loads(self.request('GET', '/admin/api/state')[1])['keys']
+        self.assertEqual(list(keys), ['Custom_%d' % n for n in range(10)])
+        self.assertEqual(keys['Custom_4']['mode'], 'command')
+
     def test_key_writes_are_guarded_and_validated(self):
         original = (self.root / 'keys.json').read_bytes()
-        good = {'CSTM_1': {'mode': 'command', 'command': 'true'}}
+        good = {'Custom_1': {'mode': 'command', 'command': 'true'}}
         self.assertEqual(self.request('PUT', '/admin/api/keys', json.dumps(good),
                                       {'Content-Type': 'application/json'})[0], 403)
         self.assertEqual(self.put(good, {'Origin': 'http://evil.example'})[0], 403)
-        self.assertEqual(self.put({'CSTM_1': {'mode': 'prompt', 'prompt': ''}})[0], 400)
-        self.assertEqual(self.put({'CSTM_1': {'mode': 'command', 'command': 'x' * 70000}})[0], 413)
+        self.assertEqual(self.put({'Custom_1': {'mode': 'prompt', 'prompt': ''}})[0], 400)
+        self.assertEqual(self.put({'Custom_1': {'mode': 'command', 'command': 'x' * 70000}})[0], 413)
         self.assertEqual((self.root / 'keys.json').read_bytes(), original)
 
     def test_a_broken_keys_file_is_reported_not_fatal(self):
@@ -624,7 +700,7 @@ class KeyAdminTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNone(data['keys'])
         self.assertTrue(data['keys_error'])
-        status, body = self.request('POST', '/key', json.dumps({'key': 'CSTM_0'}),
+        status, body = self.request('POST', '/key', json.dumps({'key': 'Custom_0'}),
                                     {'Content-Type': 'application/json'})
         self.assertEqual((status, json.loads(body)), (500, {'error': 'keys_unreadable'}))
 

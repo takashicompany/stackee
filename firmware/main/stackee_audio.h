@@ -83,9 +83,9 @@ bool stackee_audio_look_submit(const uint8_t *jpeg, size_t len, bool play);
 size_t stackee_audio_look_json(char *buf, size_t cap, size_t at);
 
 // ---------------------------------------------------------------------------
-// stackee 独自キー CSTM_0〜CSTM_9 (POST /key、2026-09-27)
+// stackee 独自キー Custom_0〜Custom_9 (POST /key、2026-09-27)
 // ---------------------------------------------------------------------------
 // キーの押下。**入力タスクから呼ぶので待たない** (印を 1 つ置くだけ)。
 // 実際の送信は audio タスクが会話の状態機械で進める。キーは常に鳴らす。
-// ★ 会話・画像・他の CSTM の途中なら audio タスクが黙って捨てる。
-void stackee_audio_cstm_key(int n);
+// ★ 会話・画像・他の Custom の途中なら audio タスクが黙って捨てる。
+void stackee_audio_custom_key(int n);

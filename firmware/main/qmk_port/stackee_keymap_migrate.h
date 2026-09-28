@@ -18,10 +18,13 @@
 //   知らない値を勝手に上書きしない。
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 // いまの移行番号 (この像が知っている最後の段)。
-#define STACKEE_KEYMAP_MIGRATION_LATEST 1
+//   1 (2026-09-21) 右下のキーを MIC(KC_F13) に
+//   2 (2026-09-29) VIA の独自キーを詰める (旧 MIC 入口 → MIC(kc)、旧 CSTM_n → Custom_n = 0x7E08..)
+#define STACKEE_KEYMAP_MIGRATION_LATEST 2
 
 // EEPROM に入っている番号。
 uint32_t stackee_keymap_migration_level(void);
@@ -30,3 +33,16 @@ uint32_t stackee_keymap_migration_level(void);
 // (0 = 当てるものが無かった / ユーザーが変えていたので触らなかった)。
 // ★ 呼ぶのは keyboard_init() のあと 1 回だけ (stackee_qmk_init)。
 int stackee_keymap_migrate(void);
+
+// 起動時の stackee_keymap_migrate() が何をしたか。ログと `status` の
+// `keys.mig` に出す (書き換えた件数を実機で確かめるため)。
+typedef struct {
+    bool     ran;           // 呼ばれた
+    uint32_t from_level;    // 呼ばれたときの番号
+    uint32_t level;         // 当てたあとの番号
+    int      changed;       // 書き換えたキーの総数
+    int      mic;           // 移行 2: 旧 MIC の入口 → MIC(kc) にした数
+    int      custom;        // 移行 2: 旧 CSTM_n (0x7E20..) → Custom_n にした数
+} stackee_keymap_migration_report_t;
+
+void stackee_keymap_migration_report(stackee_keymap_migration_report_t *out);

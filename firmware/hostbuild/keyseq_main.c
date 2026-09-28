@@ -28,6 +28,7 @@
 //   CUSTOM <名前> <1|0>                       独自キー (HID には出ない)
 //   KC <層> <行> <列> 0xXXXX                  getkc の答え
 //   MIGLEVEL <番号> / MIGRATE changed=N level=M  既定配列の移行
+//   MIGREPORT from=A level=B changed=N mic=M custom=C  直近の移行の記録 (migreport)
 //   BOOTLOADER / RESET                        QK_BOOT の行き先
 //
 // ★ ここで通っても実機で動く保証にはならない。見ているのは
@@ -225,6 +226,12 @@ int main(void) {
             int changed = stackee_keymap_migrate();
             printf("MIGRATE changed=%d level=%lu\n", changed,
                    (unsigned long)stackee_keymap_migration_level());
+        } else if (strcmp(cmd, "migreport") == 0) {
+            stackee_keymap_migration_report_t rep;
+            stackee_keymap_migration_report(&rep);
+            printf("MIGREPORT from=%lu level=%lu changed=%d mic=%d custom=%d\n",
+                   (unsigned long)rep.from_level, (unsigned long)rep.level,
+                   rep.changed, rep.mic, rep.custom);
         } else if (strcmp(cmd, "mark") == 0) {
             char *rest = strtok(NULL, "\r\n");
             printf("MARK %s\n", rest ? rest : "");

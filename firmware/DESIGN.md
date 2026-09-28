@@ -88,8 +88,10 @@ ESP32-S3 は IN エンドポイントが EP0 を含めて 5 本まで（docs.esp
   違わない」ことを見ている。
   ★ 領域は **`QK_USER`（0x7E40..0x7FFF）の上半分**。`QK_KB` は 0x7E00..0x7E3F の
   64 個しかなく、VIA の customKeycodes はその並び順で番号が決まるので、256 個の
-  連続領域が入らない。VIA からは名前付きの入口 `MIC_F13`〜`MIC_F24`（12 個）を
-  通し、本体が `MIC(kc)` に読み替える。ほかのキーは Remap の「Any」に 16 進で。
+  連続領域が入らない。VIA / Remap からは「カスタム」タブで `0x7F00 | kc` を
+  16 進で手入力する（例: MIC(F13) = 7F68、MIC(F1) = 7F3A）。名前付きの入口
+  `MIC_F13`〜 / `MIC_F1`〜（0x7E08..0x7E1F）は 2026-09-29 に廃止（Remap が
+  customKeycodes を先頭 32 個しか出さず、Custom_0〜9 が出なかったため）。
 - **既定配列を変えたら「移行」を足す（2026-09-21）。** VIA / Remap で配列を
   1 度でも書き換えた本体は、以後 **EEPROM に保存された配列**で動く。像を新しく
   しても `default_keymap.c` は見に行かないので、**新しい既定は黙って無視される**
@@ -98,17 +100,25 @@ ESP32-S3 は IN エンドポイントが EP0 を含めて 5 本まで（docs.esp
   キーボード用 4 バイト（`eeconfig_read_kb`。VIA は触らない）に番号を持って、
   起動時に未適用のものだけ当てる。移行は「**旧い既定のままなら差し替える。
   ユーザーが変えていたら触らない**」で書く — 保存済みの配列は本人のもの。
+  ★ 例外は**番号の付け替え**（移行 2、2026-09-29）: 旧 0x7E08..0x7E13 →
+  MIC(F13..F24)、旧 0x7E14..0x7E1F → MIC(F1..F12)、旧 0x7E20..0x7E29（CSTM_n）→
+  Custom_n（0x7E08..0x7E11）を全レイヤー・全キーで当てる。旧い番号の意味は
+  1 つしかないのでユーザーの意図は変わらない。旧 MIC_F13 と新 Custom_0 が同じ
+  0x7E08 なので、1 キー 1 回・読んだ旧い値だけで行き先を決め、二度目は番号で
+  止める。結果はログと `status` の `keys.mig` に出す。
 - **新しい独自キーは並びのうしろに足す。** VIA の customKeycodes の並び順が
   そのままキーコードの番号になり、その番号は **VIA で変えた配列として NVS に
   保存されている**。途中に足すとうしろが 1 つずつずれ、保存済みの配列の意味が
-  黙って変わる。置き場は tools/gen_keymap.py の `TRAILING_CUSTOM_KEYS`
-  （`STK_MT_0` = 0x7E07 は動かさない）。
+  黙って変わる。いまの末尾は tools/gen_keymap.py の `USER_CUSTOM_KEYS`
+  （`STK_MT_0` = 0x7E07 の直後、0x7E08..）。**Remap は customKeycodes を先頭
+  32 個（0x7E00..0x7E1F）しか出さない**ので、それを超えない（生成時に止める）。
+  番号を動かすときは移行を 1 段足す。
 - **既定配列の位置ごとの差し替えは、この木だけで完結させる**
   （tools/gen_keymap.py の `KEYMAP_OVERRIDES`）。移植元の keymap.py を触ると
   現行 CircuitPython 版の配列まで変わってしまう。ネイティブ版にしか無い
   独自キーは、位置とキーの結び付けをこちら側に置く。
 - **マウスキーは有効**（`MOUSEKEY_ENABLE` / `MOUSE_ENABLE`、`quantum/mousekey.c` を取り込み）。現行 CircuitPython 版も KMK の MouseKeys を入れている（code.py が `keyboard.modules.append(MouseKeys())`）ので、同じように使える状態にしておく。動作モードは QMK 既定（加速つき）。キーコードは標準の `MS_UP` / `MS_DOWN` / `MS_LEFT` / `MS_RGHT` / `MS_BTN1`〜 / `MS_WHLU` / `MS_WHLD` / `MS_ACL0`〜2。レポートは既存の Report ID 2 のコレクションで送る（USB・BLE 共通。将来のタッチパッドと同じ送信キューを通る）。VIA 定義 JSON は標準キーコードなので変更不要（2026-09-16 決定）。keymap.py 側に `KC.MS_*` / `KC.MB_*` / `KC.MW_*` があれば生成時に対応する QMK キーコードへ変換する（対応表は tools/keycodes.md）。
-- 独自キー（VIA の customKeycodes で表示）: STK_TALK、STK_VOLUP、STK_VOLDN、STK_HID_SWITCH、STK_BLE_REFRESH、STK_CAMERA、STK_TOUCH_SCROLL、および上記の STK_MT_n、MIC_F13〜F24・MIC_F1〜F12、STK_CSTM_0〜9 (2026-09-27、押した瞬間にサーバへ POST /key。README §17-2c)。**QK_KB_0（0x7E00）以降**に割り当て、process_record_kb で処理して false を返す（HID には出さない）。QMK の SAFE_RANGE（= QK_USER = 0x7E40）ではないのは、**VIA の customKeycodes が QK_KB_0 から順に対応づく約束**のため。並び順が実装とずれると VIA 上で別のキーとして表示されるので、生成時に機械照合する（2026-09-16 決定）。
+- 独自キー（VIA の customKeycodes で表示）: STK_TALK、STK_VOLUP、STK_VOLDN、STK_HID_SWITCH、STK_BLE_REFRESH、STK_CAMERA、STK_TOUCH_SCROLL、および上記の STK_MT_n、STK_CUSTOM_0〜9（表示は Custom_0〜9、0x7E08..0x7E11。2026-09-27 に CSTM_n として入れ、2026-09-29 に改名・番号を詰めた。押した瞬間にサーバへ POST /key。README §17-2c）。**QK_KB_0（0x7E00）以降**に割り当て、process_record_kb で処理して false を返す（HID には出さない）。QMK の SAFE_RANGE（= QK_USER = 0x7E40）ではないのは、**VIA の customKeycodes が QK_KB_0 から順に対応づく約束**のため。並び順が実装とずれると VIA 上で別のキーとして表示されるので、生成時に機械照合する（2026-09-16 決定）。
 - VIA 定義 JSON: firmware/via/stackee.json（layouts は keymap.py の KLE 定義から生成）。VID/PID は現行の USB 記述子と同じ値を使い、Remap のカタログ登録は行わない（定義 JSON の手動読み込みで使う）。
 - 保存: QMK の eeconfig / dynamic_keymap を NVS 上のブロブに載せる（lucky65 の eeprom.c と同じ方式。書き込みは遅延して input タスクを止めない）。
 

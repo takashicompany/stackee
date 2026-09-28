@@ -12,7 +12,7 @@ const char *const stackee_talk_state_names[STACKEE_TALK_STATES] = {
     "inbox_seq", "key", "inbox_wait", "inbox", "say_text",
 };
 
-const char *const stackee_talk_cstm_mode_names[STACKEE_TALK_CSTM_MODES] = {
+const char *const stackee_talk_custom_mode_names[STACKEE_TALK_CUSTOM_MODES] = {
     "", "prompt", "command",
 };
 
@@ -383,7 +383,7 @@ void stackee_talk_init(stackee_talk_t *t, const stackee_talk_ops_t *ops,
     if (!stackee_talk_look_path(t->path, t->look_path, sizeof(t->look_path))) {
         t->look_path[0] = '\0';    // 画像は送れない (reserve が理由を出す)
     }
-    // CSTM の送り先も同じ規則 (作れなければ押下のときに理由を出す)。
+    // Custom の送り先も同じ規則 (作れなければ押下のときに理由を出す)。
     if (!stackee_talk_sibling_path(t->path, "key", t->key_path,
                                    sizeof(t->key_path)) ||
         !stackee_talk_sibling_path(t->path, "inbox", t->inbox_path,
@@ -560,7 +560,7 @@ static void begin_turn(stackee_talk_t *t, bool look) {
     if (look) {
         t->look_result = NULL;  // 途中
     }
-    t->cstm = false;            // CSTM は stackee_talk_cstm() が立て直す
+    t->custom = false;            // Custom は stackee_talk_custom() が立て直す
 }
 
 static void finish_recording(stackee_talk_t *t) {
@@ -752,8 +752,8 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
         }
         close_http(t);
         fail(t, message);
-        if (t->cstm_active) {
-            t->cstm_final = "error";
+        if (t->custom_active) {
+            t->custom_final = "error";
         }
         return;
     }
@@ -768,10 +768,10 @@ static void handle_poll_done(stackee_talk_t *t, const char *json) {
         cleanup(t);
         to(t, STACKEE_TALK_IDLE);
         show(t, message);
-        // CSTM の prompt 方式なら、流れとしては失敗 (帯にも短く出す)。
-        if (t->cstm_active) {
+        // Custom の prompt 方式なら、流れとしては失敗 (帯にも短く出す)。
+        if (t->custom_active) {
             snprintf(t->error, sizeof(t->error), "%s", message);
-            t->cstm_final = "error";
+            t->custom_final = "error";
         }
         return;
     }
@@ -941,7 +941,7 @@ static void show_page_at(stackee_talk_t *t, uint32_t ms) {
 //   入る」ことだけで、発話 (state:"say") が来たら
 //     音あり … GET <audio_url> → PLAY_WAIT → PLAYING (会話の再生と同じ部品)
 //     音なし … SAY_TEXT (字幕だけ)
-//   を通って INBOX_WAIT に戻る。いまは CSTM のコマンド方式だけが入口
+//   を通って INBOX_WAIT に戻る。いまは Custom のコマンド方式だけが入口
 //   (job= 付き、job_state が done / error で終わる)。第 2 段の常時ポーリングは
 //   job を空にして同じ INBOX_WAIT に入れればよい。
 
@@ -989,10 +989,10 @@ static void fail_status(stackee_talk_t *t, int status, bool inbox) {
 static void inbox_poll_start(stackee_talk_t *t) {
     char path[STACKEE_TALK_PATH_MAX + STACKEE_TALK_JOB_ID_MAX + 48];
     int n;
-    if (t->cstm_job[0] != '\0' && t->cstm_mode == STACKEE_TALK_CSTM_MODE_COMMAND) {
+    if (t->custom_job[0] != '\0' && t->custom_mode == STACKEE_TALK_CUSTOM_MODE_COMMAND) {
         n = snprintf(path, sizeof(path), "%s?after=%lu&wait=%d&job=%s",
                      t->inbox_path, (unsigned long)t->inbox_seq,
-                     STACKEE_TALK_INBOX_WAIT_S, t->cstm_job);
+                     STACKEE_TALK_INBOX_WAIT_S, t->custom_job);
     } else {
         n = snprintf(path, sizeof(path), "%s?after=%lu&wait=%d",
                      t->inbox_path, (unsigned long)t->inbox_seq,
@@ -1029,7 +1029,7 @@ static void say_finished(stackee_talk_t *t, bool played) {
         t->watch_say = false;
         watch_keep_restore(t);
     } else {
-        logf_(t, "[cstm-say] {\"n\":%lu,\"seq\":%lu,\"audio_bytes\":%ld,"
+        logf_(t, "[custom-say] {\"n\":%lu,\"seq\":%lu,\"audio_bytes\":%ld,"
                  "\"sub_pages\":%d,\"played\":%d}",
               (unsigned long)t->says, (unsigned long)t->inbox_seq,
               (long)t->audio_samples * 2, t->page_count, played ? 1 : 0);
@@ -1048,12 +1048,12 @@ static void say_finished(stackee_talk_t *t, bool played) {
 
 // 発話 1 件 ({"state":"say", …}) を受け取った。json は close_http まで有効。
 static void take_say(stackee_talk_t *t, const char *json) {
-    // ★ 常時ポーリングの発話は CSTM の記録 (key.cstm_status) に混ぜない。
+    // ★ 常時ポーリングの発話は Custom の記録 (key.custom_status) に混ぜない。
     if (!t->watch_say) {
         t->says++;
         t->say_cur = (t->says <= STACKEE_TALK_SAY_LOG) ? (int)t->says - 1 : -1;
-        if (t->cstm_first_say_ms == 0) {
-            t->cstm_first_say_ms = mark_ms(t, t->cstm_started);
+        if (t->custom_first_say_ms == 0) {
+            t->custom_first_say_ms = mark_ms(t, t->custom_started);
         }
     } else {
         t->say_cur = -1;
@@ -1072,7 +1072,7 @@ static void take_say(stackee_talk_t *t, const char *json) {
         stackee_talk_say_t *say = &t->say_log[t->say_cur];
         memset(say, 0, sizeof(*say));
         say->seq = t->inbox_seq;
-        say->at_ms = mark_ms(t, t->cstm_started);
+        say->at_ms = mark_ms(t, t->custom_started);
         say->sub_bytes = t->sub_bytes;
         say->sub_pages = t->page_count;
         say->audio_bytes = (uint32_t)declared;
@@ -1138,7 +1138,7 @@ static void handle_inbox(stackee_talk_t *t, int status, const char *json) {
             return;
         }
         inbox_note_seq(t, (uint32_t)seq);
-        t->cstm_seq_ms = mark_ms(t, t->cstm_started);
+        t->custom_seq_ms = mark_ms(t, t->custom_started);
         close_http(t);
         // ★ 最後に見た seq が分かったので、ここで初めてキーを送る。
         if (!t->ops->http_start("POST", t->key_path, t->key_body,
@@ -1179,7 +1179,7 @@ static void handle_inbox(stackee_talk_t *t, int status, const char *json) {
     }
     char job_state[16] = "";
     stackee_json_str(json, "job_state", job_state, sizeof(job_state));
-    snprintf(t->cstm_job_state, sizeof(t->cstm_job_state), "%s", job_state);
+    snprintf(t->custom_job_state, sizeof(t->custom_job_state), "%s", job_state);
     if (job_state[0] == '\0' || strcmp(job_state, "processing") == 0) {
         close_http(t);
         to(t, STACKEE_TALK_INBOX_WAIT);
@@ -1187,7 +1187,7 @@ static void handle_inbox(stackee_talk_t *t, int status, const char *json) {
     }
     if (strcmp(job_state, "done") == 0) {
         close_http(t);
-        t->cstm_final = "done";
+        t->custom_final = "done";
         cleanup(t);
         to(t, STACKEE_TALK_IDLE);       // 音なしで終わる
         return;
@@ -1205,21 +1205,21 @@ static void handle_inbox(stackee_talk_t *t, int status, const char *json) {
 }
 
 // ---------------------------------------------------------------------------
-// stackee 独自キー CSTM_0〜CSTM_9 (POST /key)
+// stackee 独自キー Custom_0〜Custom_9 (POST /key)
 // ---------------------------------------------------------------------------
 static void handle_key(stackee_talk_t *t, int status, const char *json) {
-    t->cstm_key_ms = mark_ms(t, t->cstm_started);
+    t->custom_key_ms = mark_ms(t, t->custom_started);
     if (status == 200) {
         char state[16];
         if (stackee_json_str(json, "state", state, sizeof(state)) &&
             strcmp(state, "ignored") == 0) {
-            // 未設定。音も出さず、短く知らせて終わる (cstm_finish が帯に出す)。
+            // 未設定。音も出さず、短く知らせて終わる (custom_finish が帯に出す)。
             close_http(t);
-            t->cstm_final = "ignored";
+            t->custom_final = "ignored";
             cleanup(t);
             to(t, STACKEE_TALK_IDLE);
             char text[48];
-            snprintf(text, sizeof(text), "CSTM_%d 未設定", t->cstm_n);
+            snprintf(text, sizeof(text), "Custom_%d 未設定", t->custom_n);
             show(t, text);
             return;
         }
@@ -1236,13 +1236,13 @@ static void handle_key(stackee_talk_t *t, int status, const char *json) {
     bool has_id = stackee_json_str(json, "id", id, sizeof(id)) && job_id_ok(id);
     if (mode[0] == '\0' || strcmp(mode, "prompt") == 0) {
         // ★ /look と**完全に同じ**後半 (status_url の返答待ち → 音声 + 字幕)。
-        t->cstm_mode = STACKEE_TALK_CSTM_MODE_PROMPT;
+        t->custom_mode = STACKEE_TALK_CUSTOM_MODE_PROMPT;
         if (has_id) {
-            snprintf(t->cstm_job, sizeof(t->cstm_job), "%s", id);
+            snprintf(t->custom_job, sizeof(t->custom_job), "%s", id);
         }
         handle_upload_done(t, json);
         // 一次回答も /look と同じく返事を待つ前に鳴らす (play=0 では鳴らさない)。
-        if (t->state == STACKEE_TALK_POLL_WAIT && t->cstm_play) {
+        if (t->state == STACKEE_TALK_POLL_WAIT && t->custom_play) {
             t->ops->ack_begin();
             face(t);
         }
@@ -1258,13 +1258,13 @@ static void handle_key(stackee_talk_t *t, int status, const char *json) {
         fail(t, "コマンドの id が不正です");
         return;
     }
-    snprintf(t->cstm_job, sizeof(t->cstm_job), "%s", id);
-    t->cstm_mode = STACKEE_TALK_CSTM_MODE_COMMAND;
+    snprintf(t->custom_job, sizeof(t->custom_job), "%s", id);
+    t->custom_mode = STACKEE_TALK_CUSTOM_MODE_COMMAND;
     close_http(t);
     t->accepted_ms = since_ms(t, t->turn_started);
-    t->cstm_cmd_started = now(t);
+    t->custom_cmd_started = now(t);
     t->inbox_loop = true;
-    t->say_play = t->cstm_play;
+    t->say_play = t->custom_play;
     t->polled = now(t);
     t->poll_sent = t->polled;
     t->poll_took = STACKEE_TALK_POLL_MS;    // 最初の 1 回はすぐ聞く
@@ -1272,36 +1272,36 @@ static void handle_key(stackee_talk_t *t, int status, const char *json) {
     show(t, "コマンドを実行中…");
 }
 
-// CSTM の流れが idle に戻った。数え、帯に短く知らせ、ログに残す。
+// Custom の流れが idle に戻った。数え、帯に短く知らせ、ログに残す。
 // ★ update_guide のあとに呼ぶ (案内の後始末で帯が消されないように)。
-static void cstm_finish(stackee_talk_t *t) {
-    t->cstm_active = false;
+static void custom_finish(stackee_talk_t *t) {
+    t->custom_active = false;
     t->inbox_loop = false;
     t->say_cur = -1;
-    t->cstm_end_ms = mark_ms(t, t->cstm_started);
-    if (t->cstm_final == NULL) {
-        t->cstm_final = (t->error[0] != '\0') ? "error" : "done";
+    t->custom_end_ms = mark_ms(t, t->custom_started);
+    if (t->custom_final == NULL) {
+        t->custom_final = (t->error[0] != '\0') ? "error" : "done";
     }
     char text[STACKEE_TALK_TEXT_MAX + 24];
-    if (strcmp(t->cstm_final, "ignored") == 0) {
-        t->cstm_ignored++;
-        snprintf(text, sizeof(text), "CSTM_%d 未設定", t->cstm_n);
+    if (strcmp(t->custom_final, "ignored") == 0) {
+        t->custom_ignored++;
+        snprintf(text, sizeof(text), "Custom_%d 未設定", t->custom_n);
         notice(t, text);
-    } else if (strcmp(t->cstm_final, "error") == 0) {
-        t->cstm_errors++;
+    } else if (strcmp(t->custom_final, "error") == 0) {
+        t->custom_errors++;
         snprintf(text, sizeof(text), "会話エラー: %s", t->error);
         notice(t, text);
     } else {
-        t->cstm_done++;
+        t->custom_done++;
     }
-    logf_(t, "[cstm] {\"n\":%d,\"mode\":\"%s\",\"final\":\"%s\",\"says\":%lu,"
+    logf_(t, "[custom] {\"n\":%d,\"mode\":\"%s\",\"final\":\"%s\",\"says\":%lu,"
              "\"polls\":%d,\"seq_ms\":%lu,\"seq_reused\":%d,\"key_ms\":%lu,"
              "\"first_say_ms\":%lu,\"end_ms\":%lu,\"play\":%d}",
-          t->cstm_n, stackee_talk_cstm_mode_names[t->cstm_mode], t->cstm_final,
+          t->custom_n, stackee_talk_custom_mode_names[t->custom_mode], t->custom_final,
           (unsigned long)t->says, t->inbox_polls,
-          (unsigned long)t->cstm_seq_ms, t->cstm_seq_reused ? 1 : 0,
-          (unsigned long)t->cstm_key_ms, (unsigned long)t->cstm_first_say_ms,
-          (unsigned long)t->cstm_end_ms, t->cstm_play ? 1 : 0);
+          (unsigned long)t->custom_seq_ms, t->custom_seq_reused ? 1 : 0,
+          (unsigned long)t->custom_key_ms, (unsigned long)t->custom_first_say_ms,
+          (unsigned long)t->custom_end_ms, t->custom_play ? 1 : 0);
 }
 
 
@@ -1309,16 +1309,16 @@ static void cstm_finish(stackee_talk_t *t) {
 // 暇なときに受け箱を見る (常時ポーリング、2026-09-27)
 // ---------------------------------------------------------------------------
 // ★ 待っている間は state を IDLE のまま動かさない。だから会話キー・カメラ・
-//   CSTM・talk.inject はいつでも入れて、入った瞬間にこちらの待ちを打ち切る
+//   Custom・talk.inject はいつでも入れて、入った瞬間にこちらの待ちを打ち切る
 //   (watch_abort)。USB マイク・音量の保存・Wi-Fi の走査の「後回し」も
 //   待っているだけでは発動しない (どれも busy を見ている)。
-// ★ 発話 ("say") を受けたら、CSTM のコマンドと同じ部品 (take_say →
+// ★ 発話 ("say") を受けたら、Custom のコマンドと同じ部品 (take_say →
 //   字幕の GET → PCM の GET → 再生 / 字幕だけ) に渡す。その間だけ busy。
 
 // 撃ってよいか (暇で、外の都合も許す)。
 static bool watch_can_run(stackee_talk_t *t) {
     return t->state == STACKEE_TALK_IDLE && !t->look_reserved && !t->pressed &&
-           !t->cstm_active && t->inbox_path[0] != '\0' &&
+           !t->custom_active && t->inbox_path[0] != '\0' &&
            !t->ops->ack_active() && !t->ops->play_active() &&
            (t->ops->watch_ok == NULL || t->ops->watch_ok()) &&
            t->ops->net_ready();
@@ -1440,7 +1440,7 @@ static void watch_handle(stackee_talk_t *t, int status, const char *json) {
         logf_(t, "[inbox] 発話を受けた (seq %ld, play=%d)", seq,
               t->watch_play ? 1 : 0);
         // 状態機械に渡す。★ 通信 (受信バッファ) の持ち主もここで移る。
-        // ★ 直前の会話・画像・CSTM の結末 (error・look・cstm・結末の数) には
+        // ★ 直前の会話・画像・Custom の結末 (error・look・custom・結末の数) には
         //   触らない。借りる値 (reply など) は写しておき、扱い終えたら戻す。
         watch_keep_save(t);
         t->watch_say = true;
@@ -1597,7 +1597,7 @@ static void step_http(stackee_talk_t *t) {
         fail(t, "通信に失敗しました");
         return;
     }
-    // CSTM と受け箱。★ 応答の読み方 (200 / 202 / 409 / 404) が会話と違うので
+    // Custom と受け箱。★ 応答の読み方 (200 / 202 / 409 / 404) が会話と違うので
     //   ここで分ける。body の NUL 終端は通信側が保証する。
     if (t->state == STACKEE_TALK_KEY || t->state == STACKEE_TALK_INBOX_SEQ ||
         t->state == STACKEE_TALK_INBOX) {
@@ -1756,10 +1756,10 @@ static void talk_step_inner(stackee_talk_t *t) {
             // ★ 画像の検証 (play=0) は**ここで止める**。PCM は受け取り終えて
             //   いる (audio_samples が数えてある) ので、鳴らす直前まで
             //   全部の段を通ったことになる。音は 1 つも出さない。
-            //   CSTM の prompt 方式の play=0 も同じ (/look と同じ後半)。
+            //   Custom の prompt 方式の play=0 も同じ (/look と同じ後半)。
             if (!t->inbox_loop && !t->watch_say &&
                 ((t->look && !t->look_play) ||
-                                   (t->cstm && !t->cstm_play))) {
+                                   (t->custom && !t->custom_play))) {
                 if (t->audio == NULL || t->audio_samples <= 0) {
                     fail(t, "返答の PCM が無い");
                     return;
@@ -1829,8 +1829,8 @@ static void talk_step_inner(stackee_talk_t *t) {
 
         case STACKEE_TALK_INBOX_WAIT:
             // ★ 全体の上限はコマンド方式のときだけ (起点は受理した時刻)。
-            if (t->cstm_active && t->cstm_mode == STACKEE_TALK_CSTM_MODE_COMMAND &&
-                since_ms(t, t->cstm_cmd_started) > STACKEE_TALK_CSTM_TIMEOUT_MS) {
+            if (t->custom_active && t->custom_mode == STACKEE_TALK_CUSTOM_MODE_COMMAND &&
+                since_ms(t, t->custom_cmd_started) > STACKEE_TALK_CUSTOM_TIMEOUT_MS) {
                 fail(t, "コマンドの応答待ちがタイムアウトしました");
                 return;
             }
@@ -1851,7 +1851,7 @@ static void talk_step_inner(stackee_talk_t *t) {
             show_page_at(t, at);
             if (at >= t->say_until) {
                 // 字幕だけの発話は「出し終えた」を played に数えるのは
-                // 常時ポーリングだけ (CSTM の記録は従来どおり音の有無)。
+                // 常時ポーリングだけ (Custom の記録は従来どおり音の有無)。
                 say_finished(t, t->watch_say && t->say_play);
             }
             return;
@@ -1955,8 +1955,8 @@ void stackee_talk_step(stackee_talk_t *t) {
     watch_step(t);
     update_guide(t);
     // ★ 案内の後始末 (帯を消す) のあとで知らせを置く。順が逆だと消される。
-    if (t->cstm_active && t->state == STACKEE_TALK_IDLE) {
-        cstm_finish(t);
+    if (t->custom_active && t->state == STACKEE_TALK_IDLE) {
+        custom_finish(t);
     }
     notice_step(t);
 }
@@ -1997,33 +1997,33 @@ bool stackee_talk_uses_audio(const stackee_talk_t *t) {
 }
 
 // ---------------------------------------------------------------------------
-// stackee 独自キー CSTM_0〜CSTM_9 の入口
+// stackee 独自キー Custom_0〜Custom_9 の入口
 // ---------------------------------------------------------------------------
-bool stackee_talk_cstm(stackee_talk_t *t, int n, bool play) {
-    if (n < 0 || n >= STACKEE_TALK_CSTM_COUNT) {
+bool stackee_talk_custom(stackee_talk_t *t, int n, bool play) {
+    if (n < 0 || n >= STACKEE_TALK_CUSTOM_COUNT) {
         return false;
     }
-    // ★ 会話・画像・他の CSTM の途中は黙って無視する (カメラと同じ約束)。
+    // ★ 会話・画像・他の Custom の途中は黙って無視する (カメラと同じ約束)。
     if (t->state != STACKEE_TALK_IDLE || t->look_reserved || t->pressed ||
         t->ops->ack_active()) {
-        t->cstm_busy++;
+        t->custom_busy++;
         return false;
     }
     begin_turn(t, false);
-    t->cstm = true;
-    t->cstm_active = true;
-    t->cstm_play = play;
-    t->cstm_n = n;
-    t->cstm_mode = STACKEE_TALK_CSTM_MODE_NONE;
-    t->cstm_job[0] = '\0';
-    t->cstm_job_state[0] = '\0';
-    t->cstm_final = NULL;
-    t->cstm_started = now(t);
-    t->cstm_cmd_started = 0;
-    t->cstm_seq_ms = t->cstm_key_ms = 0;
-    t->cstm_first_say_ms = t->cstm_end_ms = 0;
-    t->cstm_seq_reused = false;
-    t->cstm_count++;
+    t->custom = true;
+    t->custom_active = true;
+    t->custom_play = play;
+    t->custom_n = n;
+    t->custom_mode = STACKEE_TALK_CUSTOM_MODE_NONE;
+    t->custom_job[0] = '\0';
+    t->custom_job_state[0] = '\0';
+    t->custom_final = NULL;
+    t->custom_started = now(t);
+    t->custom_cmd_started = 0;
+    t->custom_seq_ms = t->custom_key_ms = 0;
+    t->custom_first_say_ms = t->custom_end_ms = 0;
+    t->custom_seq_reused = false;
+    t->custom_count++;
     t->inbox_loop = false;
     t->inbox_polls = 0;
     t->says = 0;
@@ -2032,7 +2032,7 @@ bool stackee_talk_cstm(stackee_talk_t *t, int n, bool play) {
     memset(t->say_log, 0, sizeof(t->say_log));
     t->error[0] = '\0';
     t->notice_on = false;       // 前の知らせは案内 (考えています…) が上書きする
-    snprintf(t->key_body, sizeof(t->key_body), "{\"key\":\"CSTM_%d\"}", n);
+    snprintf(t->key_body, sizeof(t->key_body), "{\"key\":\"Custom_%d\"}", n);
     if (t->key_path[0] == '\0') {
         fail(t, valid_path(t->path) ? "STACKEE_TALK_URL が /talk で終わっていません"
                                     : "STACKEE_TALK_URL が未設定です");
@@ -2044,11 +2044,11 @@ bool stackee_talk_cstm(stackee_talk_t *t, int n, bool play) {
     }
     watch_abort(t, true);       // 受け箱の待ちを打ち切って通信を空ける
     char text[48];
-    snprintf(text, sizeof(text), "CSTM_%d を送信中…", n);
+    snprintf(text, sizeof(text), "Custom_%d を送信中…", n);
     // ★ 覚えている seq が新しければ使い回す (GET /inbox の握手を 1 回省く)。
     if (t->inbox_seq_valid &&
         since_ms(t, t->inbox_seq_at) < STACKEE_TALK_INBOX_SEQ_TTL_MS) {
-        t->cstm_seq_reused = true;
+        t->custom_seq_reused = true;
         if (!t->ops->http_start("POST", t->key_path, t->key_body,
                                 strlen(t->key_body), 8192,
                                 STACKEE_TALK_CTYPE_JSON)) {

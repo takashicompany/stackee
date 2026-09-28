@@ -7,7 +7,7 @@ status carries the caption pages timed against that PCM, which /subtitles also s
 POST /look accepts a camera JPEG instead: the agent looks at it in the same
 conversation and its remark comes back through exactly the same job, audio and captions.
 GET /admin serves the browser page that switches agent, model, effort and instructions.
-POST /key {"key":"CSTM_n"} runs what /admin set for that key: a prompt to the agent (a job
+POST /key {"key":"Custom_n"} runs what /admin set for that key: a prompt to the agent (a job
 like /look) or a command line here. `bin/stackee-say` (POST /say, local only) queues an
 utterance in the inbox, which the device picks up with GET /inbox?after=&wait=&job=.
 """
@@ -55,8 +55,15 @@ ADMIN_HTML = Path(__file__).resolve().parent / "admin.html"
 # `stackee-say` lives here; a key's command finds it on its PATH.
 BIN_DIR = Path(__file__).resolve().parent / "bin"
 
-# The device's own keys CSTM_0..CSTM_9. What each does is set in keys.json from /admin.
-CUSTOM_KEYS = tuple("CSTM_%d" % n for n in range(10))
+# The device's own keys Custom_0..Custom_9. What each does is set in keys.json from /admin.
+CUSTOM_KEYS = tuple("Custom_%d" % n for n in range(10))
+# Their former names CSTM_0..CSTM_9, still accepted from older firmware and older keys.json.
+LEGACY_KEYS = {"CSTM_%d" % n: "Custom_%d" % n for n in range(10)}
+
+
+def canonical_key(name):
+    """Custom_n for Custom_n or its former name CSTM_n; anything else unchanged."""
+    return LEGACY_KEYS.get(name, name)
 KEY_MODES = ("none", "prompt", "command")
 MAX_KEY_BODY = 256
 KEY_TIMEOUT = 300
@@ -499,7 +506,7 @@ class Pipeline:
             return self.answer(LOOK_PROMPT, Path(tmp), timings, started, image)
 
     def prompt(self, text):
-        """A CSTM key's saved prompt: like /look without the photo, the transcript empty."""
+        """A Custom key's saved prompt: like /look without the photo, the transcript empty."""
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="stackee-key-") as tmp:
             timings = {"prepare_ms": round((time.monotonic() - started) * 1000, 2)}
@@ -546,13 +553,16 @@ def default_keys():
 
 
 def normalize_keys(raw):
-    """Validate keys.json: every CSTM key, its mode, its text and its time limit.
+    """Validate keys.json: every Custom key, its mode, its text and its time limit.
 
+    Former names CSTM_n are read as Custom_n; when both are present the new name wins.
     Missing keys are unset. The prompt and the command are both kept whatever the mode,
     so switching a key back does not lose what was typed.
     """
     if not isinstance(raw, dict):
         raise ValueError("キー設定はオブジェクトで指定してください")
+    raw = dict({LEGACY_KEYS[k]: v for k, v in raw.items() if k in LEGACY_KEYS},
+               **{k: v for k, v in raw.items() if k not in LEGACY_KEYS})
     unknown = sorted(set(raw) - set(CUSTOM_KEYS))
     if unknown:
         raise ValueError("知らないキーです: " + unknown[0])
@@ -679,7 +689,7 @@ class KeyCommandError(RuntimeError):
 class Jobs:
     """One conversation at a time; results expire after five minutes, max 8 retained.
 
-    /talk, /look and a CSTM key's prompt or command share the single slot: while any
+    /talk, /look and a Custom key's prompt or command share the single slot: while any
     runs, all of them answer 409.
     """
     def __init__(self, pipeline, keys=None, inbox=None, say_url=None):
@@ -693,7 +703,7 @@ class Jobs:
         self.say_url = say_url
         self.command = None
         self.closed = False
-        # The latest CSTM presses for the admin page: key, mode, result, time.
+        # The latest Custom presses for the admin page: key, mode, result, time.
         self.presses = deque(maxlen=10)
 
     def press(self, key, mode, result, ident=None):
@@ -1068,7 +1078,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(200, {"seq": seq})
 
     def key_post(self):
-        """POST /key {"key":"CSTM_n"}: run what the admin page set for that key."""
+        """POST /key {"key":"Custom_n"}: run what the admin page set for that key.
+
+        The former name CSTM_n is still accepted (older firmware) and handled as Custom_n.
+        """
         if self.headers.get("Origin"):
             return self.send(403, {"error": "device_api_only"})
         if self.headers.get("Transfer-Encoding"):
@@ -1088,6 +1101,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return self.send(400, {"error": "invalid_json"})
         key = request.get("key") if isinstance(request, dict) else None
+        key = canonical_key(key) if isinstance(key, str) else None
         if key not in CUSTOM_KEYS:
             return self.send(400, {"error": "unknown_key"})
         jobs = self.server.jobs
