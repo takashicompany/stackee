@@ -62,7 +62,8 @@ SUB_Y = 250
 SUB_HEIGHT = 70
 SUB_BG = 0x000000
 
-# main/stackee_selftest.c と同じ並び (0..4 は preview_status_bar.py の SCENARIOS)。
+# main/stackee_selftest.c と同じ並び (0..4 は preview_status_bar.py の SCENARIOS、
+# 5 は電池なし、6 = 最後は起動時の既定)。absent=True は電池の欄を描かない。
 BAR_SCENARIOS = [
     ('bat100/vol100/wifi-up/ble-connected',
      dict(battery=100, charging=False, volume=100, wifi='up', link='ble', connected=True)),
@@ -70,13 +71,40 @@ BAR_SCENARIOS = [
      dict(battery=55, charging=True, volume=50, wifi='scan_wait', link='ble', connected=False)),
     ('bat15/vol0/wifi-off/usb',
      dict(battery=15, charging=False, volume=0, wifi='wait', link='usb', connected=False)),
-    ('bat72/vol25/wifi-up/usb',
-     dict(battery=72, charging=False, volume=25, wifi='up', link='usb', connected=False)),
+    ('bat72/vol25/wifi-up/usb/mic',
+     dict(battery=72, charging=False, volume=25, wifi='up', link='usb', connected=False,
+          mic=True)),
     ('bat-unknown/vol5/wifi-boot/link-unknown',
      dict(battery=None, charging=False, volume=5, wifi='boot', link=None, connected=False)),
+    ('bat-absent/vol20/wifi-up/usb/mic',
+     dict(battery=0, charging=False, volume=20, wifi='up', link='usb', connected=False,
+          absent=True, mic=True)),
     ('boot-default',
      dict(battery=None, charging=False, volume=20, wifi='off', link='ble', connected=False)),
 ]
+
+
+# ---- 本体だけの欄: PC 用マイク (UAC) -----------------------------------------
+# firmware/kmk/stackee_icons.py には無い。main/stackee_icons.c と 1 行ずつ同じ。
+# タイルは kmk の TILES (18 枚) の後ろに tools/add_status_icons.py が足す。
+EXTRA_TILES = ('mic_on', 'mic_x')
+
+
+def tile_count(icons):
+    return len(icons.TILES) + len(EXTRA_TILES)
+
+
+def mic_tile(icons, ready):
+    return tile_count(icons) - len(EXTRA_TILES) + (0 if ready else 1)
+
+
+def mic_color(icons, ready):
+    return icons.FG if ready else icons.DIM
+
+
+def mic_pos(icons, width):
+    wifi_x = icons.layout(width)['wifi'][0]
+    return (wifi_x - 2 - icons.ICON_SIZE, 0)
 
 
 def load_icons():
@@ -196,7 +224,7 @@ def decode_icon_sheet(icons, raw):
     size = icons.ICON_SIZE
     per_row = size // 4
     tiles = []
-    for t in range(len(icons.TILES)):
+    for t in range(tile_count(icons)):
         levels = []
         for y in range(size):
             base = (t * size + y) * per_row
@@ -233,13 +261,21 @@ def draw_bar(fb, icons, tiles, font, state):
         'link': (icons.link_tile(kind, connected), icons.link_color(kind, connected)),
         'battery': (icons.battery_tile(pct, charging), icons.battery_color(pct, charging)),
     }
+    absent = state.get('absent', False)
+    # マイクは Wi-Fi のすぐ左 (本体の stackee_draw_bar と同じく音量の次に描く)。
+    ready = state.get('mic', False)
+    draw_icon(fb, icons, tiles, mic_tile(icons, ready), mic_color(icons, ready),
+              *mic_pos(icons, WIDTH))
     for slot in icons.SLOTS:
+        if absent and slot == 'battery':
+            continue        # 電池なし: 背景のまま (他の位置は変えない)
         index, color = slots[slot]
         draw_icon(fb, icons, tiles, index, color, *pos[slot])
     draw_text(fb, font, icons.volume_text(vol), icons.volume_color(vol),
               *pos['volume_text'], icons.BAR_HEIGHT)
-    draw_text(fb, font, icons.battery_text(pct), icons.battery_color(pct, charging),
-              *pos['battery_text'], icons.BAR_HEIGHT)
+    if not absent:
+        draw_text(fb, font, icons.battery_text(pct), icons.battery_color(pct, charging),
+                  *pos['battery_text'], icons.BAR_HEIGHT)
 
 
 class Renderer:

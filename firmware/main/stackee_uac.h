@@ -37,3 +37,11 @@ typedef struct {
 } stackee_uac_stats_t;
 
 void stackee_uac_stats(stackee_uac_stats_t *out);
+
+// PC 用マイク (UAC) がいま使えるか。ステータスバーのマイクの印と status の
+// mic_usb_ready。= この像に UAC が入っていて (full プロファイル)、USB ホストに
+// 構成済み (tud_mounted) で、ホストが眠らせていない (!tud_suspended)。
+// ★ HID の送信先 (hid_sel) は見ない。送信先が BLE でも、ケーブルで PC に
+//   繋がっていれば その PC からはマイクが見えている。逆に Bluetooth だけ
+//   (充電器・ケーブル無し) ならマウントされないので false。
+bool stackee_uac_usb_ready(void);

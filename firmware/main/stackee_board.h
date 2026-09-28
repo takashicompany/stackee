@@ -47,6 +47,15 @@ void stackee_board_i2c_stats(uint32_t *fail, uint32_t *recovered);
 int stackee_board_battery_percent(void);
 // 電池電圧 [mV] (VBAT ADC)。読めなければ -1。
 int stackee_board_battery_mv(void);
+// 電池が付いているか (DIN BASE を外すと電池が無い)。読むだけで何も書かない。
+//   sense   = いまの生の判定: REG 0x00 bit3 (BATEXIST) かつ VBAT >= 2.5 V。
+//             1 = あり / 0 = なし / -1 = 読めない。
+//   poll    = sense を 1 回取り、3 回続けて今と違ったら切り替える (起動時の
+//             1 回目は即決)。ui タスクが 10 秒に 1 回だけ呼ぶ。判定を返す。
+//   present = poll が決めた判定 (1 / 0 / -1 = まだ分からない)。何度読んでもよい。
+int stackee_board_battery_sense(void);
+int stackee_board_battery_poll(void);
+int stackee_board_battery_present(void);
 // AXP2101 の任意のレジスタを読む (診断用。console の axp.read)。
 int stackee_board_axp_read(uint8_t reg);
 int stackee_board_axp_write(uint8_t reg, uint8_t value);   // 0 / -1

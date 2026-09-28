@@ -131,6 +131,8 @@ class ConsoleOutputTest(unittest.TestCase):
         #   (ここまで来ていれば json.loads が通っている)。
         self.assertEqual(status['screen'], 'こんにちは "なのだ"')
         self.assertEqual(status['bat'], 77)         # 代役の AXP2101
+        self.assertIs(status['bat_present'], True)  # 代役は電池あり
+        self.assertIs(status['mic_usb_ready'], False)   # 代役は UAC なし
         self.assertEqual(status['up'], 12.3)
 
     def test_perf_carries_the_main_loop_period(self):

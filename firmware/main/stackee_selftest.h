@@ -1,4 +1,4 @@
-// ui.selftest が順に描く「ステータスバーの代表 6 状態」。
+// ui.selftest が順に描く「ステータスバーの代表 7 状態」。
 //
 // ★ 実機 (stackee_ui.c) と Mac の期待値 (tools/render_expected.py) と
 //   ホストビルド (hostbuild/render_main.c) の 3 者がこの同じ並びを使う。
@@ -7,12 +7,14 @@
 //   が同じ並びであることを機械照合する。
 //
 // 0..4 は firmware/kmk/tools/preview_status_bar.py の SCENARIOS と同じ。
-// 5 は起動直後の既定 (電池を読む前・音量 20・Wi-Fi off・BLE 広告中)。
+// 5 は電池なし (DIN BASE を外した USB 給電。電池の欄を描かない。2026-09-28)。
+// 6 (最後) は起動直後の既定 (電池を読む前・音量 20・Wi-Fi off・BLE 広告中)。
+// ★ 起動時の既定は必ず最後に置く (呼び手は BARS - 1 を既定として使う)。
 #pragma once
 
 #include "stackee_draw.h"
 
-#define STACKEE_SELFTEST_BARS 6
+#define STACKEE_SELFTEST_BARS 7
 
 const stackee_bar_state_t *stackee_selftest_bar(int index);
 const char *stackee_selftest_bar_name(int index);

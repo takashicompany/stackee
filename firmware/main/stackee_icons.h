@@ -1,6 +1,9 @@
 // 上段ステータスバーの「決め方」。firmware/kmk/stackee_icons.py の移植。
 //
-//   [音量][NN%]          [Wi-Fi][BLE/USB][電池][NN%]
+//   [音量][NN%]    [マイク][Wi-Fi][BLE/USB][電池][NN%]
+//
+// マイク (2026-09-28) は PC 用マイク (UAC) が使えるか。firmware/kmk には無い
+// 本体だけの欄なので、Python 側の期待値は tools/render_expected.py が持つ。
 //
 // ★ ここには描画が一切入っていない (タイル番号・色・位置・文字を決めるだけ)。
 //   CircuitPython 版と同じ切り分けで、Mac のホストビルドでそのまま動かせる。
@@ -15,11 +18,15 @@
 #define STACKEE_BAR_HEIGHT       24
 #define STACKEE_BAR_AREA_HEIGHT  28     // 黒帯。アイコンの下に 4px の余白
 #define STACKEE_CHAR_WIDTH       12
-#define STACKEE_ICON_TILES       18
+#define STACKEE_ICON_TILES       20
+// マイク 2 枚を足す前のシート (18 枚)。本体の FAT に古い status_icons.bin が
+// 残っていても読めるようにする (足りない 2 枚は空 = マイクが出ないだけ)。
+#define STACKEE_ICON_TILES_BASE  18
 
 // 1 タイルのバイト数 (24px * 2bit = 6 バイト/行 * 24 行)。
 #define STACKEE_ICON_TILE_BYTES  (STACKEE_ICON_SIZE * STACKEE_ICON_BPP / 8 * STACKEE_ICON_SIZE)
 #define STACKEE_ICON_SHEET_BYTES (STACKEE_ICON_TILE_BYTES * STACKEE_ICON_TILES)
+#define STACKEE_ICON_SHEET_BASE_BYTES (STACKEE_ICON_TILE_BYTES * STACKEE_ICON_TILES_BASE)
 
 // ★ 並び順 = シート上のタイル番号 (status_icons.json の tiles と同じ)。
 enum {
@@ -31,6 +38,8 @@ enum {
     STACKEE_TILE_VOLUME_3,
     STACKEE_TILE_WIFI_ON, STACKEE_TILE_WIFI_SEARCH, STACKEE_TILE_WIFI_OFF,
     STACKEE_TILE_BLE_CONNECTED, STACKEE_TILE_BLE_ADVERTISING, STACKEE_TILE_USB,
+    // ★ ここから下は本体だけ (tools/add_status_icons.py が末尾に足す)。
+    STACKEE_TILE_MIC_ON, STACKEE_TILE_MIC_X,
 };
 
 // 上段バーの色 (24bit RGB)。黒地に白抜き。
@@ -51,6 +60,7 @@ typedef enum {
 typedef struct {
     int volume_x, volume_y;
     int volume_text_x, volume_text_y;
+    int mic_x;
     int wifi_x, link_x, battery_x, icon_y;
     int battery_text_x, battery_text_y;
 } stackee_icons_layout_t;
@@ -72,6 +82,10 @@ uint32_t stackee_icons_wifi_color(const char *state_name);
 
 int      stackee_icons_link_tile(stackee_link_t kind, bool connected);
 uint32_t stackee_icons_link_color(stackee_link_t kind, bool connected);
+
+// PC 用マイク (UAC)。使える = マイク (白) / 使えない = マイク + × (灰)。
+int      stackee_icons_mic_tile(bool ready);
+uint32_t stackee_icons_mic_color(bool ready);
 
 // 塗りの濃さ level (0..3) を背景とまぜた色。3 で color そのもの。
 uint32_t stackee_icons_shade(uint32_t color, int level, uint32_t bg);

@@ -7,7 +7,7 @@
      stackee_bdf.c / stackee_faceanim.c / stackee_crc32.c) を Mac 用に
      ビルドして本物の素材を通し、出てきた CRC32 が
      tools/render_expected.py の期待値と 1 ビットも違わないこと。
-     35 表情ぶん + バー 6 状態 + 全面。
+     35 表情ぶん + バー 7 状態 + 全面。
   2. その 35 表情は **changes.bin の差分だけで** 作ること
      (顔 0 を全面で描いたあと、1 枚ずつ差分で寄せる)。全面で描いた絵と
      同じ CRC になれば、差分表の読み方が合っている。
@@ -207,8 +207,27 @@ class TablesTest(unittest.TestCase):
             self.assertEqual(int(tile), self.icons.link_tile(kind, connected))
             self.assertEqual(int(color, 16), self.icons.link_color(kind, connected))
 
+    def test_mic(self):
+        rows = self.rows_of('mic')
+        self.assertEqual(len(rows), 2)
+        for ready, tile, color in rows:
+            r = ready == '1'
+            self.assertEqual(int(tile), expected_mod.mic_tile(self.icons, r))
+            self.assertEqual(int(color, 16), expected_mod.mic_color(self.icons, r))
+        # 使える / 使えないで絵が違う (末尾に足した 2 枚)。
+        self.assertNotEqual(rows[0][1], rows[1][1])
+
+    def test_mic_does_not_overlap(self):
+        """マイクの欄は音量の文字 ("100%") の右端より右、Wi-Fi より左。"""
+        pos = self.icons.layout(240)
+        mic_x = expected_mod.mic_pos(self.icons, 240)[0]
+        volume_text_end = pos['volume_text'][0] + 4 * self.icons.CHAR_WIDTH
+        self.assertGreaterEqual(mic_x, volume_text_end)
+        self.assertLessEqual(mic_x + self.icons.ICON_SIZE, pos['wifi'][0])
+
     def test_layout(self):
-        want = self.icons.layout(240)
+        want = dict(self.icons.layout(240))
+        want['mic'] = expected_mod.mic_pos(self.icons, 240)
         for name, x, y in self.rows_of('layout'):
             self.assertEqual((int(x), int(y)), tuple(want[name]), name)
         self.assertEqual(len(self.rows_of('layout')), len(want))
@@ -228,7 +247,7 @@ class TablesTest(unittest.TestCase):
         self.assertEqual(int(values['bar_area']), self.icons.BAR_AREA_HEIGHT)
         self.assertEqual(int(values['char_width']), self.icons.CHAR_WIDTH)
         self.assertEqual(int(values['icon']), self.icons.ICON_SIZE)
-        self.assertEqual(int(values['tiles']), len(self.icons.TILES))
+        self.assertEqual(int(values['tiles']), expected_mod.tile_count(self.icons))
 
 
 class ExpectedUnitTest(unittest.TestCase):
@@ -246,7 +265,7 @@ class ExpectedUnitTest(unittest.TestCase):
         self.assertEqual(len(self.renderer.faces_raw), 240 * 240 // 2 * 35)
         self.assertEqual(len(self.renderer.faces), 240 * 200 // 2 * 35)
         self.assertEqual(len(self.renderer.changes), 35 * 35 * 4)
-        self.assertEqual(len(self.renderer.icons_raw), 6 * 24 * 18)
+        self.assertEqual(len(self.renderer.icons_raw), 6 * 24 * 20)
         self.assertEqual(self.renderer.count, 35)
 
     def test_bdf(self):
@@ -340,8 +359,8 @@ class ExpectedUnitTest(unittest.TestCase):
 
     def test_bar_scenarios_cover_the_interesting_cases(self):
         names = [name for name, _ in expected_mod.BAR_SCENARIOS]
-        self.assertEqual(len(names), 6)
-        self.assertEqual(len(set(names)), 6)
+        self.assertEqual(len(names), 7)
+        self.assertEqual(len(set(names)), 7)
         states = [state for _, state in expected_mod.BAR_SCENARIOS]
         self.assertTrue(any(s['battery'] is None for s in states), '読めない電池')
         self.assertTrue(any(s['charging'] for s in states), '充電中')
@@ -349,13 +368,47 @@ class ExpectedUnitTest(unittest.TestCase):
         self.assertTrue(any(s['battery'] is not None and s['battery'] <= 20
                             for s in states), '20% 以下 (赤)')
         self.assertTrue(any(s['link'] == 'usb' for s in states), 'USB')
+        self.assertTrue(any(s.get('absent') for s in states), '電池なし')
+        self.assertTrue(any(s.get('mic') for s in states), 'PC 用マイクが使える')
+        self.assertTrue(any(not s.get('mic') for s in states), 'PC 用マイクが使えない')
+        # 起動時の既定は最後 (本体とホストビルドは BARS - 1 を既定に使う)。
+        self.assertEqual(names[-1], 'boot-default')
 
     def test_expected_arrays_are_distinct(self):
         exp = self.renderer.expected()
         # 35 表情が全部違う絵になっている (同じ CRC が並んだら素材か
         # 読み方が壊れている)。
         self.assertEqual(len(set(exp['faces'])), 35)
-        self.assertEqual(len(set(exp['bars'])), 6)
+        self.assertEqual(len(set(exp['bars'])), 7)
+
+    def test_absent_battery_leaves_only_background(self):
+        """電池なしのバー = 同じ状態の電池ありのバーから電池の欄だけ消えた絵。
+
+        電池の欄 (アイコン + %) の外は 1 画素も変わらず、欄の中は背景一色。
+        """
+        r = self.renderer
+        name, absent = next(s for s in expected_mod.BAR_SCENARIOS
+                            if s[1].get('absent'))
+        present = dict(absent, absent=False)
+        fb_a = expected_mod.Framebuffer()
+        fb_p = expected_mod.Framebuffer()
+        expected_mod.draw_bar(fb_a, r.icons, r.tiles, r.font, absent)
+        expected_mod.draw_bar(fb_p, r.icons, r.tiles, r.font, present)
+        pos = r.icons.layout(expected_mod.WIDTH)
+        x0 = pos['battery'][0]
+        bg = expected_mod.rgb565_bytes(r.icons.BG)
+        changed = False
+        for y in range(r.icons.BAR_AREA_HEIGHT):
+            for x in range(expected_mod.WIDTH):
+                at = y * expected_mod.STRIDE + x * 2
+                a = bytes(fb_a.buf[at:at + 2])
+                p = bytes(fb_p.buf[at:at + 2])
+                if x < x0:
+                    self.assertEqual(a, p, '(%d,%d) 電池の欄の外' % (x, y))
+                else:
+                    self.assertEqual(a, bg, '(%d,%d) 電池の欄が背景でない' % (x, y))
+                    changed |= a != p
+        self.assertTrue(changed, '電池ありと同じ絵になっている')
 
 
 if __name__ == '__main__':

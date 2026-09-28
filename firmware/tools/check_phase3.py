@@ -179,6 +179,10 @@ def bar_params(status):
         'wifi': status.get('wifi_state', 'off'),
         'link': 'usb' if status.get('hid') == 'USB' else 'ble',
         'ble': bool(status.get('ble')),
+        # 電池なし (DIN BASE を外した) ならバーに電池は出ていない。
+        'nobat': status.get('bat_present') is False,
+        # PC 用マイク (UAC) が使えるか (マイク / マイク + ×)。
+        'mic': status.get('mic_usb_ready') is True,
     }
 
 

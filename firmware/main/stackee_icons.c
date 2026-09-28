@@ -11,6 +11,9 @@ void stackee_icons_layout(int width, stackee_icons_layout_t *out) {
     int link_icon_x = battery_icon_x - 2 - STACKEE_ICON_SIZE;
     int wifi_icon_x = link_icon_x - 2 - STACKEE_ICON_SIZE;
     int mid = STACKEE_BAR_HEIGHT / 2;
+    // マイクは Wi-Fi のすぐ左 (本体だけの欄)。音量の "100%" の右端 (76) より右で、
+    // 電池を出さないときも位置は変えない。
+    out->mic_x = wifi_icon_x - 2 - STACKEE_ICON_SIZE;
 
     out->volume_x = 2;
     out->volume_y = 0;
@@ -124,6 +127,16 @@ int stackee_icons_link_tile(stackee_link_t kind, bool connected) {
 
 uint32_t stackee_icons_link_color(stackee_link_t kind, bool connected) {
     return (kind == STACKEE_LINK_BLE && !connected) ? STACKEE_ICON_DIM : STACKEE_ICON_FG;
+}
+
+// ---- PC 用マイク (UAC) ------------------------------------------------------
+
+int stackee_icons_mic_tile(bool ready) {
+    return ready ? STACKEE_TILE_MIC_ON : STACKEE_TILE_MIC_X;
+}
+
+uint32_t stackee_icons_mic_color(bool ready) {
+    return ready ? STACKEE_ICON_FG : STACKEE_ICON_DIM;
 }
 
 // ---- 濃さ -----------------------------------------------------------------

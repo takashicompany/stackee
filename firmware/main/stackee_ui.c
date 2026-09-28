@@ -16,6 +16,7 @@
 #include "stackee_assets.h"
 #include "stackee_ble.h"
 #include "stackee_board.h"
+#include "stackee_uac.h"
 #include "stackee_console.h"
 #include "stackee_crc32.h"
 #include "stackee_draw.h"
@@ -276,6 +277,11 @@ static void collect_bar(stackee_bar_state_t *out) {
     memset(out, 0, sizeof(*out));
     out->battery = ui.battery;
     out->charging = ui.charging;
+    // 電池が無いと分かっているときだけ隠す (-1 = まだ分からない は今までどおり)。
+    out->battery_absent = (stackee_board_battery_present() == 0);
+    // PC 用マイク (UAC)。USB の抜き差し・ホストの眠りで変わる。★ 毎周読む
+    // (TinyUSB の状態を見るだけで I2C は無い) ので、変われば次の周で描き直る。
+    out->mic_ready = stackee_uac_usb_ready();
     out->volume = atomic_load(&ui.volume);
     snprintf(out->wifi, sizeof(out->wifi), "%s", ui.wifi);
     // 送信先は「実際に使っている先」を出す (status の hid と同じ決め方)。
@@ -286,6 +292,8 @@ static void collect_bar(stackee_bar_state_t *out) {
 
 static bool bar_changed(const stackee_bar_state_t *a, const stackee_bar_state_t *b) {
     return a->battery != b->battery || a->charging != b->charging ||
+           a->battery_absent != b->battery_absent ||
+           a->mic_ready != b->mic_ready ||
            a->volume != b->volume || a->link != b->link ||
            a->ble_connected != b->ble_connected ||
            strcmp(a->wifi, b->wifi) != 0;
@@ -294,7 +302,7 @@ static bool bar_changed(const stackee_bar_state_t *a, const stackee_bar_state_t 
 // ---------------------------------------------------------------------------
 // 自己テスト (ui タスクの上で 1 周 1 手ずつ進める)
 // ---------------------------------------------------------------------------
-// ★ 一気にやらない。32 表情 + バー 6 状態を 1 周 1 つずつ描くので、
+// ★ 一気にやらない。32 表情 + バー 7 状態を 1 周 1 つずつ描くので、
 //   走っている間もコンソールが答えられる = key.inject で打鍵の遅延を
 //   同時に測れる (段階 2 の合否のひとつ)。
 static uint32_t region_crc(int y, int h) {
@@ -420,6 +428,9 @@ static void ui_task(void *unused) {
         // 電池は 10 秒に 1 回。I2C は数バイトだけ読む。
         if (now_us - ui.battery_at_us >= BATTERY_EVERY_MS * 1000) {
             ui.battery_at_us = now_us;
+            // 電池の有無 (3 回続けて同じなら切り替え)。無いときバーは電池を
+            // 描かない。% は読むが表示には使わない (status の bat には出る)。
+            int present = stackee_board_battery_poll();
             ui.battery = stackee_board_battery_percent();
             int chg = stackee_board_charging();
             ui.charging = (chg > 0);
@@ -427,8 +438,8 @@ static void ui_task(void *unused) {
             //   と言われた 2026-09-17 の確認用。リングは 16 KB ≒ 5 時間分)。
             if (++ui.battery_log_tick >= 6) {
                 ui.battery_log_tick = 0;
-                ESP_LOGI(TAG, "電池 %d%% %d mV chg=%d", ui.battery,
-                         stackee_board_battery_mv(), chg);
+                ESP_LOGI(TAG, "電池 %d%% %d mV chg=%d present=%d", ui.battery,
+                         stackee_board_battery_mv(), chg, present);
             }
             // 音量は stackee_volume が持っている値をそのまま使う
             // (NVS を 10 秒ごとに読みに行かない)。
@@ -631,6 +642,8 @@ static size_t reply_bar_set(long id, const char *line, char *buf, size_t cap) {
             else if (strcmp(link, "usb") == 0) { state.link = STACKEE_LINK_USB; }
         }
         state.ble_connected = stackee_console_bool(line, "ble", false);
+        state.battery_absent = stackee_console_bool(line, "nobat", false);
+        state.mic_ready = stackee_console_bool(line, "mic", false);
     }
     if (!lock()) {
         return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
@@ -643,10 +656,12 @@ static size_t reply_bar_set(long id, const char *line, char *buf, size_t cap) {
     stackee_lcd_flush();
     size_t at = put(buf, cap, 0,
                     "{\"id\":%ld,\"ok\":1,\"bar\":%lu,\"bat\":%d,\"vol\":%d,"
-                    "\"wifi\":\"%s\",\"link\":%d,\"ble\":%s}",
+                    "\"wifi\":\"%s\",\"link\":%d,\"ble\":%s,\"nobat\":%s,\"mic\":%s}",
                     id, (unsigned long)region_crc(0, STACKEE_BAR_AREA_HEIGHT),
                     state.battery, state.volume, state.wifi, (int)state.link,
-                    state.ble_connected ? "true" : "false");
+                    state.ble_connected ? "true" : "false",
+                    state.battery_absent ? "true" : "false",
+                    state.mic_ready ? "true" : "false");
     unlock();
     return at;
 }
@@ -858,6 +873,24 @@ static void load_assets(void) {
     if (ui.icons != NULL) {
         ui.icons_len = STACKEE_ICON_SHEET_BYTES;
         ui.icons_crc = stackee_crc32(0, ui.icons, STACKEE_ICON_SHEET_BYTES);
+    } else {
+        // ★ マイク 2 枚を足す前の status_icons.bin (18 枚) が FAT に残っている
+        //   とき。読めた 18 枚はそのまま使い、足りない 2 枚は空 (= マイクが
+        //   出ないだけ) にする。バー全体が消えるよりよい。素材を送り直せば直る。
+        uint8_t *base = stackee_assets_read_inflate("status_icons.bin",
+                                                    STACKEE_ICON_SHEET_BASE_BYTES,
+                                                    MALLOC_CAP_8BIT);
+        if (base != NULL) {
+            ui.icons_len = STACKEE_ICON_SHEET_BASE_BYTES;
+            ui.icons_crc = stackee_crc32(0, base, STACKEE_ICON_SHEET_BASE_BYTES);
+            ui.icons = heap_caps_calloc(1, STACKEE_ICON_SHEET_BYTES, MALLOC_CAP_8BIT);
+            if (ui.icons != NULL) {
+                memcpy(ui.icons, base, STACKEE_ICON_SHEET_BASE_BYTES);
+                ESP_LOGW(TAG, "status_icons.bin が古い (%d 枚)。マイクの印は出ない。"
+                         "install_assets.sh で送り直すこと", STACKEE_ICON_TILES_BASE);
+            }
+            free(base);
+        }
     }
 
     size_t font_len = 0;

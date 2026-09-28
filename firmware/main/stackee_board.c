@@ -15,6 +15,8 @@ static const char *TAG = "board";
 #define AXP2101_ADDR        0x34
 #define AW9523B_ADDR        0x58
 
+#define AXP_REG_STATUS1         0x00    // PMU status 1。bit3 = 電池あり (BATEXIST)
+#define AXP_STATUS1_BAT_EXIST   0x08
 #define AXP_REG_STATUS2         0x01    // bit6:5 電池電流の向き
 #define AXP_REG_CHG_GAUGE_WDT   0x18    // bit3 ゲージ有効
 #define AXP_REG_BAT_PERCENT     0xA4    // 残量 [%]
@@ -230,6 +232,69 @@ int stackee_board_battery_mv(void) {
     return ((hi & 0x1F) << 8) | lo;     // M5Unified readRegister14 / XPowersLib H5L8 と同じ 13 bit
 }
 
+// ---------------------------------------------------------------------------
+// 電池の有無 (2026-09-28)
+// ---------------------------------------------------------------------------
+// ★ 電池は DIN BASE 側にある。外して USB 給電だけで使うと REG 0xA4 は 0%、
+//   VBAT は 43 mV を返し、バーに赤い 0% が出てしまう。そこで電池の有無を
+//   判定し、無いときはバーに電池を出さない。
+//   判定 (読むだけ。AXP2101 には**何も書かない**):
+//     ・REG 0x00 (PMU status 1) bit3 = BATEXIST。M5Unified の
+//       AXP2101_Class::getBatState()、XPowersLib の isBatteryConnect() と同じビット。
+//     ・VBAT >= 2500 mV。bit3 の取り違えに備えた二重確認 (電池が無いと数十 mV)。
+//   両方そろって「あり」。どちらか片方でも無いと言えば「なし」。
+//   (2.5 V 未満まで落ち切った電池も「なし」に見えるが、その電池ではもう動かない。)
+//   ちらつき防止: 起動時の 1 回目はそのまま採用。以後は生の判定が
+//   BAT_SWITCH_AFTER 回続けて今と違ったときだけ切り替える。
+//   読めなかった回は数えない (前の判定を保つ)。
+#define BAT_PRESENT_MIN_MV      2500
+#define BAT_SWITCH_AFTER        3
+
+static volatile int s_bat_present = -1;     // -1 = まだ分からない
+static int s_bat_disagree;
+
+int stackee_board_battery_sense(void) {
+    if (!s_ready) {
+        return -1;
+    }
+    int st = read_reg(s_axp, AXP_REG_STATUS1);
+    if (st < 0) {
+        return -1;
+    }
+    if (!(st & AXP_STATUS1_BAT_EXIST)) {
+        return 0;
+    }
+    int mv = stackee_board_battery_mv();
+    if (mv < 0) {
+        return -1;
+    }
+    return mv >= BAT_PRESENT_MIN_MV ? 1 : 0;
+}
+
+int stackee_board_battery_poll(void) {
+    int raw = stackee_board_battery_sense();
+    if (raw < 0) {
+        return s_bat_present;
+    }
+    if (s_bat_present < 0) {
+        s_bat_present = raw;
+        s_bat_disagree = 0;
+        ESP_LOGI(TAG, "電池 %s (起動時の判定)", raw ? "あり" : "なし");
+    } else if (raw == s_bat_present) {
+        s_bat_disagree = 0;
+    } else if (++s_bat_disagree >= BAT_SWITCH_AFTER) {
+        s_bat_present = raw;
+        s_bat_disagree = 0;
+        ESP_LOGI(TAG, "電池 %s に切り替え (%d 回続けて同じ判定)",
+                 raw ? "あり" : "なし", BAT_SWITCH_AFTER);
+    }
+    return s_bat_present;
+}
+
+int stackee_board_battery_present(void) {
+    return s_bat_present;
+}
+
 // board.c:168-217 と同じ。0x03 の LCD_RST がここで解除される。
 static esp_err_t aw9523b_init(void) {
     static const uint8_t seq[][2] = {
@@ -294,6 +359,8 @@ esp_err_t stackee_board_init(void) {
     // AW9523B が LCD_RST を離してからパネルに話しかけるまでの待ち。
     vTaskDelay(pdMS_TO_TICKS(20));
     s_ready = true;
+    // 電池の有無は最初の 1 回だけ即決する (起動直後のバーから正しく出すため)。
+    stackee_board_battery_poll();
     ESP_LOGI(TAG, "AXP2101 / AW9523B 初期化ずみ (残量 %d%%)",
              stackee_board_battery_percent());
     return ESP_OK;

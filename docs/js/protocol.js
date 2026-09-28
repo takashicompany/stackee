@@ -945,6 +945,7 @@ export function readScanResults(parts) {
  *
  * デバイスが返すのは (stackee_console.py の _status):
  *   up (秒, 小数), fw, bat (0-100 か null), chg (真偽か null),
+ *   bat_present (電池が付いているか。false なら bat は意味がない),
  *   hid ('USB'|'BLE'|'?'), ble (真偽か null),
  *   wifi ('off'|'on'|'up'|'?'), ip ('up' のときだけ),
  *   cmds / drops (コンソール自身の統計)
@@ -952,7 +953,8 @@ export function readScanResults(parts) {
 export function readStatus(frame) {
   const f = frame || {};
   return {
-    battery: typeof f.bat === 'number' ? f.bat + ' %' : null,
+    battery: f.bat_present === false ? '電池なし'
+      : (typeof f.bat === 'number' ? f.bat + ' %' : null),
     charging: f.chg == null ? null : (f.chg ? '充電中' : '充電していない'),
     hid: f.hid === '?' || f.hid == null ? null : String(f.hid),
     ble: f.ble == null ? null : (f.ble ? '接続あり' : '接続なし'),

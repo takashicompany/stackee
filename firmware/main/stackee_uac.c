@@ -101,6 +101,10 @@ void stackee_uac_stats(stackee_uac_stats_t *out) {
     out->muted = uac.mute[0] != 0;
 }
 
+bool stackee_uac_usb_ready(void) {
+    return tud_mounted() && !tud_suspended();
+}
+
 // ---------------------------------------------------------------------------
 // TinyUSB の呼び出し (weak を上書き)
 // ---------------------------------------------------------------------------
@@ -237,6 +241,11 @@ void stackee_uac_stats(stackee_uac_stats_t *out) {
     if (out != NULL) {
         memset(out, 0, sizeof(*out));
     }
+}
+
+// dev プロファイルには UAC が無い → いつでも使えない。
+bool stackee_uac_usb_ready(void) {
+    return false;
 }
 
 #endif

@@ -285,7 +285,7 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | コンソール | CDC 上で現行と同じ枠。`hello` / `status` / `reset` / `bootloader` / `log.tail` / `key.inject` / `hid.switch` / `ble.refresh` / `ble.clear_bonds` / `ble.drop_cccd` |
 | LCD | ILI9342C。**段階 2**: 白地 + 上段 28px の黒帯 (アイコンと数字) + 中央に顔 240x240 |
 | 顔 | 既存素材 `faces.bin` (4bpp / 32 枚) を起動時に PSRAM へ展開。状態機械と差分描画は現行 CircuitPython 版と同じ |
-| ステータスバー | `status_icons.bin` (2bpp 18 タイル) と `status_h24.bdf`。電池・音量・Wi-Fi・BLE/USB |
+| ステータスバー | `status_icons.bin` (2bpp 20 タイル) と `status_h24.bdf`。音量・PC 用マイク・Wi-Fi・BLE/USB・電池 (電池が無ければ出さない)。意味は §10-1b |
 | Wi-Fi | **段階 3**。登録簿の中でいちばん強い AP へ自動接続。1 周期 1 段 |
 | 会話 | **段階 3**。42 キー長押しで録音 → pi400 へ HTTPS → 一次回答 → 返答を再生 |
 | 音量 | **段階 3**。`STK_VOLUP` / `STK_VOLDN` で 5 きざみ。静まってから NVS に保存 |
@@ -1016,15 +1016,57 @@ F13〜F24 と LANG1 / LANG2。ほかは数値 (`"kc":115`) で渡す。
 | | |
 |---|---|
 | 画面 | 240x320 (MADCTL `0xA8`)。背景は白。ただし字幕の帯 (y=250..319) は**いつでも黒** |
-| 上段 | 高さ **28px** の黒帯。`[音量][NN%]` … `[Wi-Fi][BLE/USB][電池][NN%]` |
+| 上段 | 高さ **28px** の黒帯。`[音量][NN%]` … `[マイク][Wi-Fi][BLE/USB][電池][NN%]` (各アイコンの意味は §10-1b) |
 | 顔 | 240x240 を **上 29 px / 下 11 px 切り詰めた 240x200** を **x=0 / y=50** に (y=50..249)。空いた 40 px は字幕 3 行へ。29/11 は 32 コマ全部の余白の最小値で**1 画素も落ちない** (§23-8) |
 | 顔の素材 | `faces.bin` (zlib / 4bpp / 32 枚の縦長シート)。**素材は 240x240 のまま。** 起動時に PSRAM へ 900 KB 展開し、その場で 240x200 (750 KB) へ詰め直す |
 | 4bpp の並び | **画素 0 が上位ニブル**。パレットは `i*17` の等間隔グレー 16 段 |
 | 差分 | `changes.bin` の bbox (32x32 組 x 4 バイト) を **1 周 16 行ずつ**。bbox は元の 240x240 の座標なので、描くときに 29 行ぶん上へ寄せて捨てた行を落とす |
-| アイコン | `status_icons.bin` (zlib / 2bpp / 24x24 x 18 枚)。**画素 0 が最上位 2 ビット**、濃さ 0 は透明 |
+| アイコン | `status_icons.bin` (zlib / 2bpp / 24x24 x 20 枚)。**画素 0 が最上位 2 ビット**、濃さ 0 は透明。先頭 18 枚は現行 CircuitPython 版と同じ、末尾 2 枚 (マイク) は本体だけ |
 | 数字 | `status_h24.bdf` (12x24) から `0123456789%-? ` の 14 文字だけ起動時に展開 |
 | 展開器 | **ESP32-S3 の ROM にある tinfl** (`esp32s3.rom.ld` の `tinfl_decompress`)。像は 1 バイトも増えない |
 | タスク | `ui` は CPU0 / 優先度 3 / 5 ms 周期。入力 (CPU1 / 最高) とは別の CPU |
+
+### 10-1b. ステータスバーの各アイコンの意味 (2026-09-28)
+
+左から `[音量][NN%]` `[マイク]` `[Wi-Fi]` `[BLE/USB]` `[電池][NN%]`。
+白 = 使える / 状態が良い、灰 = 使えない / 未接続、赤 = 電池 20% 以下。
+
+| 欄 | 絵 | 意味 |
+|---|---|---|
+| 音量 | スピーカー + 数字 | 返答の音量。0% で斜線入りの灰 |
+| **マイク** | マイク (白) | **PC 用マイク (USB マイク = UAC) が使える。** full プロファイルで、USB ケーブルで PC (ホスト) に繋がって構成済み |
+| | マイク + × (灰) | **PC 用マイクは使えない。** USB で PC に繋がっていない (Bluetooth だけ・充電器だけ・PC がスリープ中)、または dev プロファイル (UAC が入っていない) |
+| Wi-Fi | 扇 (白) / 虫眼鏡付き / 斜線 (灰) | 接続中 / 探している / 未接続 |
+| BLE/USB | Bluetooth (白) / 電波付き (灰) / USB | キーの送信先。BLE 接続中 / BLE 広告中 / USB |
+| 電池 | 電池 + 数字 | 残量。充電中は稲妻、読めないときは ? と `--%`。**電池が付いていないとき (DIN BASE を外して USB 給電だけ) は、アイコンも数字も出さない** (その場所は黒のまま。他のアイコンの位置は変わらない) |
+
+★ **マイクの判定は送信先 (BLE/USB の欄) ではなく USB の接続そのもの。**
+PC 用マイクは USB の口でしか PC に出ていないので、「USB ホストに構成済み
+(`tud_mounted`) で、ホストが眠らせていない (`!tud_suspended`)、かつ full
+プロファイル」のときだけ使える。送信先が BLE でも、ケーブルで PC に繋いで
+いればその PC からマイクは見えているので白になる (キーは BLE の相手へ、
+マイクはケーブルの先の PC へ、と行き先が分かれる)。USB の抜き差しは次の
+周 (5 ms) で描き直る。`status` の `mic_usb_ready` が同じ値。
+
+★ **電池の有無** は AXP2101 を**読むだけ**で決める (何も書かない)。
+REG 0x00 (PMU status 1) の bit3 = 電池あり (M5Unified `getBatState()` /
+XPowersLib `isBatteryConnect()` と同じビット) **かつ** VBAT ≥ 2.5 V のときだけ
+「あり」。電池が無い実機では bit3 = 0、VBAT は 43 mV だった。起動時の 1 回目で
+即決し、以後は 10 秒ごとの判定が **3 回続けて**変わったら切り替える
+(抜き差しの途中でちらつかない。付け直してから最大 30 秒ほどで出る)。
+`status` の `bat_present` (true / false / null = まだ分からない) が同じ値。
+`bat` / `bat_mv` は生の値のまま出す (電池が無いと 0 / 数十 mV)。
+低電池の赤は描画の中にしか無く、電池が無いときは電池の欄ごと描かないので
+出ない。残量で電源を切る処理は無い。
+
+アイコンの素材: 先頭 18 枚は親リポジトリの
+`firmware/kmk/tools/generate_status_assets.py` が作ったもので変えていない。
+マイクの 2 枚は `assets/src/icons/mic_on.svg` / `mic_x.svg` (Material Icons の
+`mic` を 3 px 左へ寄せ、× は 2 px 幅の 8x8 を画素に合わせて置いたもの) を
+`tools/add_status_icons.py` が同じ手順 (rsvg-convert → 4 階調 → 2bpp) で
+シートの末尾に足す。`--check` で書かずに一致だけ見られる。
+本体の FAT に古い 18 枚のシートが残っていても読める (マイクが出ないだけ)。
+`ui.assets` の `icons_len` が 2592 なら古い、2880 なら新しい。
 
 顔の状態機械 (`awake` 2 秒 → `idle`、グループ 3000 ms、フレーム
 聞き取り 250 / 考え中 700 / 発話 250 ms、打鍵後 1000 ms はまばたきを始めない、
@@ -1156,7 +1198,8 @@ python3 firmware/tools/render_expected.py      # 期待値の CRC を見る
 
 * 32 表情ぜんぶ。しかも顔 0 を全面で描いたあとは **`changes.bin` の差分だけ**で
   1 枚ずつ寄せて、全面で描いた絵と同じ CRC になること (= 差分表の読み方が正しい)
-* ステータスバーの代表 6 状態 (`preview_status_bar.py` の 5 つ + 起動時の既定)
+* ステータスバーの代表 7 状態 (`preview_status_bar.py` の 5 つ + 電池なし + 起動時の既定)。
+  マイクの欄 (使える / 使えない) もこの中で両方描く
 * タイル番号・色・文字・配置が `firmware/kmk/stackee_icons.py` と同じこと
   (電池 20/40/60/80、音量 0/33/66 の境目を総当たり)
 * CRC-32 が `zlib.crc32` と同じ値になること
@@ -1179,13 +1222,13 @@ python3 firmware/tools/check_phase2.py --no-selftest   # 遅延と perf だけ
 |---|---|
 | 素材の展開 | `ui.assets` の CRC32 が Mac の `zlib.decompress` と一致 |
 | 32 表情 | `ui.selftest` の 32 個の CRC32 (y=50 h=200) が `render_expected.py` と一致 |
-| ステータスバー | 同 6 個 |
+| ステータスバー | 同 7 個 (電池なしを含む) |
 | 打鍵の遅延 (平常) | `key.inject` の中央値 ≤ 6 ms |
 | 打鍵の遅延 (描画中) | **`ui.selftest` を回しながら** `key.inject`。中央値 ≤ 6 ms / 最大 ≤ 10 ms |
 | 顔 1 コマの描画 | `perf.ui_face` |
 | LCD 転送 | `perf.ui` |
 
-★ `ui.selftest` は **1 周 1 手ずつ**進む (32 表情 + バー 6 状態 = 38 手)。
+★ `ui.selftest` は **1 周 1 手ずつ**進む (35 表情 + バー 7 状態)。
 走っている間もコンソールが答えるので、`key.inject` を同時に回して
 「描いている最中の遅延」を測れる。これが段階 2 の合否のひとつ。
 
@@ -1203,7 +1246,7 @@ python3 firmware/tools/check_phase2.py --no-selftest   # 遅延と perf だけ
 | `lcd.dump` `{"y":N,"x":X,"n":16}` | その位置の生バイト (16 進、最大 128 バイト) |
 | `face.set` `{"state":"thinking","group":0,"frame":1}` | 顔を固定して描き、CRC32 を返す。`{"i":7}` で顔番号を直に指定 |
 | `face.auto` | 固定を解いて状態機械に戻す |
-| `bar.set` `{"bat":55,"chg":true,"vol":50,"wifi":"up","link":"ble","ble":false}` | バーを固定して描き、CRC32 を返す。`{"i":3}` で代表 6 状態を指定 |
+| `bar.set` `{"bat":55,"chg":true,"vol":50,"wifi":"up","link":"ble","ble":false,"nobat":false,"mic":false}` | バーを固定して描き、CRC32 を返す。`nobat` = 電池を描かない、`mic` = PC 用マイクが使える。`{"i":3}` で代表 7 状態を指定 |
 | `bar.auto` | 固定を解く |
 | `ui.selftest` | 自己テストを始める / 進み具合を返す / 終わっていれば CRC32 の配列 |
 | `ui.status` | いまの顔・見送った回数・描いた枚数・フォント |
@@ -2511,6 +2554,9 @@ python3 tools/check_phase4.py --only uac --record   # 1 秒録ってサンプル
 
 `--record` には `sox` か `ffmpeg` が要る。無ければ列挙だけ。
 
+使えるかどうかはステータスバーのマイクの欄と `status.mic_usb_ready` に出る
+(USB ホストに構成済み + full のときだけ true。§10-1b)。
+
 ### 17-5. FAT への書き込み (`settings.set` / `fs.put`)
 
 ★ 普段は**読み取り専用**でマウントしてある。壊れ方を減らすためで、それは
@@ -2692,6 +2738,14 @@ REG 0x49 bit2 (POWERON Long PRESS IRQ、RW1C) を UI の 10 秒周期とは別�
 1 分ごとの `電池 %` ログで、無線運用中に 96% → 59% (3.77 V) まで下がった。
 残量の数値は更新されている。VBAT の ADC (REG 0x30 bit0) を有効にし、
 `status.bat_mv` と 1 分ごとのログを残した。
+
+### 19-4. 電池が無いとき (2026-09-28)
+
+電池は DIN BASE 側にある。外して USB 給電だけにすると `bat 0` / `bat_mv 43` と
+なり、バーに赤い 0% が出ていた。REG 0x00 bit3 (電池あり) と VBAT ≥ 2.5 V を
+**読むだけ**で有無を決め、無いときはバーに電池を出さない (§10-1b)。
+DIN BASE を戻せば 3 回 (約 30 秒) で元どおり出る。1 分ごとのログにも
+`present=` を足した。切り替わった瞬間は `電池 あり/なし に切り替え` がログに出る。
 
 ## 20. 時間が経つと HTTPS の証明書検証が失敗する (2026-09-17)
 

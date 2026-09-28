@@ -291,22 +291,30 @@ void stackee_draw_bar(const stackee_canvas_t *c, const stackee_bar_state_t *st,
     uint32_t wifi_color = stackee_icons_wifi_color(st->wifi);
     uint32_t link_color = stackee_icons_link_color(st->link, st->ble_connected);
     uint32_t battery_color = stackee_icons_battery_color(st->battery, st->charging);
+    uint32_t mic_color = stackee_icons_mic_color(st->mic_ready);
 
     // 並びは stackee_icons.py の SLOTS と同じ。
     stackee_draw_icon(c, icons, stackee_icons_volume_tile(st->volume),
                       volume_color, STACKEE_ICON_BG, pos.volume_x, pos.volume_y);
+    stackee_draw_icon(c, icons, stackee_icons_mic_tile(st->mic_ready),
+                      mic_color, STACKEE_ICON_BG, pos.mic_x, pos.icon_y);
     stackee_draw_icon(c, icons, stackee_icons_wifi_tile(st->wifi),
                       wifi_color, STACKEE_ICON_BG, pos.wifi_x, pos.icon_y);
     stackee_draw_icon(c, icons, stackee_icons_link_tile(st->link, st->ble_connected),
                       link_color, STACKEE_ICON_BG, pos.link_x, pos.icon_y);
-    stackee_draw_icon(c, icons, stackee_icons_battery_tile(st->battery, st->charging),
-                      battery_color, STACKEE_ICON_BG, pos.battery_x, pos.icon_y);
+    // ★ 電池が無いときは電池のアイコンも % も描かない (上で塗った背景のまま)。
+    if (!st->battery_absent) {
+        stackee_draw_icon(c, icons, stackee_icons_battery_tile(st->battery, st->charging),
+                          battery_color, STACKEE_ICON_BG, pos.battery_x, pos.icon_y);
+    }
 
     char text[16];
     stackee_icons_volume_text(st->volume, text, sizeof(text));
     stackee_draw_text(c, font, text, volume_color, pos.volume_text_x,
                       pos.volume_text_y, STACKEE_BAR_HEIGHT);
-    stackee_icons_battery_text(st->battery, text, sizeof(text));
-    stackee_draw_text(c, font, text, battery_color, pos.battery_text_x,
-                      pos.battery_text_y, STACKEE_BAR_HEIGHT);
+    if (!st->battery_absent) {
+        stackee_icons_battery_text(st->battery, text, sizeof(text));
+        stackee_draw_text(c, font, text, battery_color, pos.battery_text_x,
+                          pos.battery_text_y, STACKEE_BAR_HEIGHT);
+    }
 }

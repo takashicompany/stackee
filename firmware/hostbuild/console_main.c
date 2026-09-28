@@ -128,6 +128,7 @@ bool stackee_usb_mounted(void){return true;}
 void raw_hid_send(uint8_t *data, uint8_t length){(void)data;(void)length;}
 bool stackee_usb_has_cdc(void){return true;}
 void stackee_uac_stats(stackee_uac_stats_t *out){memset(out,0,sizeof(*out));}
+bool stackee_uac_usb_ready(void){return false;}
 
 // --- 段階 4 で増えた代役 (電源キー / PMIC / 暗号の自己診断) ---------------
 // ここで見ているのは枠の組み立てだけなので、中身は固定値でよい。
@@ -141,6 +142,7 @@ void stackee_board_i2c_stats(uint32_t *fail, uint32_t *recovered){
     if (recovered) *recovered = 0;
 }
 int stackee_board_battery_mv(void){return 4050;}
+int stackee_board_battery_present(void){return 1;}
 int stackee_board_axp_read(uint8_t reg){(void)reg;return 0;}
 int stackee_board_axp_write(uint8_t reg, uint8_t value){(void)reg;(void)value;return 0;}
 bool stackee_cryptocheck_run(stackee_cryptocheck_result_t *out){

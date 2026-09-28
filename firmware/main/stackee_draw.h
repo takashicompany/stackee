@@ -78,6 +78,13 @@ typedef struct {
     char            wifi[16];       // stackee_wifi の状態名 ("off" / "up" ...)
     stackee_link_t  link;
     bool            ble_connected;
+    // 電池が付いていない (DIN BASE を外して USB 給電だけ)。true なら電池の
+    // アイコンと % を描かない (その場所は背景のまま。他の位置は変えない)。
+    // 既定 (0 埋め) は false = 今までどおり描く。
+    bool            battery_absent;
+    // PC 用マイク (UAC) が使える (full + USB ホストに構成済み)。
+    // false = マイク + × (灰)。既定 (0 埋め) は false。
+    bool            mic_ready;
 } stackee_bar_state_t;
 
 uint16_t stackee_draw_rgb565(uint32_t rgb);

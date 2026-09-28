@@ -104,10 +104,15 @@ static void dump_tables(void) {
                    stackee_icons_link_color((stackee_link_t)kind, conn != 0));
         }
     }
+    for (int ready = 0; ready < 2; ready++) {
+        printf("mic %d %d %06X\n", ready, stackee_icons_mic_tile(ready != 0),
+               stackee_icons_mic_color(ready != 0));
+    }
     stackee_icons_layout_t pos;
     stackee_icons_layout(WIDTH, &pos);
     printf("layout volume %d %d\n", pos.volume_x, pos.volume_y);
     printf("layout volume_text %d %d\n", pos.volume_text_x, pos.volume_text_y);
+    printf("layout mic %d %d\n", pos.mic_x, pos.icon_y);
     printf("layout wifi %d %d\n", pos.wifi_x, pos.icon_y);
     printf("layout link %d %d\n", pos.link_x, pos.icon_y);
     printf("layout battery %d %d\n", pos.battery_x, pos.icon_y);
@@ -225,7 +230,7 @@ int main(int argc, char **argv) {
                stackee_crc32(0, fb + (size_t)FACE_Y * STRIDE, (size_t)FACE_ROWS * STRIDE));
     }
 
-    // 顔を 0 に戻してからバーの 6 状態 (顔の絵が CRC に混ざらないよう、
+    // 顔を 0 に戻してからバーの 7 状態 (顔の絵が CRC に混ざらないよう、
     // バーの CRC は上段 28 行だけを見る)。
     stackee_draw_face(&canvas, faces, FACE_SIZE, FACE_ROWS, 0, FACE_X, FACE_Y,
                       0, 0, FACE_SIZE, FACE_ROWS);
@@ -236,7 +241,7 @@ int main(int argc, char **argv) {
                stackee_selftest_bar_name(i));
     }
 
-    // 「顔 0 + バー 5」の全面。lcd.crc の "all" と突き合わせる。
+    // 「顔 0 + バー 6 (起動時の既定)」の全面。lcd.crc の "all" と突き合わせる。
     stackee_draw_bar(&canvas, stackee_selftest_bar(bar_index), icons, &font);
     printf("all %u\n", stackee_crc32(0, fb, sizeof(fb)));
     return 0;

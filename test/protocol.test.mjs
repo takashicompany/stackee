@@ -803,6 +803,12 @@ test('status を日本語の表示値にする', () => {
   assert.equal(s.uptime, '01:01:01');
 });
 
+test('電池が無い (bat_present: false) なら % ではなく「電池なし」', () => {
+  const s = readStatus({ id: 1, bat: 0, bat_present: false, chg: false });
+  assert.equal(s.battery, '電池なし');
+  assert.equal(readStatus({ id: 1, bat: 83, bat_present: true }).battery, '83 %');
+});
+
 test('値が取れなかった項目は null (画面では —) になる', () => {
   const s = readStatus({ id: 1, bat: null, chg: null, hid: '?', ble: null, wifi: 'off' });
   assert.equal(s.battery, null);

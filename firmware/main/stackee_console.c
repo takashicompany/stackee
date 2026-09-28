@@ -491,6 +491,15 @@ static void reply_status(long id) {
     int chg = stackee_board_charging();
     at = append(buf, sizeof(buf), at, ",\"chg\":%s",
                 chg < 0 ? "null" : (chg ? "true" : "false"));
+    // 電池が付いているか (REG 0x00 bit3 かつ VBAT >= 2.5 V、3 回続けて切り替え)。
+    // false のときバーに電池は出ない。bat / bat_mv は生の値のまま出す。
+    int present = stackee_board_battery_present();
+    at = append(buf, sizeof(buf), at, ",\"bat_present\":%s",
+                present < 0 ? "null" : (present ? "true" : "false"));
+    // PC 用マイク (UAC) が使えるか = full プロファイル + USB ホストに構成済み。
+    // ステータスバーのマイクの印 (使える = マイク / 使えない = マイク + ×) と同じ。
+    at = append(buf, sizeof(buf), at, ",\"mic_usb_ready\":%s",
+                stackee_uac_usb_ready() ? "true" : "false");
     // Wi-Fi。★ キー名は現行 stackee_console.py と同じ
     //   ("wifi" = up/on/off、"wifi_state" = 状態機械の名前)。
     at = append(buf, sizeof(buf), at,

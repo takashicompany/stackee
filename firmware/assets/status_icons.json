@@ -113,6 +113,32 @@
     "icon": "usb",
     "path": "src/device/usb/materialicons/24px.svg",
     "svg_sha256": "3a3cf1ee41921a75503d1507896a35c160a8cc94639277a0db6861b8d17d2806"
+   },
+   {
+    "name": "mic_on",
+    "meaning": "PC \u7528\u30de\u30a4\u30af (UAC) \u304c\u4f7f\u3048\u308b",
+    "path": "firmware/assets/src/icons/mic_on.svg",
+    "svg_sha256": "a00836a526d600103ea263bec1316bb476b556df9f60312406ad16be32701fd7",
+    "based_on": {
+     "icon": "mic",
+     "path": "src/av/mic/materialicons/24px.svg",
+     "commit": "40a7a292a79d9394157e1ea24f83d52d5e17c556",
+     "license": "Apache-2.0"
+    },
+    "tool": "firmware/tools/add_status_icons.py"
+   },
+   {
+    "name": "mic_x",
+    "meaning": "PC \u7528\u30de\u30a4\u30af\u304c\u4f7f\u3048\u306a\u3044 (USB \u30db\u30b9\u30c8\u306b\u7e4b\u304c\u3063\u3066\u3044\u306a\u3044 / dev \u30d7\u30ed\u30d5\u30a1\u30a4\u30eb)",
+    "path": "firmware/assets/src/icons/mic_x.svg",
+    "svg_sha256": "dcf2973e124b3b898c7b40af2181306117155a76b764add3bbb5d0cb991939d5",
+    "based_on": {
+     "icon": "mic",
+     "path": "src/av/mic/materialicons/24px.svg",
+     "commit": "40a7a292a79d9394157e1ea24f83d52d5e17c556",
+     "license": "Apache-2.0"
+    },
+    "tool": "firmware/tools/add_status_icons.py"
    }
   ]
  },
