@@ -1525,13 +1525,14 @@ static size_t reply_clips_status(long id, const char *line, char *buf, size_t ca
     at = put(buf, cap, at,
              "\",\"syncs\":%lu,\"ok_n\":%lu,\"same\":%lu,\"sync_fails\":%lu,"
              "\"aborts\":%lu,\"downloads\":%lu,\"fails\":%lu,\"removed\":%lu,"
-             "\"evicted\":%lu,\"skipped_space\":%lu,\"skipped_bad\":%lu,"
+             "\"evicted\":%lu,\"replaced\":%lu,\"skipped_space\":%lu,\"skipped_bad\":%lu,"
              "\"loads\":%lu,\"load_fails\":%lu,\"error\":\"",
              (unsigned long)c->syncs, (unsigned long)c->sync_ok,
              (unsigned long)c->sync_same, (unsigned long)c->sync_fail,
              (unsigned long)c->aborts, (unsigned long)c->downloads,
              (unsigned long)c->fails, (unsigned long)c->removed,
-             (unsigned long)c->evicted, (unsigned long)c->skipped_space,
+             (unsigned long)c->evicted, (unsigned long)c->replaced,
+             (unsigned long)c->skipped_space,
              (unsigned long)c->skipped_bad, (unsigned long)c->loads,
              (unsigned long)c->load_fails);
     at = put_json_str(buf, cap, at, c->last_error);

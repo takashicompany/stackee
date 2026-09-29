@@ -267,9 +267,28 @@ static void do_scan(stackee_clip_job_t *job) {
                 path_of(path, sizeof(path), file, "pcm");
                 ok = stat(path, &st) == 0 && (uint32_t)st.st_size == entry.audio_bytes;
             }
-            for (int i = 0; ok && i < job->count; i++) {
-                if (strcmp(job->entries[i].id, entry.id) == 0) {
-                    ok = false;         // 同じ id が 2 つ (後から見つけたほうを消す)
+            // 同じ id が 2 つ = 入れ替えの途中で切れた。**番号の大きいほう
+            // (あとから書いた新しい版)** を残し、古いほうを消す。
+            if (ok) {
+                int dup = -1;
+                for (int i = 0; i < job->count; i++) {
+                    if (strcmp(job->entries[i].id, entry.id) == 0) {
+                        dup = i;
+                    }
+                }
+                if (dup >= 0) {
+                    uint32_t older = file;
+                    if (file > job->entries[dup].file) {
+                        older = job->entries[dup].file;
+                        entry.file = file;
+                        job->entries[dup] = entry;
+                    }
+                    if (ndoomed < DOOMED_MAX) {
+                        doomed[ndoomed] = older;
+                        snprintf(doomed_ext[ndoomed], sizeof(doomed_ext[0]), "jsn");
+                        ndoomed++;
+                    }
+                    continue;
                 }
             }
             if (ok && job->count < job->cap) {

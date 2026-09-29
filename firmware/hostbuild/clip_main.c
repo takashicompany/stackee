@@ -477,7 +477,7 @@ int main(void) {
         } else if (strcmp(line, "print") == 0) {
             printf("CLIPINFO phase=%s count=%d scanned=%d rev_done=%ld valid=%d "
                    "syncs=%u ok=%u same=%u fail=%u aborts=%u downloads=%u "
-                   "fails=%u removed=%u evicted=%u space=%u bad=%u result=%s "
+                   "fails=%u removed=%u evicted=%u replaced=%u space=%u bad=%u result=%s "
                    "status=%d next_in=%d auto=%d forced=%d dirty=%d error=%s ids=",
                    stackee_clip_phase_names[g_clip.phase], g_clip.count,
                    g_clip.scanned ? 1 : 0, g_clip.rev_done,
@@ -486,6 +486,7 @@ int main(void) {
                    (unsigned)g_clip.sync_fail, (unsigned)g_clip.aborts,
                    (unsigned)g_clip.downloads, (unsigned)g_clip.fails,
                    (unsigned)g_clip.removed, (unsigned)g_clip.evicted,
+                   (unsigned)g_clip.replaced,
                    (unsigned)g_clip.skipped_space, (unsigned)g_clip.skipped_bad,
                    g_clip.last_result[0] ? g_clip.last_result : "-",
                    g_clip.last_status, (int)(g_clip.next_at - g_now),

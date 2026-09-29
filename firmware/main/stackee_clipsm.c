@@ -98,15 +98,6 @@ static int entry_cmp(const stackee_clip_entry_t *a, const stackee_clip_entry_t *
     return (a->file > b->file) - (a->file < b->file);
 }
 
-static int find_local(const stackee_clip_t *c, const char *id) {
-    for (int i = 0; i < c->count; i++) {
-        if (strcmp(c->local[i].id, id) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 static int find_local_file(const stackee_clip_t *c, uint32_t file) {
     for (int i = 0; i < c->count; i++) {
         if (c->local[i].file == file) {
@@ -119,6 +110,23 @@ static int find_local_file(const stackee_clip_t *c, uint32_t file) {
 static int find_srv(const stackee_clip_t *c, const char *id) {
     for (int i = 0; i < c->srv_count; i++) {
         if (strcmp(c->srv[i].id, id) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// 手元の 1 件が一覧の物と同じ版か。created・audio_bytes、分かれば本文の版も。
+// ★ 生成側は同じ話題を**同じ id のまま**作り直す (2026-09-30 実機で踏んだ)。
+static bool same_version(const stackee_clip_entry_t *l, const stackee_clip_srv_t *s) {
+    return l->audio_bytes == s->audio_bytes && strcmp(l->created, s->created) == 0 &&
+           (l->ver == 0 || s->ver == 0 || l->ver == s->ver);
+}
+
+// 一覧の物 s と同じ版を手元に持っているか (番号、無ければ -1)。
+static int find_current(const stackee_clip_t *c, const stackee_clip_srv_t *s) {
+    for (int i = 0; i < c->count; i++) {
+        if (strcmp(c->local[i].id, s->id) == 0 && same_version(&c->local[i], s)) {
             return i;
         }
     }
@@ -185,6 +193,7 @@ static bool parse_entry(stackee_clip_t *c, const char *obj, size_t off, size_t l
     raw_token(obj, "created", out->created, sizeof(out->created));
     out->off = (uint32_t)off;
     out->len = (uint32_t)len;
+    out->ver = stackee_clip_meta_version(obj, len);
     long audio = -1;
     bool ok = stackee_json_int(obj, "audio_bytes", &audio) && audio >= 0 &&
               (uint32_t)audio <= STACKEE_CLIP_AUDIO_MAX && (audio % 2) == 0;
@@ -205,6 +214,14 @@ static bool parse_entry(stackee_clip_t *c, const char *obj, size_t off, size_t l
     return true;
 }
 
+uint32_t stackee_clip_meta_version(const char *text, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) {
+        h = (h ^ (uint8_t)text[i]) * 16777619u;
+    }
+    return h ? h : 1;               // 0 は「不明」に使う
+}
+
 bool stackee_clip_meta_entry(const char *meta, size_t len, stackee_clip_entry_t *out) {
     memset(out, 0, sizeof(*out));
     char id[64];
@@ -221,6 +238,7 @@ bool stackee_clip_meta_entry(const char *meta, size_t len, stackee_clip_entry_t 
     raw_token(meta, "created", out->created, sizeof(out->created));
     out->audio_bytes = (uint32_t)audio;
     out->meta_bytes = (uint32_t)len;
+    out->ver = stackee_clip_meta_version(meta, len);
     return true;
 }
 
@@ -370,10 +388,17 @@ static void done_sync(stackee_clip_t *c) {
         finish(c, "error", STACKEE_CLIP_PERIOD_MS);
         return;
     }
+    bool same = c->rev_done_valid && c->rev_seen == c->rev_done &&
+                c->downloads + c->removed + c->evicted == c->work_at_start;
     c->rev_done = c->rev_seen;
     c->rev_done_valid = true;
-    c->sync_ok++;
     c->last_error[0] = '\0';
+    if (same) {
+        c->sync_same++;
+        finish(c, "same", STACKEE_CLIP_PERIOD_MS);
+        return;
+    }
+    c->sync_ok++;
     finish(c, "ok", STACKEE_CLIP_PERIOD_MS);
 }
 
@@ -423,15 +448,19 @@ static void start_write(stackee_clip_t *c, int i, uint8_t *pcm, size_t pcm_len) 
 
 // 次の 1 手を決める (消す → 取る の順)。
 static void advance(stackee_clip_t *c) {
-    // 1. 一覧に無いもの (と、同じ id でも中身が変わったもの) を消す。
+    // 1. 一覧に無いものを消す。★ 同じ id で中身が変わったもの (古い版) は
+    //   ここでは消さない。新しい版を最後まで書けてから入れ替える (失敗・打ち切り
+    //   でも鳴らせる 1 件を失わない)。新しい版がもう手元にある古い版だけ消す。
     for (int i = 0; i < c->count; i++) {
         int s = find_srv(c, c->local[i].id);
-        bool keep = (s >= 0) &&
-                    (!c->srv[s].ok ||
-                     (c->srv[s].audio_bytes == c->local[i].audio_bytes &&
-                      strcmp(c->srv[s].created, c->local[i].created) == 0));
+        bool keep = (s >= 0);
+        if (s >= 0 && c->srv[s].ok && !same_version(&c->local[i], &c->srv[s])) {
+            int cur = find_current(c, &c->srv[s]);
+            keep = (cur < 0);       // 新しい版がまだ無いなら、古い版で鳴らせるように残す
+        }
         if (!keep) {
-            logf_(c, "[clips] 一覧に無いので消す: %s", c->local[i].id);
+            logf_(c, "[clips] %s: %s", (s >= 0) ? "古い版を消す" : "一覧に無いので消す",
+                  c->local[i].id);
             start_remove(c, i, STACKEE_CLIP_SYNC_REMOVE);
             return;
         }
@@ -441,7 +470,7 @@ static void advance(stackee_clip_t *c) {
         int cand = -1;
         for (int i = 0; i < c->srv_count; i++) {
             const stackee_clip_srv_t *s = &c->srv[i];
-            if (!s->ok || s->tried || find_local(c, s->id) >= 0) {
+            if (!s->ok || s->tried || find_current(c, s) >= 0) {
                 continue;
             }
             // 一覧は古い順なので、同じ created ならうしろ (i が大きい) が新しい。
@@ -465,7 +494,9 @@ static void advance(stackee_clip_t *c) {
             uint64_t could = c->free_bytes;
             int victim = -1;
             for (int i = 0; i < c->count; i++) {
-                if (stackee_clip_created_cmp(c->local[i].created, s->created) >= 0) {
+                // ★ 同じ id の古い版は消さない (新しい版が書けるまで鳴らせるように)。
+                if (stackee_clip_created_cmp(c->local[i].created, s->created) >= 0 ||
+                    strcmp(c->local[i].id, s->id) == 0) {
                     continue;
                 }
                 could += stackee_clip_need_bytes(c->local[i].audio_bytes,
@@ -566,12 +597,10 @@ static void handle_list(stackee_clip_t *c, int got, int status) {
     }
     // ★ ここから先は「一覧の取得に成功した」。消してよい。
     c->rev_seen = rev;
-    if (c->rev_done_valid && rev == c->rev_done && !c->now_req) {
-        c->sync_same++;
-        c->last_error[0] = '\0';
-        finish(c, "same", STACKEE_CLIP_PERIOD_MS);
-        return;
-    }
+    // ★ rev が同じでも一覧と突き合わせる (一覧はもう手元にあるので通信は
+    //   増えない)。サーバーが rev を進めずに同じ id を作り直しても取りこぼさない。
+    //   何も変わらなければ結末は "same"。
+    c->work_at_start = c->downloads + c->removed + c->evicted;
     advance(c);
 }
 
@@ -712,6 +741,15 @@ static void job_collect(stackee_clip_t *c) {
                     memcpy(e->created, c->srv[s].created, sizeof(e->created));
                     e->audio_bytes = c->srv[s].audio_bytes;
                     e->meta_bytes = c->srv[s].len;
+                    e->ver = c->srv[s].ver;
+                }
+                // ★ 入れ替えなら新しい版は「まだ鳴らしていない」(played=false)。
+                //   古い版は次の advance が消す (新しい版がそろったので)。
+                for (int k = 0; k < c->count - 1; k++) {
+                    if (strcmp(c->local[k].id, e->id) == 0) {
+                        c->replaced++;
+                        break;
+                    }
                 }
                 e->file = c->job.file;
                 e->played = false;

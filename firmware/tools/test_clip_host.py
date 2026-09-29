@@ -125,16 +125,26 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(sorted(i['ids']), ['a', 'b', 'c'])
         self.assertEqual(sorted(f[0] for f in files(out)), ['a', 'b', 'c'])
 
-    def test_same_rev_does_nothing(self):
+    def test_same_list_does_nothing(self):
         out = run(listing(3, [clip('a', 100)]) + pcm(32000) +
-                  listing(3, [clip('zzz', 900)]) +
+                  listing(3, [clip('a', 100)]) +
                   't 500\nt 300000\nprint\nfiles\n')
         i = info(out)
         self.assertEqual(i['result'], 'same')
         self.assertEqual(i['same'], '1')
-        # 2 回目の一覧は zzz だけだが、rev が同じなので a を消さず zzz も取らない。
         self.assertEqual(i['ids'], ['a'])
         self.assertEqual([p for p, _ in https(out)], ['/clips', '/clips/a/audio', '/clips'])
+        self.assertEqual(len(fs_jobs(out)), 2)          # 目録と最初の書き込みだけ
+
+    def test_same_rev_is_still_compared(self):
+        """★ サーバーが rev を進めずに作り直しても取りこぼさない (一覧は手元にある)。"""
+        out = run(listing(3, [clip('a', 100)]) + pcm(32000) +
+                  listing(3, [clip('a', 200, audio=64000)]) + pcm(64000) +
+                  't 500\nt 300000\nprint\nfiles\n')
+        i = info(out)
+        self.assertEqual(i['result'], 'ok')
+        self.assertEqual(i['replaced'], '1')
+        self.assertEqual(files(out), [('a', '200', 64000)])
 
     def test_sync_now_compares_even_when_the_rev_is_the_same(self):
         out = run(listing(3, [clip('a', 100)]) + pcm(32000) +
@@ -351,9 +361,11 @@ class ListContentTest(unittest.TestCase):
         out = run('have a 100 32000\n' +
                   listing(2, [clip('a', 100, audio=64000)]) + pcm(64000) +
                   't 500\nprint\nfiles\n')
+        # ★ 新しい版を書き終えてから古い版を消す (消してから取るのではない)。
         self.assertEqual([j[:2] for j in fs_jobs(out)[1:]],
-                         [('remove', 'a'), ('write', 'a')])
+                         [('write', 'a'), ('remove', 'a')])
         self.assertEqual(files(out), [('a', '100', 64000)])
+        self.assertEqual(info(out)['replaced'], '1')
 
     def test_keeps_only_the_newest_64(self):
         many = [clip('c%03d' % n, 1000 + n, audio=0) for n in range(70)]
@@ -389,6 +401,85 @@ class ListContentTest(unittest.TestCase):
         self.assertEqual(rows[1][2], 'ok')          # 同じ rev でも取り直した
         self.assertEqual(info(out)['ids'], ['a'])
 
+
+
+class ReplaceTest(unittest.TestCase):
+    """同じ id のまま作り直されたクリップ (created / audio_bytes / 本文が変わる)。
+
+    ★ 2026-09-30 実機: サーバーの tk-keyboard-packing が作り直されたのに、本体は
+    古い音声・字幕のまま残った。新しい版を別の名前で書き終えてから古い版と入れ替え、
+    途中で失敗・打ち切りなら古い版を残す。
+    """
+
+    OLD = clip('topic', 1790699514, audio=32000)
+    NEW = clip('topic', 1790702237, audio=64000)
+
+    def first(self):
+        return listing(1, [self.OLD]) + pcm(32000) + 't 500\n'
+
+    def test_new_created_replaces_and_is_unplayed_again(self):
+        out = run(self.first() + 'can 0\nplay\ncan 1\nprint\n' +
+                  listing(2, [self.NEW]) + pcm(64000) + 'syncnow\nt 500\nprint\nfiles\n')
+        rows = re.findall(r'^CLIPINFO (.*)$', out, re.M)
+        self.assertEqual(parse_info(rows[0])['ids'], ['topic*'])      # 鳴らした
+        i = info(out)
+        self.assertEqual(i['ids'], ['topic'])                        # 新しい版は未再生
+        self.assertEqual(i['replaced'], '1')
+        self.assertEqual(files(out), [('topic', '1790702237', 64000)])
+        self.assertRegex(out, r'(?m)^LOAD ok topic \d+ 32000$')     # 最初は古い版を鳴らした
+
+    def test_text_only_change_is_replaced(self):
+        new = dict(self.OLD, reply='言い直した本文')
+        out = run(self.first() + listing(2, [new]) + pcm(32000) +
+                  'syncnow\nt 500\nprint\n')
+        self.assertEqual(info(out)['replaced'], '1')
+
+    def test_download_failure_keeps_the_old_version(self):
+        out = run(self.first() + listing(2, [self.NEW]) + 'resperr\n' +
+                  'syncnow\nt 500\nprint\nfiles\n')
+        i = info(out)
+        self.assertEqual(i['result'], 'error')
+        self.assertEqual(i['ids'], ['topic'])
+        self.assertEqual(files(out), [('topic', '1790699514', 32000)])
+        self.assertIn('LOAD ok topic', run(self.first() + listing(2, [self.NEW]) +
+                                            'resperr\nsyncnow\nt 500\ncan 0\nplay\n'))
+
+    def test_write_failure_keeps_the_old_version(self):
+        out = run(self.first() + listing(2, [self.NEW]) + pcm(64000) +
+                  'fsfail write\nsyncnow\nt 500\nprint\nfiles\n')
+        self.assertEqual(info(out)['result'], 'error')
+        self.assertEqual(files(out), [('topic', '1790699514', 32000)])
+
+    def test_abort_keeps_the_old_version_and_retries(self):
+        out = run(self.first() + listing(2, [self.NEW]) + pcm(64000) +
+                  'fsdelay 200\nsyncnow\nt 60\nabort\nt 400\nprint\nfiles\n' +
+                  'fsdelay 5\n' + listing(2, [self.NEW]) + pcm(64000) +
+                  't 61000\nprint\nfiles\n')
+        rows = re.findall(r'^CLIPINFO (.*)$', out, re.M)
+        self.assertEqual(parse_info(rows[0])['result'], 'aborted')
+        self.assertEqual(parse_info(rows[0])['ids'], ['topic'])
+        before = out[:out.index('FREE')]
+        self.assertEqual(files(before), [('topic', '1790699514', 32000)])
+        self.assertEqual(files(out[out.index('FREE') + 1:]),
+                         [('topic', '1790702237', 64000)])
+
+    def test_unchanged_clip_is_not_touched(self):
+        out = run(self.first() + listing(2, [self.OLD, clip('b', 1790700000)]) +
+                  pcm(32000) + 'syncnow\nt 500\nprint\n')
+        self.assertNotIn('/clips/topic/audio', out[out.index('LOG [clips] 同期 ok'):])
+        self.assertEqual([j[:2] for j in fs_jobs(out)], [('scan', '-'), ('write', 'topic'),
+                                                         ('write', 'b')])
+        self.assertEqual(info(out)['replaced'], '0')
+
+    def test_old_version_is_not_evicted_to_make_room_for_the_new(self):
+        # 空きは新しい版 1 つぶんしか無い。他に古いものが無いので入れ替えは見送る
+        # (古い版を先に消すと、取れなかったときに鳴らせるものを失う)。
+        out = run('fscluster 4096\nfsfree %d\n' % (600 * 1024) + self.first() +
+                  listing(2, [dict(self.NEW, audio_bytes=200000)]) +
+                  'syncnow\nt 500\nprint\nfiles\n')
+        i = info(out)
+        self.assertEqual((i['evicted'], i['space'], i['replaced']), ('0', '1', '0'))
+        self.assertEqual(files(out), [('topic', '1790699514', 32000)])
 
 class PlayOrderTest(unittest.TestCase):
     def picks(self, out):

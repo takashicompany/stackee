@@ -2570,8 +2570,9 @@ python3 tools/console_hid.py inbox.enable on=1 play=1   # 戻す
 | いつ | 起動後、FAT の目録を読み終えて Wi-Fi が上がったら 1 回。以後 **5 分ごと**。`clips.sync` で今すぐ |
 |---|---|
 | 条件 | 会話・写真・Custom・クリップの再生・OTA・撮影・マイクの自己診断のどれもしていない。受け箱の常時ポーリング (§17-2e) の待ちを持っていない (返ってくるのを待ってから、次を撃たずに譲ってもらう) |
-| rev | 前回「最後まで」同期できた rev と同じなら何もしない (`result=same`)。rev は RAM だけ (再起動後の 1 回目は必ず突き合わせる) |
-| 消す | **一覧の取得に成功したときだけ**、一覧に無いローカルのクリップを消す (同じ id で `audio_bytes` / `created` が変わったものも消して取り直す)。通信の失敗・404・500・形式の不正では 1 つも消さない |
+| rev | **rev が同じでも一覧と突き合わせる** (一覧はもう手元にあるので通信は増えない。2026-09-30 実機: サーバーが同じ id を作り直したのに本体が古い版のまま残った)。何も変わらなければ `result=same` |
+| 消す | **一覧の取得に成功したときだけ**、一覧に無いローカルのクリップを消す。通信の失敗・404・500・形式の不正では 1 つも消さない |
+| 作り直し | 同じ id でも `created` / `audio_bytes` / 本文の版 (一覧の物の FNV-1a。字幕・本文の変化) が違えば**入れ替える**。新しい版を**別の名前**で最後まで書いてから古い版を消す。途中で失敗・打ち切りなら古い版が残り、そのまま鳴らせる (`replaced`)。新しい版は「まだ鳴らしていない」に戻る。容量のために消すのは他のクリップだけ (同じ id の古い版は消さない。入らなければ入れ替えを見送る)。入れ替えの途中で電源が切れて同じ id が 2 つ残ったら、起動後の目録が番号の大きい (新しい) ほうを残す |
 | 取る | 無いものを**新しい順**に。`GET …/audio` の受け皿は `audio_bytes` ちょうど (PSRAM)。受け取った本文は写さずに FAT の書き手へ渡す (`stackee_http_take`) |
 | 容量 | 書く前に FAT の空きを見て、**余白 512 KB** を残せないなら**入れるものより古い**クリップから消す。古いものを全部消しても入らないなら 1 つも消さずに飛ばす (`skipped_space`)。新しいものは消さない。本体に置くのは 64 件まで |
 | 失敗 | 1 件の取得・書き込みに失敗したらその回は終わり (`result=error`、5 分後にまた。rev は進めないので同じ rev でも取り直す)。1 件の音声だけ 404 ならそれを飛ばして続ける |
@@ -2687,7 +2688,7 @@ Are Disabled」— フラッシュの読み書き・消去の間は**両コア�
 
 | コマンド | 中身 |
 |---|---|
-| `clips.status` `{"from":0}` | `count` `bytes` (音声の合計) `free` (FAT の空き) `cluster` `reserve` `auto` `auto_forced_off` `auto_save_pending` `phase` (`scan` / `idle` / `list` / `remove` / `fetch` / `write` / `evict` / `aborting` / `sleep` / `clear`) `rev` (最後に見た) `rev_done` (最後まで行った) `last_sync_ago_ms` `result` (`ok` / `same` / `error` / `aborted` / `404`) `status` `next_in_ms` `downloading` (ダウンロード中の id) `syncs` `ok_n` `same` `sync_fails` `aborts` `downloads` `fails` `removed` `evicted` `skipped_space` `skipped_bad` `loads` `load_fails` `error`、`fs:{busy, jobs, writes, aborts, fails, slices, bytes, max_slice_us, last_ms, deferred, gave_up, cleanup_pending, error}`、`play:{active, state, count, done, empty, busy, errors, unplayed, final, clip, pages, audio_bytes, load_ms, end_ms, play, played, error}`、`http_requests` (通信の累計)、`next` (次に鳴らす番号)、`clips:[[番号, id, created, audio_bytes, played], …]` と `listed` (入り切らなければ `from` で続き) |
+| `clips.status` `{"from":0}` | `count` `bytes` (音声の合計) `free` (FAT の空き) `cluster` `reserve` `auto` `auto_forced_off` `auto_save_pending` `phase` (`scan` / `idle` / `list` / `remove` / `fetch` / `write` / `evict` / `aborting` / `sleep` / `clear`) `rev` (最後に見た) `rev_done` (最後まで行った) `last_sync_ago_ms` `result` (`ok` / `same` / `error` / `aborted` / `404`) `status` `next_in_ms` `downloading` (ダウンロード中の id) `syncs` `ok_n` `same` `sync_fails` `aborts` `downloads` `fails` `removed` `evicted` `replaced` `skipped_space` `skipped_bad` `loads` `load_fails` `error`、`fs:{busy, jobs, writes, aborts, fails, slices, bytes, max_slice_us, last_ms, deferred, gave_up, cleanup_pending, error}`、`play:{active, state, count, done, empty, busy, errors, unplayed, final, clip, pages, audio_bytes, load_ms, end_ms, play, played, error}`、`http_requests` (通信の累計)、`next` (次に鳴らす番号)、`clips:[[番号, id, created, audio_bytes, played], …]` と `listed` (入り切らなければ `from` で続き) |
 | `clips.sync` | 次の周で (暇なら) 同期する。rev が同じでも一覧と突き合わせる |
 | `clips.play` `{"play":0}` | キーと同じ流れ。**非同期** (すぐ返る。進み具合は `clips.status` の `play`)。**`play` の既定は 0** = FAT から読み終えて字幕を割ったところで止め、**鳴らさず字幕も出さない**。`play:1` でキーと同じ |
 | `clips.clear` | 全部消す (検証用)。同期中なら打ち切ってから。次の同期は rev が同じでも取り直す |

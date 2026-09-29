@@ -50,6 +50,7 @@ typedef struct {
     uint32_t audio_bytes;
     uint32_t meta_bytes;
     uint32_t file;          // FAT の名前の通し番号 (clips/%08lX.pcm / .jsn)
+    uint32_t ver;           // メタ (一覧の物そのまま) の FNV-1a。字幕・本文の変化を見る (0 = 不明)
     bool     played;        // 再生済み (RAM だけ。再起動で全部「まだ」に戻る)
 } stackee_clip_entry_t;
 
@@ -147,6 +148,7 @@ typedef struct {
     char     created[STACKEE_CLIP_CREATED_MAX + 1];
     uint32_t audio_bytes;
     uint32_t off, len;
+    uint32_t ver;           // 物の本文の FNV-1a
     bool     ok;            // 形式が正しく、取り込める
     bool     tried;         // この回でもう扱った (取った / 飛ばした)
 } stackee_clip_srv_t;
@@ -200,6 +202,8 @@ typedef struct stackee_clip {
     // ---- 数字 (clips.status) ----
     uint32_t syncs, sync_ok, sync_same, sync_fail, aborts;
     uint32_t downloads, fails, removed, evicted, skipped_space, skipped_bad;
+    uint32_t replaced;          // 同じ id の新しい版に入れ替えた数
+    uint32_t work_at_start;     // この回の始めの downloads + removed + evicted
     uint32_t loads, load_fails;
     uint32_t last_sync_at;      // 最後の同期が終わった時刻 [ms] (0 = まだ)
     const char *last_result;    // "" / "ok" / "same" / "error" / "aborted" / "404"
@@ -267,6 +271,8 @@ int  stackee_clip_parse_list(stackee_clip_t *c, char *list, size_t len, long *re
 // FAT に置いたメタ (一覧の物 1 個そのまま) から目録の 1 件を作る (SCAN が使う)。
 // file / played は触らない (0 / false)。形式が違えば false。
 bool stackee_clip_meta_entry(const char *meta, size_t len, stackee_clip_entry_t *out);
+// メタの版 (FNV-1a 32)。一覧の物の本文と、FAT の .jsn の中身は同じバイト列。
+uint32_t stackee_clip_meta_version(const char *text, size_t len);
 // 容量: その 1 件を置くのに要るバイト数 (クラスタに切り上げる)。
 uint64_t stackee_clip_need_bytes(uint32_t audio_bytes, uint32_t meta_bytes,
                                  uint32_t cluster);
