@@ -190,7 +190,7 @@ python3 tools/check_phase4.py     # 周辺機能と本番構成
 
 ★ Remap のカタログには登録していない (定義 JSON の手動読み込みで使う)。
 ★ **Remap は customKeycodes を先頭 32 個 (0x7E00〜0x7E1F) しか出さない。**
-   独自キーは 18 個 (0x7E00〜0x7E11) にしてある (2026-09-29)。
+   独自キーは 20 個 (0x7E00〜0x7E13) にしてある (2026-09-30)。
 
 独自キーの番号 (customKeycodes の並び = キーコード):
 
@@ -199,6 +199,8 @@ python3 tools/check_phase4.py     # 周辺機能と本番構成
 | 0x7E00〜0x7E06 | `STK_TALK` `STK_VOLUP` `STK_VOLDN` `STK_HID_SWITCH` `STK_BLE_REFRESH` `STK_CAMERA` `STK_TOUCH_SCROLL` |
 | 0x7E07 | `STK_MT_0` (修飾つきタップの HoldTap) |
 | 0x7E08〜0x7E11 | `STK_CUSTOM_0`〜`STK_CUSTOM_9` (`Custom_0`〜`Custom_9`、§17-2c) |
+| 0x7E12 | `STK_CLIP` (`Clip`、クリップを 1 件鳴らす。通信しない。§17-2f) |
+| 0x7E13 | `STK_CLIP_AUTO` (`Clip_Auto`、クリップの自動取得を ON / OFF。§17-2f) |
 
 **`MIC(kc)` (押している間だけ顔を「聞き取り中」にする包み、§10-1) は
 customKeycodes に並ばない。** Remap の「カスタム」タブで **16 進を手入力**
@@ -255,6 +257,7 @@ python3 tools/flash.py --rollback           # CircuitPython の像を書き戻�
 | ログ | `log.tail` `log.burst` |
 | キー | `key.inject` `hid.switch` `hid.set` `key.custom` `key.custom_status` |
 | 受け箱 | `inbox.status` `inbox.enable` (§17-2e) |
+| クリップ | `clips.status` `clips.sync` `clips.play` `clips.clear` `clips.auto` (§17-2f) |
 | BLE | `ble.refresh` `ble.clear_bonds` `ble.drop_cccd` `ble.svc_changed` |
 | 画面 | `lcd.crc` `lcd.dump` `lcd.status` `lcd.full` `face.set` `face.auto` `bar.set` `bar.auto` `ui.selftest` `ui.status` `ui.assets` `ui.subtitle` |
 | Wi-Fi | `wifi.scan` `wifi.list` `wifi.add` `wifi.remove` `wifi.connect` `wifi.status` `wifi.off` `wifi.on` |
@@ -2545,6 +2548,161 @@ python3 tools/console_hid.py inbox.enable on=1 play=1   # 戻す
 ログ: 受けたとき `[inbox] 発話を受けた (seq N, play=0|1)`、扱い終えたとき
 `[inbox-say] {…}`、失敗 `[inbox] … (次は N ms 後)`。
 
+### 17-2f. クリップ — 取り込んでおいた音声 + 字幕を通信せずに鳴らす (2026-09-30)
+
+「クリップ」= サーバーが先に合成しておいた**音声 + 字幕**の短い発話。本体は
+暇なときにサーバーの一覧を見て **FAT (user_fs) に取り込み**、`STK_CLIP`
+(VIA / Remap の表示 `Clip`、0x7E12) を押すと**通信せずに**次の 1 件を字幕
+つきで鳴らす。電波が不安定な場所 (イベント会場でスマホのテザリング) でも
+押すたびにすぐ喋る。中身と使い道はサーバー次第 (本体は「クリップ」としか
+知らない)。
+
+| 決まり (サーバーとの取り決め) | 値 |
+|---|---|
+| 送り先 | `STACKEE_TALK_URL` の末尾 `/talk` を `/clips` にしたもの。Bearer と HTTPS も同じ (中継経由) |
+| 一覧 | `GET /clips` → `{"rev":N,"clips":[{"id","created","audio_bytes","sample_rate":16000,"channels":1,"sample_width":2,"reply","subtitles"},…]}` (created の古い順、64 KB 以内)。`subtitles` は `/talk` の done と同じ形 |
+| 音声 | `GET /clips/<id>/audio` → 生 PCM (16 kHz / 16 bit / mono)。`audio_bytes=0` のクリップは字幕だけ (取りに行かない) |
+| id | `[A-Za-z0-9_-]{1,40}`。合わないものは数えもしない (`skipped_bad`) |
+| 中継が古い (404) | 静かに 10 分休む (画面には出さない) |
+
+#### 同期 (受け箱と同じ通信で直列)
+
+| いつ | 起動後、FAT の目録を読み終えて Wi-Fi が上がったら 1 回。以後 **5 分ごと**。`clips.sync` で今すぐ |
+|---|---|
+| 条件 | 会話・写真・Custom・クリップの再生・OTA・撮影・マイクの自己診断のどれもしていない。受け箱の常時ポーリング (§17-2e) の待ちを持っていない (返ってくるのを待ってから、次を撃たずに譲ってもらう) |
+| rev | 前回「最後まで」同期できた rev と同じなら何もしない (`result=same`)。rev は RAM だけ (再起動後の 1 回目は必ず突き合わせる) |
+| 消す | **一覧の取得に成功したときだけ**、一覧に無いローカルのクリップを消す (同じ id で `audio_bytes` / `created` が変わったものも消して取り直す)。通信の失敗・404・500・形式の不正では 1 つも消さない |
+| 取る | 無いものを**新しい順**に。`GET …/audio` の受け皿は `audio_bytes` ちょうど (PSRAM)。受け取った本文は写さずに FAT の書き手へ渡す (`stackee_http_take`) |
+| 容量 | 書く前に FAT の空きを見て、**余白 512 KB** を残せないなら**入れるものより古い**クリップから消す。古いものを全部消しても入らないなら 1 つも消さずに飛ばす (`skipped_space`)。新しいものは消さない。本体に置くのは 64 件まで |
+| 失敗 | 1 件の取得・書き込みに失敗したらその回は終わり (`result=error`、5 分後にまた。rev は進めないので同じ rev でも取り直す)。1 件の音声だけ 404 ならそれを飛ばして続ける |
+| 打ち切り | 会話キー・カメラ・Custom・クリップのキー (`talk.inject` / `camera.look` / `key.custom` / `clips.play` も) で**すぐ**打ち切る (通信はソケットごと起こし、書きかけは消す)。打ち切ったときだけ **1 分後**に続きから (取り終えたものは残る) |
+| 受け箱 | 同期の間 (一覧〜最後の書き込み) は受け箱の待ちを撃たない。発話はサーバーに残る (5 分・16 件) ので、終わってから seq の続きで聞く |
+
+画面には何も出さない (ログと `clips.status` だけ)。`settings.toml` に
+`STACKEE_CLIP_SYNC = 0` と書けば自動取得を強制 OFF (下の「自動取得の入り切り」)。
+
+#### FAT の置き方 (書きかけを残さない)
+
+`clips/` の下に 1 件 2 ファイル。名前は通し番号 (id は FAT の大文字小文字を
+区別しない名前に向かないので使わない)。
+
+| ファイル | 中身 |
+|---|---|
+| `clips/0000001A.pcm` | 音声 (生 PCM)。字幕だけのクリップには無い |
+| `clips/0000001A.jsn` | 一覧の中のそのクリップの JSON 1 個そのまま (id / created / audio_bytes / reply / subtitles …) |
+
+書く順は `.pcm` → `.tmp` にメタ → `.jsn` へ改名。**`.jsn` があることが確定の印。**
+途中で失敗・打ち切り・電源断があっても `.jsn` は無いので目録に載らない。
+起動後の目録 (SCAN) が `.jsn` の無い `.pcm` と `.tmp`、長さの合わない `.pcm`、
+読めない `.jsn` を消す。消すときは `.jsn` を先に消す。
+
+#### 再生 (`STK_CLIP`、通信しない)
+
+* 押した瞬間に 1 回。印を置くだけで、FAT から読むのはメインループ、鳴らすのは
+  audio タスク (会話と同じ再生部品 = PLAY_WAIT → PLAYING。字幕は再生位置で
+  頁を積む。字幕だけのクリップは SAY_TEXT で字幕だけ)。`subtitles` が無ければ
+  `reply` を 15 字ずつに割って出す。**押してから鳴り終わるまで通信は 0 回。**
+* 順番: **まだ鳴らしていないもの**があればその中で**新しい順**。全部鳴らし終えて
+  いれば**古い順に 1 件ずつ**、最後まで行ったら最初へ。新しいクリップが入ったら
+  それが先に鳴り、鳴らし終えるとまた古い順の最初から。「鳴らした」の印は RAM
+  だけ (再起動で全部「まだ」に戻る)。読めなかったクリップも「鳴らした」扱いにして
+  次の押下では次へ進む。
+* 1 件も無ければ帯に「クリップがありません」を 2.5 秒 (音なし)。読めなければ
+  「クリップを読めません」(音なし。「会話エラー」にはしない)。
+* 顔: 読んでいる間 (1 秒未満) は考え中にしない。鳴らしている間は `speaking`
+  (いつもの状態を渡すだけ。**顔の絵は 1 画素も描き直していない**)。
+* 排他 (Custom と同じ流儀):
+
+| いつ | 何が起きる |
+|---|---|
+| 会話中 (録音 / 送信 / 返答待ち / 再生、一次回答、`STK_TALK` 押下中)・撮影中・画像の往復中・Custom の処理中に `STK_CLIP` | **黙って無視** (`clips.status` の `play.busy` が増える) |
+| クリップを読んでいる / 鳴らしている間に **もう一度 `STK_CLIP`** | **無視** (次の 1 件へ飛ばさない。鳴り終わってから押す) |
+| クリップを鳴らしている間に `STK_TALK` / `STK_CAMERA` / `Custom_n` | 受け付けない (録音しない / 撮らない / 無視) |
+
+#### FAT への書き込みで打鍵を止めない — 打鍵が止まっているときだけ書く
+
+**前例** (ESP-IDF v6.0.3 の docs と実装): `spi_flash_concurrency`「When the Caches
+Are Disabled」— フラッシュの読み書き・消去の間は**両コアのキャッシュが止まり**、
+もう一方のコアは IRAM の中で空回りし、IRAM に無い割り込みは全部止まる。この
+本体でも**アプリ内 OTA で 4 KB 書くたびに入力タスクが約 10 ms 止まった**
+(RESULTS.md「アプリ内 OTA」)。クリップは 1 件数百 KB〜数 MB ある。
+
+止めずに済ませる設定 (命令を PSRAM から実行する `CONFIG_SPIRAM_XIP_FROM_PSRAM`、
+フラッシュの型番を選ぶ auto suspend) は、ファーム全体に効く未検証の変更なので
+**入れていない** (2026-09-30 のユーザー判断)。代わりに**打鍵と重ねない**:
+
+* FAT に書く仕事 (音声・メタ・消す・全部消す・起動後の半端物消し) は、**打鍵が
+  止まって 300 ms たってから**しか始めない。書きかけの途中で打鍵が来たら、
+  **次の 4 KB は静かになるまで待つ** (`clips.status` の `fs.deferred`)。
+* 書くのは**いちばん低い優先度**のメインループ (CPU0・優先度 1) で、1 周に
+  **4 KB だけ**。間に 1 ms 休んでコンソールも回す (OTA と同じ置き場)。
+* 読むだけ (押したクリップを読む LOAD) は待たない。
+* キーで打ち切ったとき、書きかけの後始末 (閉じる・消す) も打鍵が止まってから
+  (`fs.cleanup_pending`)。その間の読み込みは `/rw` の下から読むので待たない。
+* 打鍵が 30 秒続いて書けなければ、その仕事はあきらめる (`fs.gave_up`、同期は
+  `result=aborted` で 1 分後に続きから)。受け箱の待ちを譲ってもらったまま
+  止まり続けないため。
+* 書き込みは**書き戻し式の 1 枚キャッシュ** (`stackee_fat.c`)。FAT のクラスタは
+  2 KB (CIRCUITPY を f_mkfs の既定で作った 12 MB) で、FatFs は 1 回の書き込みを
+  クラスタの切れ目で止めるので、以前の作りだと同じ 4 KB のセクタを続けて 2 回
+  消していた。いまは別のセクタへ移るとき / CTRL_SYNC / 外すときだけ 1 回消して
+  書く (`fs.put` / `settings.set` も同じ道)。
+* 書いている間 `/assets` は外れて `/rw` に付いている (`fs.put` と同じ)。その
+  間の `settings.get` は `/rw` の下を読む。素材は起動時に RAM へ読み終えている。
+
+★ **正直な限界: 取り込み中に打ち始めると、最初の 1 打が最大 ~10 ms 遅れることが
+ある。** 300 ms 静かなのを見て 4 KB (消去 1 回) を書き始めた直後にキーが来ると、
+その消去が終わるまで入力タスクが止まる (4 KB で約 10 ms、OTA の実測)。2 打目
+からは書かないので遅れない。取り込みを止めたいときは `Clip_Auto` キーで自動
+取得を OFF にする (下)。
+★ 音・画面・BLE も消去の間 (1 回約 10 ms) は止まる。打鍵していない間の話で、
+字幕や返答を鳴らしている間は同期そのものをしない。
+
+#### 自動取得の入り切り (`STK_CLIP_AUTO`、表示 `Clip_Auto`、0x7E13)
+
+* 押すたびに**自動取得 (5 分ごとの同期) を ON / OFF**。帯に「クリップ自動取得 ON」
+  / 「クリップ自動取得 OFF」を 2.5 秒 (音なし。会話・再生の途中なら帯は奪わず
+  切り替えだけ)。
+* 状態は **NVS** (`stackee` / `clip_auto`) に残り、再起動後も同じ (既定 ON)。
+  NVS もフラッシュに書くので、**打鍵が 2 秒止まってから** 1 回だけ書く
+  (`clips.status` の `auto_save_pending`)。
+* OFF の間: 定期の同期をしない (受け箱の待ちも譲らない)。**進行中の同期は
+  その場で打ち切る** (書きかけは残さない)。FAT にあるクリップは `Clip` キーで
+  鳴らせる。`clips.sync` (手で頼んだ 1 回) は OFF でも動く。ON に戻したら次に
+  暇になったところで 1 回。
+* `settings.toml` の `STACKEE_CLIP_SYNC = 0` は**強制 OFF**。キーでは入らず、帯に
+  「クリップ自動取得は / 設定で OFF です」。`clips.sync` は動く。
+
+#### 内蔵 RAM / PSRAM
+
+| | 値 |
+|---|---|
+| 内蔵 RAM の静的合計 (DIRAM) | 変更前 dev 181,444 / full 179,668 B から、コンソールの 1.6 KB の応答枠を PSRAM へ移したぶん減っている (数字は RESULTS.md) |
+| 同期と目録 (`stackee_clip_t`、約 13 KB) / worker の状態 | PSRAM |
+| 書いている間だけ | 内蔵 4 KB (フラッシュ 1 セクタの写し。`esp_flash_write` は PSRAM の元バッファを 32 B ずつしか書けないため)。書き終えて外すときに返す |
+| 一覧 | PSRAM 64 KB (同期の間だけ) |
+| 音声 | 取るとき・鳴らすとき PSRAM に 1 件ぶん (最大 3.84 MB = 120 秒)。会話の返答と同時には持たない |
+
+#### console (人手ゼロ・無音で確かめる)
+
+| コマンド | 中身 |
+|---|---|
+| `clips.status` `{"from":0}` | `count` `bytes` (音声の合計) `free` (FAT の空き) `cluster` `reserve` `auto` `auto_forced_off` `auto_save_pending` `phase` (`scan` / `idle` / `list` / `remove` / `fetch` / `write` / `evict` / `aborting` / `sleep` / `clear`) `rev` (最後に見た) `rev_done` (最後まで行った) `last_sync_ago_ms` `result` (`ok` / `same` / `error` / `aborted` / `404`) `status` `next_in_ms` `downloading` (ダウンロード中の id) `syncs` `ok_n` `same` `sync_fails` `aborts` `downloads` `fails` `removed` `evicted` `skipped_space` `skipped_bad` `loads` `load_fails` `error`、`fs:{busy, jobs, writes, aborts, fails, slices, bytes, max_slice_us, last_ms, deferred, gave_up, cleanup_pending, error}`、`play:{active, state, count, done, empty, busy, errors, unplayed, final, clip, pages, audio_bytes, load_ms, end_ms, play, played, error}`、`http_requests` (通信の累計)、`next` (次に鳴らす番号)、`clips:[[番号, id, created, audio_bytes, played], …]` と `listed` (入り切らなければ `from` で続き) |
+| `clips.sync` | 次の周で (暇なら) 同期する。rev が同じでも一覧と突き合わせる |
+| `clips.play` `{"play":0}` | キーと同じ流れ。**非同期** (すぐ返る。進み具合は `clips.status` の `play`)。**`play` の既定は 0** = FAT から読み終えて字幕を割ったところで止め、**鳴らさず字幕も出さない**。`play:1` でキーと同じ |
+| `clips.clear` | 全部消す (検証用)。同期中なら打ち切ってから。次の同期は rev が同じでも取り直す |
+| `clips.auto` `{"on":0\|1}` | 自動取得の入り切り (キーと同じく NVS に残る。帯には出さない)。`on` を省くと読むだけ。`auto` `forced_off` `active` `save_pending` |
+
+`status` にも要約 `"clips":{"n","auto","bytes","free","rev","phase","result","fails"}`。
+ログ: `[clips] …` (同期)、`[clip] {…}` (1 回の再生)、`clipfs: …` (FAT)。
+書き込み後に回す確認は RESULTS.md「クリップ」の節。
+
+#### まだ確かめていないこと
+
+* 取り込み中の打鍵の遅延 (2 打目以降は遅れず、最初の 1 打が最大 ~10 ms の見込み)。
+* 実機の FAT のクラスタの大きさ (2 KB の見込み。`clips.status` の `cluster`)。
+* 3.84 MB のクリップを読む時間 (メインループが 1 秒前後止まる見込み)。
+
 ### 17-3. Raw HID の上のコンソール
 
 full プロファイルには CDC が無い。コンソールとログは VIA の Raw HID に
@@ -2642,6 +2800,11 @@ python3 tools/check_phase4.py --only uac --record   # 1 秒録ってサンプル
 ★ `CIRCUITPY_WIFI_SSID` を書かせないのは、CircuitPython に戻したときに
 supervisor が起動中に `connect()` を 4 回呼び、AP 不在の場所で起動が 19 秒
 延びるため (`wifi_autoconnect_design.md` §1.1 の実測)。
+
+★ 2026-09-30: 書き込みは**書き戻し式の 1 枚キャッシュ**になった (同じ 4 KB の
+フラッシュセクタを続けて消さない。§17-2f)。書ける形で付けておく区間は入れ子に
+できる (`stackee_fat_session_begin` / `end`。クリップの取り込み中に `fs.put` が
+来ても付け直さない)。
 
 `fs.put` は base64 で 360 バイトずつ送り、`final` で 1 回だけ書く。
 溜め場は PSRAM に 256 KB。いちばん大きい素材 (`ack_04.pcmz` = 76 KB) も入る。

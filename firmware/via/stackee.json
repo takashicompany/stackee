@@ -160,6 +160,16 @@
       "name": "STK_CUSTOM_9",
       "title": "Custom_9: 押すとサーバーに知らせる (何をするかはサーバー次第)",
       "shortName": "Custom_9"
+    },
+    {
+      "name": "STK_CLIP",
+      "title": "Clip: 本体に取り込んだクリップ (音声+字幕) を 1 件ずつ鳴らす (通信しない)",
+      "shortName": "Clip"
+    },
+    {
+      "name": "STK_CLIP_AUTO",
+      "title": "Clip_Auto: クリップの自動取得 (5 分ごとの同期) を押すたびに ON/OFF",
+      "shortName": "Clip_Auto"
     }
   ]
 }

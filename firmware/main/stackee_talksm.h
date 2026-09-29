@@ -41,6 +41,12 @@
 //     押した瞬間に待ちを打ち切る (通信側がソケットを shutdown して起こす)。
 //     断るのは発話を扱っている間だけ。
 //
+// クリップ (2026-09-30、STK_CLIP / clips.play、README §17-2f):
+//   GET /clips と GET /clips/<id>/audio で暇なときに FAT へ取り込み
+//   (stackee_clipsm.c)、キーを押したら**通信せずに** FAT から 1 件読んで、
+//   会話と同じ再生部品 (PLAY_WAIT → PLAYING / 字幕だけなら SAY_TEXT) で鳴らす。
+//   ★ 同期は受け箱の常時ポーリングと同じ通信 (直列)。キー押下で打ち切る。
+//
 // ★ ESP-IDF に依存しない。録音・再生・通信・画面は ops で外から差し込む。
 //   hostbuild (tools/test_talk_host.py) が偽の ops を挿して、タイムアウト・
 //   ポーリング間隔・一次回答と最終回答の排他を時刻つきで確かめる。
@@ -119,6 +125,18 @@
 #define STACKEE_TALK_VOICE_WINDOWS_DEFAULT 5
 
 #define STACKEE_TALK_PATH_MAX        160
+
+struct stackee_clip;        // stackee_clipsm.h
+
+// ---- クリップ (2026-09-30) --------------------------------------------------
+// 帯に出すお知らせ (音なし、STACKEE_TALK_NOTICE_MS)。
+#define STACKEE_TALK_CLIP_EMPTY      "クリップがありません"
+#define STACKEE_TALK_CLIP_UNREADABLE "クリップを読めません"
+// FAT から読み終えるまでの上限 [ms] (3.84 MB でも 1 秒かからない見込み)。
+#define STACKEE_TALK_CLIP_LOAD_MS    10000
+#define STACKEE_TALK_CLIP_AUTO_ON    "クリップ自動取得 ON"
+#define STACKEE_TALK_CLIP_AUTO_OFF   "クリップ自動取得 OFF"
+#define STACKEE_TALK_CLIP_AUTO_FORCED "クリップ自動取得は\n設定で OFF です"
 #define STACKEE_TALK_TEXT_MAX        256
 
 // ---- 画像を見せる (POST /look、2026-09-26) ---------------------------------
@@ -307,6 +325,8 @@ typedef enum {
     STACKEE_TALK_INBOX_WAIT,// 次の GET /inbox?after= を撃つまで
     STACKEE_TALK_INBOX,     // GET /inbox?after=&wait= の応答待ち
     STACKEE_TALK_SAY_TEXT,  // 音の無い発話の字幕を出している
+    // ---- クリップ (2026-09-30)。★ 番号を動かさないよううしろに足す ----
+    STACKEE_TALK_CLIP_LOAD, // FAT からクリップを読んでいる (通信しない)
     STACKEE_TALK_STATES,
 } stackee_talk_state_t;
 
@@ -527,6 +547,27 @@ typedef struct {
         uint32_t turn_started;
         uint32_t reply_ready_ms, audio_ready_ms, play_setup_ms;
     } watch_keep;
+
+    // ---- クリップ (2026-09-30) ----
+    // ★ 同期と目録は clip (stackee_clipsm.c) が持つ。NULL ならクリップは無い。
+    //   ここは「押したら 1 件鳴らす」の流れだけ。借りる値 (reply など) は
+    //   常時ポーリングの発話と同じく watch_keep に写しておき、終えたら戻す。
+    struct stackee_clip *clip;
+    bool     clip_active;       // クリップの流れの途中 (押下 → 鳴り終わり)
+    bool     clip_play;         // false = 鳴らす直前で止める (検証用、字幕も出さない)
+    char    *clip_meta;         // 読んだメタ (持ち主はこちら。cleanup で返す)
+    uint8_t *clip_pcm;          // 読んだ PCM (同上。t->audio はここを指す)
+    char     clip_id[48];       // いま / 直近のクリップの id
+    uint32_t clip_started;      // 押下の時刻
+    uint32_t clip_load_ms;      // 押下 → 読み終え
+    uint32_t clip_end_ms;       // 押下 → 終わり
+    int      clip_pages;        // 字幕のページ数
+    uint32_t clip_audio_bytes;
+    const char *clip_final;     // NULL (途中) / "done" / "empty" / "error"
+    char     clip_error[96];    // 直近のクリップの失敗 (会話の error とは別)
+    bool     clip_played;       // 鳴らした / 字幕を出した
+    uint32_t clip_count;        // 押下 (受け付けたもの) の数
+    uint32_t clip_done, clip_empty, clip_errors, clip_busy, clip_unplayed;
 } stackee_talk_t;
 
 // 再生位置 [ms] に出すページの番号。無ければ -1。
@@ -632,6 +673,26 @@ bool stackee_talk_sibling_path(const char *talk_path, const char *name,
 // ★ URL 未設定や Wi-Fi なしで始められないときは、会話と同じ「会話エラー: …」を
 //   出して true を返す (流れとしては始まって、すぐ error で終わった)。
 bool stackee_talk_custom(stackee_talk_t *t, int n, bool play);
+
+// ---- クリップ (2026-09-30) ----------------------------------------------------
+// 同期と目録 (stackee_clipsm.c) をつなぐ。以後 stackee_talk_step が同期を回す
+// (受け箱の常時ポーリングと直列、暇なときだけ)。NULL で外す。
+void stackee_talk_attach_clip(stackee_talk_t *t, struct stackee_clip *clip);
+
+// STK_CLIP を押したのと同じ流れ。呼ぶのは audio タスクだけ。**通信しない。**
+// ★ 会話・画像・Custom の途中 (録音/送信/待ち/再生、一次回答が鳴っている、
+//   STK_TALK を押している、撮影のために押さえている)・クリップを鳴らしている
+//   最中は**何もせず** false (clip_busy が増える。画面にも何も出さない)。
+// ★ 1 件も無ければ帯に「クリップがありません」を 2.5 秒 (音なし) 出して true。
+// ★ play=false は読み終えたところで止め、鳴らさない (字幕も出さない。検証用)。
+bool stackee_talk_clip(stackee_talk_t *t, bool play);
+
+// STK_CLIP_AUTO — 自動取得 (5 分ごとの同期) を入り切りする。呼ぶのは audio タスク。
+// 帯に「クリップ自動取得 ON / OFF」を 2.5 秒 (音なし。帯の持ち主が居るとき =
+// 会話・再生の途中は出さずに切り替えだけ)。settings.toml で強制 OFF なら
+// 切り替えずに「…は設定で OFF です」。戻り値は切り替えたあとの状態 (1 / 0)、
+// クリップが無ければ -1。
+int  stackee_talk_clip_auto(stackee_talk_t *t);
 
 // ---- 暇なときに受け箱を見る (常時ポーリング) ---------------------------------
 // on / play を切り替える (inbox.enable)。off にすると待っている要求を打ち切る。

@@ -140,6 +140,8 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
         {STK_BLE_REFRESH, STACKEE_KEY_BLE_REFRESH},
         {STK_CAMERA, STACKEE_KEY_CAMERA},
         {STK_TOUCH_SCROLL, STACKEE_KEY_TOUCH_SCROLL},
+        {STK_CLIP, STACKEE_KEY_CLIP},
+        {STK_CLIP_AUTO, STACKEE_KEY_CLIP_AUTO},
     };
     for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++) {
         if (actions[i].keycode != keycode) {
@@ -168,6 +170,8 @@ const char *stackee_key_action_name(stackee_key_action_t action) {
         case STACKEE_KEY_CAMERA: return "CAMERA";
         case STACKEE_KEY_TOUCH_SCROLL: return "TOUCH_SCROLL";
         case STACKEE_KEY_MIC: return "MIC_KEY";
+        case STACKEE_KEY_CLIP: return "CLIP";
+        case STACKEE_KEY_CLIP_AUTO: return "CLIP_AUTO";
         default: break;
     }
     if (action >= STACKEE_KEY_CUSTOM_0 && action <= STACKEE_KEY_CUSTOM_LAST) {

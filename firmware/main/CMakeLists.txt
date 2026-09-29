@@ -42,6 +42,7 @@ idf_component_register(
         "stackee_wifism.c"
         "stackee_wifi.c"
         "stackee_talksm.c"
+        "stackee_clipsm.c"
         "stackee_httpcore.c"
         "stackee_http.c"
         "stackee_heapdiag.c"
@@ -55,6 +56,7 @@ idf_component_register(
         "stackee_touch.c"
         "stackee_camera.c"
         "stackee_fat.c"
+        "stackee_clipfs.c"
         "stackee_conhid.c"
         "stackee_uac.c"
         # --- アプリ内 OTA (Raw HID から ota_1 へ) ------------------------

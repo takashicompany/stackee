@@ -111,6 +111,11 @@ typedef enum {
     //   サーバへ知らせる。番号は STACKEE_KEY_CUSTOM_0 からの連番で渡す。
     STACKEE_KEY_CUSTOM_0,
     STACKEE_KEY_CUSTOM_LAST = STACKEE_KEY_CUSTOM_0 + 9,
+    // ★ クリップ (2026-09-30)。押した瞬間に 1 回、FAT のクリップを 1 件鳴らす
+    //   (通信しない。README §17-2f)。
+    STACKEE_KEY_CLIP,
+    // ★ クリップの自動取得の入り切り (2026-09-30)。押した瞬間に 1 回。
+    STACKEE_KEY_CLIP_AUTO,
 } stackee_key_action_t;
 
 const char *stackee_key_action_name(stackee_key_action_t action);

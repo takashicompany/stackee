@@ -131,8 +131,10 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 | 6 | `STK_TOUCH_SCROLL` | `KC.TOUCH_SCROLL` | 4 (タッチパッド) |
 | 7〜 | `STK_MT_n` | (上の §3) | 済 |
 | 8〜17 | `STK_CUSTOM_0`〜`STK_CUSTOM_9` | — | 済 (VIA / Remap の表示は `Custom_0`〜`Custom_9`、0x7E08〜0x7E11。押した瞬間に `POST /key`。README §17-2c) |
+| 18 | `STK_CLIP` | — | 済 (2026-09-30。VIA / Remap の表示は `Clip`、0x7E12。押した瞬間に本体の FAT のクリップを 1 件、**通信せずに**字幕つきで鳴らす。README §17-2f) |
+| 19 | `STK_CLIP_AUTO` | — | 済 (2026-09-30。表示 `Clip_Auto`、0x7E13。押すたびにクリップの自動取得 (5 分ごとの同期) を ON / OFF。NVS に残る。README §17-2f) |
 
-★ customKeycodes は **18 個** (0x7E00〜0x7E11)。Remap は customKeycodes を
+★ customKeycodes は **20 個** (0x7E00〜0x7E13)。Remap は customKeycodes を
 **先頭 32 個 (0x7E00〜0x7E1F) しか出さない**ので、32 個を超えないこと
 (`tools/gen_keymap.py` が生成時に止める)。
 

@@ -39,7 +39,7 @@ if tree.KMK is None:
 KMK = str(tree.KMK)
 
 SOURCES = ['stackee_jsonlite.c', 'stackee_settings.c', 'stackee_wifistore.c',
-           'stackee_talksm.c', 'stackee_volume_core.c']
+           'stackee_talksm.c', 'stackee_clipsm.c', 'stackee_volume_core.c']
 
 # ★ ホストビルドは **ASan + UBSan つき**で回す。段階 3 の登録簿の直列化に
 # 入れ物の外へ書く欠陥があり (snprintf の戻り値を足し込んでいた)、

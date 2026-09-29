@@ -18,6 +18,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -34,6 +35,20 @@ esp_err_t stackee_fat_write_root(const char *name, const void *data, size_t len,
 
 // 上と同じ手順で、ディレクトリを作る (すでにあれば成功扱い)。
 esp_err_t stackee_fat_mkdir_root(const char *name);
+
+// ---- 書ける形で付けておく区間 (2026-09-30、クリップの取り込み) ------------
+// begin 〜 end の間は /rw に書ける形で付いていて、/assets は外れている
+// (読むなら stackee_fat_base() の下を読む)。入れ子にできる (fs.put が
+// 区間の中から来ても付け直さない)。★ 呼ぶのはメインループ (console タスク) だけ。
+// ★ 書き込みは 4 KB の写しに溜め、別のセクタへ移るとき / CTRL_SYNC / end で
+//   1 回だけ消して書く。写しの 4 KB (内蔵 RAM) は区間の間だけ持つ。
+esp_err_t   stackee_fat_session_begin(void);
+void        stackee_fat_session_end(void);
+bool        stackee_fat_session_open(void);
+// いま読める根っこ ("/rw" か "/assets")。
+const char *stackee_fat_base(void);
+// 区間の中でだけ使える。FAT の空き [B] とクラスタの大きさ [B]。
+esp_err_t   stackee_fat_space(uint64_t *free_bytes, uint32_t *cluster);
 
 typedef struct {
     uint32_t writes;        // 成功した書き込み回数

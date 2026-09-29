@@ -64,7 +64,12 @@ static char s_line[CONSOLE_LINE_MAX];
 // ★ **1 つだけ**。コマンドの処理はメインループ 1 本でしか走らないので
 //   使い回してよい。段階 4 の最初の版は分岐ごとに static を持っていて、
 //   内蔵 RAM の .bss を 3 個ぶん (4.8 KB) 余計に食っていた。
-static char s_wide[1600];
+// ★ 2026-09-30 から PSRAM (起動時に取る)。触るのはメインループだけで、
+//   割り込みからは触らない。XIP (sdkconfig.defaults) で増えた内蔵 RAM の
+//   静的な使用 (約 1.1 KB) をここで返す。PSRAM が取れなければ内蔵ヒープに落ちる
+//   (それも取れなければ大きい応答だけ "nomem" で断る)。
+#define WIDE_MAX 1600
+static char *s_wide;
 static size_t s_len;
 static bool s_in_frame;
 static uint32_t s_cmds;
@@ -363,6 +368,7 @@ static void reply_hello(long id) {
                 "\"camera.status\",\"camera.look\",\"camera.look_status\","
                 "\"key.custom\",\"key.custom_status\","
                 "\"inbox.status\",\"inbox.enable\",\"heap.info\","
+                "\"clips.status\",\"clips.sync\",\"clips.play\",\"clips.clear\",\"clips.auto\","
                 "\"app.info\",\"app.boot_factory\",\"ota.begin\",\"ota.status\","
                 "\"ota.end\",\"ota.commit\",\"ota.abort\"],"
                 "\"profile\":\"%s\",\"cdc\":%s}",
@@ -532,6 +538,10 @@ static void reply_status(long id) {
                 stackee_audio_busy() ? "true" : "false",
                 stackee_http_configured() ? "true" : "false",
                 stackee_http_has_token() ? "true" : "false");
+    // クリップの要約 (件数・合計・FAT の空き・rev・同期の結末)。詳しくは clips.status。
+    if (at < sizeof(buf)) {
+        at = stackee_audio_clips_summary(buf, sizeof(buf), at);
+    }
     at = append_screen(buf, sizeof(buf), at, stackee_ui_screen());
     // ★ heap_free は PSRAM 込み。TLS が確保できるかを決めるのは**内蔵 RAM**
     //   なので、そちらを別に出す (2026-09-16: mbedtls_ssl_setup が
@@ -1302,13 +1312,26 @@ static void handle_line(const char *line) {
         send_frame(buf);
         s_action_at_us = esp_timer_get_time() + 300000;
         s_action = CONSOLE_ACTION_ROM;
+    } else if (s_wide == NULL &&
+               (strncmp(cmd, "settings.get", 12) == 0 ||
+                strcmp(cmd, "settings.raw") == 0 ||
+                (s_ext_count > 0 && strcmp(cmd, "settings.set") != 0 &&
+                 strcmp(cmd, "fs.put") != 0 && strcmp(cmd, "bench") != 0 &&
+                 strcmp(cmd, "log.burst") != 0 && strcmp(cmd, "lcd.status") != 0 &&
+                 strcmp(cmd, "lcd.full") != 0 && strcmp(cmd, "usb.status") != 0 &&
+                 strncmp(cmd, "loop.", 5) != 0))) {
+        // ★ 大きい応答の置き場 (PSRAM) が取れていない。脱出路 (reset /
+        //   bootloader) と小さい応答はこれより上で済んでいるので止まらない。
+        char buf[64];
+        snprintf(buf, sizeof(buf), "{\"id\":%ld,\"error\":\"nomem\"}", id);
+        send_frame(buf);
     } else if (strcmp(cmd, "settings.get") == 0) {
-        size_t len = reply_settings_get(id, s_wide, sizeof(s_wide));
-        send_frame((len < sizeof(s_wide)) ? s_wide
+        size_t len = reply_settings_get(id, s_wide, WIDE_MAX);
+        send_frame((len < WIDE_MAX) ? s_wide
                                           : "{\"id\":null,\"error\":\"toolong\"}");
     } else if (strcmp(cmd, "settings.raw") == 0) {
-        size_t len = reply_settings_raw(id, s_wide, sizeof(s_wide));
-        send_frame((len < sizeof(s_wide)) ? s_wide
+        size_t len = reply_settings_raw(id, s_wide, WIDE_MAX);
+        send_frame((len < WIDE_MAX) ? s_wide
                                           : "{\"id\":null,\"error\":\"toolong\"}");
     } else if (strcmp(cmd, "settings.set") == 0) {
         char buf[256];
@@ -1356,9 +1379,9 @@ static void handle_line(const char *line) {
         //   (CDC の送信 FIFO は 2048 B、ホスト側の上限は 8192 B)。
         size_t len = 0;
         for (int i = 0; i < s_ext_count && len == 0; i++) {
-            len = s_ext[i](cmd, line, id, s_wide, sizeof(s_wide));
+            len = s_ext[i](cmd, line, id, s_wide, WIDE_MAX);
         }
-        if (len == 0 || len >= sizeof(s_wide)) {
+        if (len == 0 || len >= WIDE_MAX) {
             char buf[96];
             snprintf(buf, sizeof(buf), "{\"id\":%ld,\"error\":\"%s\"}", id,
                      len ? "toolong" : "unsupported");
@@ -1462,6 +1485,12 @@ void stackee_console_attach_log(void) {
 
 void stackee_console_init(void) {
     stackee_conhid_init();
+    if (s_wide == NULL) {
+        s_wide = heap_caps_calloc(1, WIDE_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_wide == NULL) {
+            s_wide = heap_caps_calloc(1, WIDE_MAX, MALLOC_CAP_8BIT);
+        }
+    }
     s_boot_us = 0;      // esp_timer は起動時に 0 から始まる
     s_len = 0;
     s_in_frame = false;

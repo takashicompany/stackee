@@ -1,4 +1,5 @@
 #include "stackee_assets.h"
+#include "stackee_fat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,6 +96,11 @@ static int count_array_items(const char *json, const char *key) {
 // ---------------------------------------------------------------------------
 
 esp_err_t stackee_assets_mount(void) {
+    // ★ 付いているなら何もしない (stackee_fat.c が書ける形に付け損ねたとき、
+    //   外していないのに「戻す」ことがある)。
+    if (s_info.mounted) {
+        return ESP_OK;
+    }
     memset(&s_info, 0, sizeof(s_info));
 
     // CircuitPython は user_fs をそのまま FAT として使う (摩耗平準化を
@@ -198,7 +204,9 @@ void *stackee_assets_read(const char *name, size_t *out_len, uint32_t caps) {
 
 char *stackee_assets_read_root(const char *name, size_t *out_len) {
     char path[128];
-    snprintf(path, sizeof(path), STACKEE_ASSETS_MOUNT "/%s", name);
+    // ★ クリップの取り込み中 (書ける形で付いている間) は /rw の下を読む
+    //   (settings.get などがその間も答えられるように)。
+    snprintf(path, sizeof(path), "%s/%s", stackee_fat_base(), name);
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
         return NULL;

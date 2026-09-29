@@ -68,6 +68,12 @@ bool stackee_http_prewarm(const char *path);
 // 完了していれば受信した本体 (NUL 終端つき)。close するまで有効。
 const uint8_t *stackee_http_body(size_t *len);
 
+// 完了していれば受信バッファ (NUL 終端つき、len + 1 B) の持ち主を呼び手に
+// 移す (以後 free() で返す)。通信側は空 (IDLE) に戻るので http_close は要らない。
+// 完了していなければ NULL。★ クリップの音声 (数 MB) を写さずに FAT の
+// 書き手へ渡すため (2026-09-30)。
+uint8_t *stackee_http_take(size_t *len);
+
 // 通信中なら打ち切りを頼んで即戻る。終わっていれば受信バッファを返す
 // (★ 接続は閉じない。次の要求が使い回す)。
 void stackee_http_close(void);

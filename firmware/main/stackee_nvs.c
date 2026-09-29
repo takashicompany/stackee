@@ -55,6 +55,39 @@ bool stackee_qmk_eeprom_backend_save(const uint8_t *buf, size_t len) {
 }
 
 // ---------------------------------------------------------------------------
+// クリップの自動取得の入り切り (2026-09-30)
+// ---------------------------------------------------------------------------
+#define STACKEE_NVS_KEY_CLIP_AUTO "clip_auto"
+
+bool stackee_nvs_load_clip_auto(uint8_t *out) {
+    nvs_handle_t handle;
+    if (nvs_open(STACKEE_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return false;
+    }
+    esp_err_t err = nvs_get_u8(handle, STACKEE_NVS_KEY_CLIP_AUTO, out);
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+
+bool stackee_nvs_save_clip_auto(uint8_t value) {
+    nvs_handle_t handle;
+    if (nvs_open(STACKEE_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return false;
+    }
+    esp_err_t err = nvs_set_u8(handle, STACKEE_NVS_KEY_CLIP_AUTO, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "クリップの自動取得を保存できない: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "クリップの自動取得を保存した (%u)", value);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // HID の送信先 (BLE / USB) の保存
 // ---------------------------------------------------------------------------
 // 同じ名前空間にキーを 1 つ足すだけ。1 バイトなので blob ではなく u8。

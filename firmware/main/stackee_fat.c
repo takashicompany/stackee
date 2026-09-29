@@ -4,9 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/stat.h>
 
 #include "diskio_impl.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
@@ -28,7 +30,13 @@ static size_t   s_sector_count;
 static BYTE     s_pdrv = 0xFF;
 static FATFS   *s_fs;
 static char     s_drv[3] = {'0', ':', 0};
-static uint8_t *s_cache;            // 4 KB。読む → 差し替える → 書く に使う
+// 4 KB。いま触っているフラッシュセクタの写し (書き戻し式の 1 枚キャッシュ)。
+// ★ 内蔵 RAM から取る (esp_flash_write は PSRAM の元バッファを 32 B ずつしか
+//   書けない)。書ける形で付けている間だけ持ち、外したら返す (常駐させない)。
+static uint8_t *s_cache;
+static size_t   s_cache_base = SIZE_MAX;   // s_cache が写しているセクタ (無ければ SIZE_MAX)
+static bool     s_cache_dirty;            // 写しを書き換えた (まだフラッシュに無い)
+static int      s_depth;                  // 書ける形で付けている入れ子の数
 
 static stackee_fat_stats_t s_stats;
 
@@ -78,11 +86,56 @@ static DSTATUS rw_status(BYTE pdrv) {
     return (s_sector_size == 0) ? (STA_NOINIT | STA_NODISK) : 0;
 }
 
+// 書き戻し式の 1 枚キャッシュ (2026-09-30、クリップの取り込みで足した)。
+// ★ FAT のクラスタは 2 KB (CIRCUITPY の 12 MB を f_mkfs の既定で作ると 4 セクタ)
+//   で、FatFs の f_write は 1 回の disk_write をクラスタの切れ目で止める。
+//   以前の「来るたびに 読む → 消す → 書く」だと、続けて書くだけで同じ 4 KB の
+//   フラッシュセクタを 2 回ずつ消していた。いま触っているセクタを 1 枚だけ
+//   手元に置き、**別のセクタへ移るとき / CTRL_SYNC / 外すとき**に 1 回だけ
+//   消して書く (CircuitPython の internal_flash.c の _cache と同じ考え方)。
+static bool cache_flush(void) {
+    if (!s_cache_dirty || s_cache == NULL || s_cache_base == SIZE_MAX) {
+        s_cache_dirty = false;
+        return true;
+    }
+    if (esp_partition_erase_range(s_part, s_cache_base, FLASH_SECTOR) != ESP_OK ||
+        esp_partition_write(s_part, s_cache_base, s_cache, FLASH_SECTOR) != ESP_OK) {
+        return false;
+    }
+    s_stats.flash_erases++;
+    s_cache_dirty = false;
+    return true;
+}
+
+static bool cache_load(size_t base) {
+    if (s_cache_base == base) {
+        return true;
+    }
+    if (!cache_flush()) {
+        return false;
+    }
+    s_cache_base = SIZE_MAX;
+    if (esp_partition_read(s_part, base, s_cache, FLASH_SECTOR) != ESP_OK) {
+        return false;
+    }
+    s_cache_base = base;
+    return true;
+}
+
 static DRESULT rw_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count) {
     (void)pdrv;
-    if (esp_partition_read(s_part, (size_t)sector * s_sector_size, buff,
-                           (size_t)count * s_sector_size) != ESP_OK) {
+    size_t off = (size_t)sector * s_sector_size;
+    size_t len = (size_t)count * s_sector_size;
+    if (esp_partition_read(s_part, off, buff, len) != ESP_OK) {
         return RES_ERROR;
+    }
+    // まだフラッシュに書いていない写しと重なるところは、写しのほうが正しい。
+    if (s_cache_dirty && s_cache_base != SIZE_MAX &&
+        off < s_cache_base + FLASH_SECTOR && s_cache_base < off + len) {
+        size_t from = (off > s_cache_base) ? off : s_cache_base;
+        size_t to = (off + len < s_cache_base + FLASH_SECTOR) ? off + len
+                                                              : s_cache_base + FLASH_SECTOR;
+        memcpy(buff + (from - off), s_cache + (from - s_cache_base), to - from);
     }
     return RES_OK;
 }
@@ -97,8 +150,6 @@ static DRESULT rw_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
     if (off + len > s_part->size) {
         return RES_PARERR;
     }
-    // 4 KB のフラッシュセクタごとに「読む → 差し替える → 消す → 書く」。
-    // ★ CircuitPython の internal_flash.c と同じ考え方。
     while (len > 0) {
         size_t base = off & ~((size_t)FLASH_SECTOR - 1);
         size_t in = off - base;
@@ -106,18 +157,13 @@ static DRESULT rw_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
         if (chunk > len) {
             chunk = len;
         }
-        if (esp_partition_read(s_part, base, s_cache, FLASH_SECTOR) != ESP_OK) {
+        if (!cache_load(base)) {
             return RES_ERROR;
         }
+        // 同じ中身なら触らない (消さずに済む)。
         if (memcmp(s_cache + in, buff, chunk) != 0) {
             memcpy(s_cache + in, buff, chunk);
-            if (esp_partition_erase_range(s_part, base, FLASH_SECTOR) != ESP_OK) {
-                return RES_ERROR;
-            }
-            if (esp_partition_write(s_part, base, s_cache, FLASH_SECTOR) != ESP_OK) {
-                return RES_ERROR;
-            }
-            s_stats.flash_erases++;
+            s_cache_dirty = true;
         }
         off += chunk;
         buff += chunk;
@@ -130,7 +176,7 @@ static DRESULT rw_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
     (void)pdrv;
     switch (cmd) {
         case CTRL_SYNC:
-            return RES_OK;
+            return cache_flush() ? RES_OK : RES_ERROR;
         case GET_SECTOR_COUNT:
             *((DWORD *)buff) = (DWORD)s_sector_count;
             return RES_OK;
@@ -164,12 +210,14 @@ static esp_err_t rw_begin(void) {
         return ESP_ERR_NOT_FOUND;
     }
     if (s_cache == NULL) {
-        s_cache = malloc(FLASH_SECTOR);
+        s_cache = heap_caps_malloc(FLASH_SECTOR, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (s_cache == NULL) {
             note_error("nomem");
             return ESP_ERR_NO_MEM;
         }
     }
+    s_cache_base = SIZE_MAX;
+    s_cache_dirty = false;
     // 読み取り専用のマウントを外す。ここから先 /assets は読めない。
     stackee_assets_unmount();
 
@@ -205,6 +253,16 @@ static esp_err_t rw_begin(void) {
 }
 
 static void rw_end(void) {
+    // ★ 外す前に写しを書き出す (ファイルは閉じてあるので FatFs からは
+    //   CTRL_SYNC が来ているはずだが、念のため)。
+    if (s_part != NULL && !cache_flush()) {
+        note_error("flush");
+        ESP_LOGE(TAG, "書き戻しに失敗した (セクタ 0x%x)", (unsigned)s_cache_base);
+    }
+    s_cache_base = SIZE_MAX;
+    s_cache_dirty = false;
+    free(s_cache);
+    s_cache = NULL;
     if (s_fs != NULL) {
         f_mount(NULL, s_drv, 0);
         s_fs = NULL;
@@ -220,6 +278,61 @@ static void rw_end(void) {
     if (stackee_assets_mount() != ESP_OK) {
         ESP_LOGE(TAG, "読み取り専用に戻せない。再起動で直る");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 書ける形で付けておく区間 (入れ子にできる)
+// ---------------------------------------------------------------------------
+esp_err_t stackee_fat_session_begin(void) {
+    if (s_depth > 0) {
+        s_depth++;
+        return ESP_OK;
+    }
+    esp_err_t err = rw_begin();
+    if (err != ESP_OK) {
+        // ★ 途中で失敗しても読み取り専用には必ず戻す (素材が読めなくなるため)。
+        rw_end();
+        return err;
+    }
+    s_depth = 1;
+    return ESP_OK;
+}
+
+void stackee_fat_session_end(void) {
+    if (s_depth <= 0) {
+        return;
+    }
+    if (--s_depth == 0) {
+        rw_end();
+    }
+}
+
+bool stackee_fat_session_open(void) {
+    return s_depth > 0;
+}
+
+const char *stackee_fat_base(void) {
+    return (s_depth > 0) ? RW_MOUNT : STACKEE_ASSETS_MOUNT;
+}
+
+esp_err_t stackee_fat_space(uint64_t *free_bytes, uint32_t *cluster) {
+    if (s_depth <= 0 || s_fs == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    DWORD nclst = 0;
+    FATFS *fs = NULL;
+    if (f_getfree(s_drv, &nclst, &fs) != FR_OK || fs == NULL) {
+        return ESP_FAIL;
+    }
+#if FF_MAX_SS != FF_MIN_SS
+    uint32_t ss = fs->ssize;
+#else
+    uint32_t ss = FF_MAX_SS;
+#endif
+    uint32_t cl = (uint32_t)fs->csize * ss;
+    if (free_bytes) { *free_bytes = (uint64_t)nclst * cl; }
+    if (cluster)    { *cluster = cl; }
+    return ESP_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,10 +403,10 @@ esp_err_t stackee_fat_write_root(const char *name, const void *data, size_t len,
         return ESP_ERR_INVALID_ARG;
     }
     int64_t t0 = esp_timer_get_time();
-    esp_err_t err = rw_begin();
+    esp_err_t err = stackee_fat_session_begin();
     if (err == ESP_OK) {
         err = write_one(name, data, len, atomic);
-        rw_end();
+        stackee_fat_session_end();
     }
     s_stats.last_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
     if (err == ESP_OK) {
@@ -315,7 +428,7 @@ esp_err_t stackee_fat_mkdir_root(const char *name) {
         note_error("badname");
         return ESP_ERR_INVALID_ARG;
     }
-    esp_err_t err = rw_begin();
+    esp_err_t err = stackee_fat_session_begin();
     if (err != ESP_OK) {
         return err;
     }
@@ -326,7 +439,7 @@ esp_err_t stackee_fat_mkdir_root(const char *name) {
         note_error("mkdir");
         err = ESP_FAIL;
     }
-    rw_end();
+    stackee_fat_session_end();
     return err;
 }
 

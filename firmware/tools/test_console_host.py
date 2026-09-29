@@ -138,6 +138,12 @@ class ConsoleOutputTest(unittest.TestCase):
         self.assertIs(status['bat_present'], True)  # 代役は電池あり
         self.assertIs(status['mic_usb_ready'], False)   # 代役は UAC なし
         self.assertEqual(status['up'], 12.3)
+        # クリップの要約 (2026-09-30)。詳しくは clips.status。
+        self.assertEqual(status['clips']['n'], 2)
+        self.assertEqual(status['clips']['result'], 'ok')
+        self.assertEqual(status['clips']['auto'], 1)
+        # ★ status は 2048 B の枠に収まること (溢れると黙って捨てられる)。
+        self.assertLess(len(json.dumps(status, ensure_ascii=False).encode()), 2048)
 
     def test_perf_carries_the_main_loop_period(self):
         main = self.frames[1]['perf']['main']
@@ -330,7 +336,9 @@ class Phase4CommandTest(unittest.TestCase):
                      'camera.capture', 'camera.power', 'camera.dump',
                      'camera.look', 'camera.look_status',
                      'key.custom', 'key.custom_status',
-                     'inbox.status', 'inbox.enable', 'heap.info'):
+                     'inbox.status', 'inbox.enable', 'heap.info',
+                     'clips.status', 'clips.sync', 'clips.play', 'clips.clear',
+                     'clips.auto'):
             self.assertIn(name, features, name)
 
     def test_hello_says_which_profile(self):

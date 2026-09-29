@@ -8,6 +8,10 @@
 bool stackee_nvs_load_hid_dest(uint8_t *out);
 bool stackee_nvs_save_hid_dest(uint8_t value);
 
+// クリップの自動取得 (1 = ON / 0 = OFF、2026-09-30)。無ければ false (既定 ON)。
+bool stackee_nvs_load_clip_auto(uint8_t *out);
+bool stackee_nvs_save_clip_auto(uint8_t value);
+
 // NimBLE のボンドのうち CCCD (通知の購読) の記録だけを消す。鍵は残すので、
 // Mac 側でペアリングを削除する必要は無い。消した件数、失敗なら -1。
 int stackee_nvs_drop_nimble_cccd(void);

@@ -20,6 +20,7 @@
 
 #include "stackee_assets.h"
 #include "stackee_audio.h"
+#include "stackee_clipfs.h"
 #include "stackee_board.h"
 #include "stackee_heapdiag.h"
 #include "stackee_http.h"
@@ -231,6 +232,9 @@ void app_main(void) {
         stackee_console_poll();
         // 溜まった像をフラッシュへ。★ ここは数十 ms 止まることがある。
         stackee_ota_poll();
+        // クリップの FAT の仕事 (目録・4 KB ずつの書き込み・消す・読む)。
+        // ★ いちばん低い優先度のここでだけ FAT に書く (README §17-2f)。
+        stackee_clipfs_poll();
         int64_t now = esp_timer_get_time();
         stackee_perf_sample(STACKEE_PERF_MAIN, (uint32_t)(now - last));
         last = now;

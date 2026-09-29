@@ -1968,3 +1968,155 @@ MIC(F1〜F12) = 0x7F3A〜0x7F45、旧 0x7E20〜0x7E29 → 0x7E08〜0x7E11。
 | VIA の読み出し (0x12) | 上の表と 300 キーすべて同じ (書き換え 0 件なので) |
 | 再起動をもう 1 回 | `keys.mig` が `from=2 level=2 changed=0` (二度目は当たらない) |
 | `hello` の features | `key.custom` / `key.custom_status` がある (`key.cstm` は無い) |
+
+## クリップ (取り込んでおいた音声 + 字幕を通信せずに鳴らす) / 自動取得の入り切り 2026-09-30 — **予定 (まだ書き込んでいない)**
+
+README §17-2f / DESIGN.md §6d。`GET /clips` と `GET /clips/<id>/audio` で暇なときに
+FAT (`clips/`) へ取り込み、`STK_CLIP` (0x7E12、表示 `Clip`) で通信せずに 1 件ずつ
+字幕つきで鳴らす。`STK_CLIP_AUTO` (0x7E13、表示 `Clip_Auto`) で自動取得を
+ON / OFF (NVS に残る、既定 ON)。
+★ **XIP from PSRAM は入れていない** (ユーザー判断)。FAT には「打鍵が止まって
+300 ms たってから、4 KB ずつ、最低優先度」で書く。sdkconfig は変えていない。
+
+### ビルド (実機に触らない)
+
+| | dev | full |
+|---|---:|---:|
+| 像 (`stackee.bin`) | 1,438,224 B (68%) | 1,439,744 B (68%) |
+| 変更前 (`27515b9` の予定欄) | 1,417,504 B | 1,419,024 B |
+| 内蔵 RAM の静的合計 (DIRAM) | **180,092 B** (変更前 181,444、**−1,352**) | **178,316 B** (変更前 179,668、**−1,352**) |
+| うち `.bss` | 57,112 B | 55,336 B |
+
+減ったのはコンソールの応答枠 1.6 KB を PSRAM へ移したため (クリップの足し分は
+約 +250 B)。同期と目録 (約 13 KB) は PSRAM。書いている間だけ内蔵 4 KB を借りる。
+警告は変更前からの `tud_init` の deprecated だけ。
+
+### ホストテスト
+
+**705 件** (`tools/test_*.py` をファイルごとに、全部 OK。前 650 件)。
+`test_clip_host` **40 件 (新規)**: 同期 (目録 → 一覧 → 無いものを消す → 新しい順・
+受け皿はちょうど audio_bytes・rev が同じなら何もしない・`clips.sync`・5 分ごと・
+暇でなければ待つ)・**一覧の取得に失敗したら何も消さない** (通信 / 404 で 10 分休む /
+500 / 壊れた JSON / rev 無し)・容量 (古いものだけ消す・新しいものは消さない・
+消しても入らないなら消さない・クラスタへの切り上げ)・**書きかけを残さない**
+(失敗・書き込み中 / 取得中の打ち切り・暇でなくなった・1 分後に続きから)・一覧の
+中身 (字幕だけ・1 件の 404・長さ違い・不正な物・中身の変化・64 件・文字列の
+created・括弧)・`clips.clear`・**再生の順番**・**自動取得** (OFF なら定期の同期を
+しない・OFF でも `clips.sync` は動く・OFF にしたら進行中の同期を打ち切って書きかけを
+残さない・ON にしたら次の暇で 1 回・NVS へは変わったときだけ打鍵が 2 秒止まってから・
+強制 OFF はキーで入らない)。
+`test_talk_host` 174 → **188** (クリップの再生 5・同期との直列と打ち切り 5・
+`Clip_Auto` 4: 帯に ON / OFF を 2.5 秒・強制 OFF の文言・再生中は帯を奪わない・
+OFF で進行中の同期を打ち切る)。`test_keyseq_host` (0x7E12 = CLIP、0x7E13 = CLIP_AUTO、
+0x7E14 は何でもない)、`test_gen_keymap` (customKeycodes 20 個)、`test_console_host`
+(`hello` に `clips.*`、`status` に `clips.auto`)。`gen_keymap.py --check` は「生成物は最新」。
+
+★ FAT の worker (`stackee_clipfs.c`: 打鍵中は書かない・4 KB ずつ・後始末の後回し) と
+書き戻し式の 1 枚キャッシュ (`stackee_fat.c`) は ESP-IDF に依存するのでホストテストが
+無い。書き込み後の 4〜6 で見る。
+
+### 書き込み後に回す確認 (人手ゼロ・無音)
+
+★ 音を鳴らさない: 先に `audio.null on=true` (元の値を控える)。受け箱の発話も鳴る
+ので `inbox.enable on=1 play=0`。**最後に両方を元に戻す。**
+★ サーバー側に `/clips` (取り決めは README §17-2f) が要る。無ければ同期は
+`result=404` で 10 分休むだけ。
+★ `key.inject` は本物のキーとして PC に届くので `kc=F24` を使う。`key.inject` も
+打鍵として数えるので、**注入している間は FAT に書かない**のが正しい動き。
+
+**1. 起動直後**
+
+```
+python3 tools/console_hid.py hello           # features に clips.status / clips.sync / clips.play / clips.clear / clips.auto
+python3 tools/console_hid.py clips.status    # scanned=1, auto=1, auto_forced_off=0, count=0, free≈11.4 MB, cluster
+python3 tools/console_hid.py status          # clips:{n, auto:1, …}、heap_internal が前の版と同じ水準以上
+```
+
+**2. 同期**
+
+```
+python3 tools/console_hid.py clips.sync
+python3 tools/console_hid.py clips.status    # phase が idle に戻るまで
+```
+
+| 見るもの | 期待値 |
+|---|---|
+| 同期のあと | `result=ok`、`count` = サーバーの件数、`bytes` = audio_bytes の合計、`rev_done` = サーバーの rev、`clips` の各 `audio_bytes` が一致 |
+| 5 分後 | `same` が 1 増える。`downloads` は増えない |
+| `fs` | `slices` が増える、`max_slice_us` (4 KB の時間。消去込みで約 10 ms の見込み)、`gave_up=0`、`cleanup_pending=0` |
+
+**3. 無音の再生 (FAT から読めること・通信が 0 回であること)**
+
+```
+python3 tools/console_hid.py inbox.enable on=0
+python3 tools/console_hid.py clips.status             # http_requests と next を控える
+python3 tools/console_hid.py clips.play play=0
+python3 tools/console_hid.py clips.status             # play.final=done, played=0
+python3 tools/console_hid.py inbox.enable on=1 play=0
+```
+
+| 見るもの | 期待値 |
+|---|---|
+| `play` | `final=done`、`clip` = 控えた `next` の id、`audio_bytes` = その audio_bytes、`pages` > 0、`played=0`、`load_ms` 1 秒未満 |
+| `http_requests` | **前後で同じ** |
+| 繰り返す | 新しい順 → 全部済んだら古い順に回る |
+| `clips.clear` のあと `clips.play play=0` | `final=empty`、帯に「クリップがありません」(音なし) |
+
+**4. 同期中 (通信) の打鍵**: `phase=fetch` の間に `key.inject kc=F24` を 20 回 →
+`press_ms` 中央値 ≤ 2 ms / 最大 ≤ 5 ms (通信は FAT を書かないので前と同じ)。
+
+**5. FAT 書き込みと打鍵が重ならないこと**
+
+大きめのクリップ (1〜3.84 MB) を数件置いて `clips.sync`。`phase=write` になったら:
+
+| 手順 | 期待値 |
+|---|---|
+| `key.inject kc=F24` を 100 ms おきに 20 回 → 直後に `clips.status` | 注入している間 `fs.deferred` が増え、`fs.slices` は増えない (打鍵中は書かない) |
+| 20 回の `press_ms` | 中央値 ≤ 2 ms。**最大は 1 回目だけ ~10 ms まで許す** (書き始めた直後に来た 1 打。README §17-2f の限界)。2 回目以降は ≤ 5 ms |
+| 注入をやめて 1 秒後 | `fs.slices` がまた増え、`result=ok` で終わる |
+| `status.perf.input` の最大 | 書き込みの前後で ~10 ms を超えない |
+
+**6. 容量いっぱいで古いものが消えること**
+
+rev 1 = 古い 3.84 MB を 2 件 → `clips.sync` → rev 2 = その 2 件 + **新しい** 3.84 MB を
+1 件 → `clips.sync`。
+
+| 見るもの | 期待値 |
+|---|---|
+| 2 回目のあと | `evicted=1` (いちばん古いもの)、`count=2`、`free` ≥ 524,288 |
+| 逆に「新しい 2 件のあとに古い 1 件」 | `evicted=0`、`skipped_space=1` |
+
+**7. 打ち切り (書きかけを残さない)**
+
+`phase=write` の間に `clips.play play=0` (または `key.custom n=9 play=0`)。
+
+| 見るもの | 期待値 |
+|---|---|
+| `clips.status` | `aborts` +1、`result=aborted`、`fs.aborts` +1、`count` は書いていた 1 件を含まない、`next_in_ms` ≈ 60,000 |
+| `play` | すぐ `final=done` (読み込みは後始末を待たない) |
+| 静かになって 1 秒後 | `fs.cleanup_pending=0` (書きかけを消した) |
+| 再起動後 | `log.tail` に `半端物 0 件` |
+
+**8. 自動取得の入り切り (`Clip_Auto`)**
+
+| 手順 | 期待値 |
+|---|---|
+| `clips.auto on=0` → `clips.status` | `auto=0`、`auto_save_pending=1` → 2 秒後 `0` (`log.tail` に `クリップの自動取得を保存した (0)`) |
+| 5 分以上待って `clips.status` | `syncs` が増えない。`inbox.status` の受け箱は回り続ける |
+| `phase=write` の最中に `clips.auto on=0` | `result=aborted`、書きかけが残らない (7 と同じ) |
+| `clips.sync` | OFF でも 1 回同期する |
+| 再起動 (`reset`、ユーザーの了承のあと) → `clips.status` | `auto=0` のまま (NVS) |
+| `clips.auto on=1` | `auto=1`、次に暇になったところで同期 |
+| キーそのもの | `key.inject kc=32275` (= 0x7E13。または Remap で割り当てて押す) → 帯に「クリップ自動取得 ON / OFF」(`ui.status` の字幕)、音なし |
+| settings.toml に `STACKEE_CLIP_SYNC = 0` (試すなら) | `auto_forced_off=1`、キーで入らず帯に「クリップ自動取得は / 設定で OFF です」 |
+
+最後に `clips.auto on=1`、`inbox.enable on=1 play=1`、`audio.null` を元の値に戻す。
+
+### 未確認のまま
+
+| 項目 | なぜ |
+|---|---|
+| 取り込み中に打ち始めた最初の 1 打の遅れ | 見込み最大 ~10 ms (OTA の実測から)。実機で 5 |
+| 実機の FAT のクラスタ | 2 KB の見込み (`clips.status.cluster`) |
+| 3.84 MB を読む時間 | メインループが 1 秒前後止まる見込み (`play.load_ms`) |
+| サーバー側 `/clips` | 別の作業。取り決めどおりかは 2 で見る |

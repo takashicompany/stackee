@@ -89,6 +89,17 @@ void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed) {
         stackee_audio_custom_key((int)(action - STACKEE_KEY_CUSTOM_0));
         return;
     }
+    // ★ クリップ。印を 1 つ置くだけ (FAT を読むのはメインループ、鳴らすのは
+    //   audio タスク)。通信はしない。
+    if (action == STACKEE_KEY_CLIP) {
+        stackee_audio_clip_key();
+        return;
+    }
+    // ★ 自動取得の入り切り。これも印を置くだけ (NVS へは静かになってから)。
+    if (action == STACKEE_KEY_CLIP_AUTO) {
+        stackee_audio_clip_auto_key();
+        return;
+    }
     switch (action) {
         case STACKEE_KEY_VOLUP:
             // ★ NVS へ書くのはここではない (入力タスクを止めない)。

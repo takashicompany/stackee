@@ -30,7 +30,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDF = os.path.dirname(HERE)
 
-SOURCES = ['stackee_talksm.c', 'stackee_jsonlite.c']
+SOURCES = ['stackee_talksm.c', 'stackee_clipsm.c', 'stackee_jsonlite.c']
 # ★ ホストビルドは **ASan + UBSan つき**で回す。段階 3 の登録簿の直列化に
 # 入れ物の外へ書く欠陥があり (snprintf の戻り値を足し込んでいた)、
 # これを入れて初めて落ちるようになった。実機では同じ欠陥が静かに
@@ -2896,6 +2896,167 @@ t 3000
         self.assertTrue(any(s.startswith('会話エラー') for s in subs), subs)
         self.assertEqual(subs[-1], '-')
 
+
+
+# ---------------------------------------------------------------------------
+# クリップ (STK_CLIP、2026-09-30)
+# ---------------------------------------------------------------------------
+def clip_play(text):
+    rows = re.findall(r'^CLIPPLAY (.*)$', text, re.M)
+    assert rows, text
+    head, _, flags = rows[-1].partition(' flags=')
+    head, _, error = head.partition(' error=')
+    head, _, reply = head.partition(' reply=')
+    out = {'error': error, 'reply': reply, 'flags': [f for f in flags.split(',') if f]}
+    for part in head.split(' '):
+        k, _, v = part.partition('=')
+        out[k] = int(v) if re.fullmatch(r'-?\d+', v) else v
+    return out
+
+
+def clip_ids(text):
+    return [clip_play('CLIPPLAY ' + row)['id']
+            for row in re.findall(r'^CLIPPLAY (.*)$', text, re.M)]
+
+
+class ClipPlayTest(unittest.TestCase):
+    """FAT のクリップを通信せずに 1 件鳴らす。会話と同じ再生部品と字幕。"""
+
+    def test_plays_from_fat_without_any_request(self):
+        out = run('net 0\ncliphave a1 100 64000 subs\nclipon\nt 20\n'
+                  'clip 1\nt 3000\nclipprint\nprint\n')
+        self.assertIn('CLIP 1', out)
+        self.assertEqual(http_calls(out), [])          # ★ 通信 0 回
+        self.assertIn('PLAY 32000', out)
+        self.assertIn('SUB 一行目', out)
+        self.assertIn('SUB 一行目\\n二行目', out)        # 会話と同じ頁の積み方
+        self.assertEqual(state_names(out)[-4:],
+                         ['clip_load', 'play_wait', 'playing', 'idle'])
+        info = clip_play(out)
+        self.assertEqual((info['final'], info['played'], info['pages'], info['audio']),
+                         ('done', 1, 2, 64000))
+        self.assertEqual(info['active'], 0)
+        # 借りた返答文は戻す (talk.status の「直近の会話」を壊さない)。
+        self.assertEqual(last_print(out)['reply'], '')
+        self.assertNotIn('考えています', out)            # 考え中の案内は出さない
+
+    def test_no_clips_shows_a_notice_without_sound(self):
+        out = run('net 0\nclipon\nt 20\nclip 1\nt 100\nclipprint\nt 2500\n')
+        self.assertIn('CLIP 1', out)
+        self.assertIn('SUB クリップがありません', out)
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        self.assertEqual(http_calls(out), [])
+        self.assertEqual(out.strip().splitlines()[-1], 'SUB -')    # 2.5 秒で消える
+        info = clip_play(out)
+        self.assertEqual((info['final'], info['empty']), ('empty', 1))
+
+    def test_subtitle_only_clip_shows_text_without_sound(self):
+        out = run('net 0\ncliphave s1 100 0\nclipon\nt 20\nclip 1\nt 3500\nclipprint\n')
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        self.assertIn('SUB 本文-s1', out)
+        self.assertIn('say_text', state_names(out))
+        self.assertEqual(state_names(out)[-1], 'idle')
+        self.assertEqual(clip_play(out)['played'], 1)
+
+    def test_play0_stops_before_the_speaker(self):
+        out = run('net 0\ncliphave a1 100 64000 subs\nclipon\nt 20\n'
+                  'clip 0\nt 100\nclipprint\n')
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        self.assertNotRegex(out, r'(?m)^SUB ')          # 字幕も出さない
+        self.assertNotRegex(out, r'(?m)^SHOW ')
+        info = clip_play(out)
+        self.assertEqual((info['final'], info['played'], info['unplayed']), ('done', 0, 1))
+        self.assertEqual((info['audio'], info['pages']), (64000, 2))   # 読めてはいる
+        self.assertEqual(http_calls(out), [])
+
+    def test_order_is_newest_unplayed_then_oldest_in_turn(self):
+        script = 'net 0\ncliphave a 100 0\ncliphave c 300 0\ncliphave b 200 0\nclipon\nt 20\n'
+        script += 'clip 0\nt 50\nclipprint\n' * 6
+        self.assertEqual(clip_ids(run(script)), ['c', 'b', 'a', 'a', 'b', 'c'])
+
+    def test_refused_while_busy_and_blocks_other_keys_while_playing(self):
+        # ★ 会話キーを録らせたいので Wi-Fi は上げておく (同期の一覧は失敗するだけ)。
+        out = run('cliphave a1 100 64000\nclipon\nt 20\n'
+                  'mic 40\npress\nt 50\nclip 1\nrelease\nt 500\n'   # 録音中は無視
+                  'clip 1\nt 50\nclip 1\n'                          # 再生中にもう一度は無視
+                  'press\nt 100\nrelease\n'                         # 再生中の会話キーは録らない
+                  'custom 3 1\nreserve\n'
+                  't 3000\nclipprint\n')
+        self.assertEqual(re.findall(r'^CLIP (\d)$', out, re.M), ['0', '1', '0'])
+        self.assertEqual(out.count('REC begin'), 1)
+        self.assertIn('Custom 0', out)
+        self.assertIn('RESERVE 1', out)                 # 撮らない (BUSY)
+        info = clip_play(out)
+        self.assertEqual((info['busy'], info['count'], info['done']), (2, 1, 1))
+
+
+class ClipSyncTalkTest(unittest.TestCase):
+    """同期は受け箱の常時ポーリングと同じ通信で直列。キーで打ち切る。"""
+
+    LIST_B = ('{"rev":1,"clips":[{"id":"b","created":200,"audio_bytes":3200,'
+              '"sample_rate":16000,"channels":1,"sample_width":2,"reply":"B"}]}')
+
+    def test_watch_and_sync_never_overlap(self):
+        out = run('respdelay 20\nresp 200 %s\nresp 200 %s\nresp 200 PCM:1600\n'
+                  'resp 200 %s\nwatch 1\nclipon\nt 500\nclipprint\n'
+                  % (EMPTY7, self.LIST_B, EMPTY7))
+        self.assertNotIn('HTTP busy', out)
+        self.assertEqual(paths(out)[:4],
+                         ['/inbox', '/clips', '/clips/b/audio', '/inbox?after=7&wait=25'])
+        self.assertEqual(clip_play(out)['flags'], ['b'])
+
+    def test_talk_key_aborts_the_sync(self):
+        out = run('respdelay 1000\nresp 200 %s\nclipon\nt 50\nmic 40\npress\nt 400\n'
+                  'release\nt 100\nclipprint\n' % self.LIST_B)
+        self.assertIn('HABORT', out)
+        self.assertLess(out.index('REC begin'), out.index('HABORT'))   # 録音が先
+        self.assertNotIn('HTTP busy', out)
+        self.assertIn('/talk', paths(out))
+        self.assertEqual(clip_play(out)['phase'], 'idle')
+
+    def test_clip_key_aborts_the_sync_and_plays_offline(self):
+        out = run('respdelay 1000\nresp 200 %s\ncliphave a 100 3200\nclipon\nt 50\n'
+                  'clip 1\nt 500\nclipprint\n' % self.LIST_B)
+        self.assertIn('HABORT', out)
+        after = out[out.index('CLIP 1'):]
+        self.assertNotRegex(after, r'(?m)^HTTP ')       # 押してからは通信しない
+        self.assertIn('PLAY 1600', after)
+        self.assertEqual(clip_play(out)['id'], 'a')
+
+    def test_custom_key_aborts_the_sync(self):
+        out = run('respdelay 1000\nresp 200 %s\nclipon\nt 50\ncustom 2 0\nt 10\n'
+                  'clipprint\n' % self.LIST_B)
+        self.assertIn('HABORT', out)
+        self.assertNotIn('HTTP busy', out)
+        self.assertEqual(clip_play(out)['phase'], 'idle')
+
+class ClipAutoTalkTest(unittest.TestCase):
+    """STK_CLIP_AUTO: 押すたびに自動取得を入り切りし、帯に 2.5 秒 (音なし)。"""
+
+    def test_toggle_shows_on_and_off(self):
+        out = run('net 0\nclipon\nt 20\nclipauto\nt 100\nclipauto\nt 2600\n')
+        self.assertEqual(re.findall(r'^CLIPAUTO (-?\d)$', out, re.M), ['0', '1'])
+        self.assertIn('SUB クリップ自動取得 OFF', out)
+        self.assertIn('SUB クリップ自動取得 ON', out)
+        self.assertNotRegex(out, r'(?m)^PLAY ')
+        self.assertEqual(out.strip().splitlines()[-1], 'SUB -')     # 2.5 秒で消える
+
+    def test_forced_off_says_so_and_stays_off(self):
+        out = run('net 0\nclipon\nclipforce\nt 20\nclipauto\nt 100\n')
+        self.assertIn('CLIPAUTO 0', out)
+        self.assertIn('SUB クリップ自動取得は\\n設定で OFF です', out)
+
+    def test_toggle_while_playing_does_not_steal_the_band(self):
+        out = run('net 0\ncliphave a 100 64000 subs\nclipon\nt 20\nclip 1\nt 100\n'
+                  'clipauto\nt 3000\n')
+        self.assertIn('CLIPAUTO 0', out)
+        self.assertNotIn('SUB クリップ自動取得', out)
+
+    def test_turning_off_aborts_a_running_sync(self):
+        out = run('respdelay 1000\nresp 200 %s\nclipon\nt 50\nclipauto\nt 10\nclipprint\n'
+                  % ClipSyncTalkTest.LIST_B)
+        self.assertIn('HABORT', out)
+        self.assertEqual(clip_play(out)['phase'], 'idle')
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -13,6 +13,7 @@ DESIGN.md §8 の「テスト: キー処理は Mac 上でホストビルドし�
 | `cfg_main.c` | **段階 3**。settings.toml / Wi-Fi 登録簿 / 選び方 / 音量のレジスタ値 / JSON / 会話 URL。**現行 CircuitPython 版の同じ関数と突き合わせる** | `python3 tools/test_cfg_host.py` |
 | `talk_main.c` | **段階 3**。会話の状態機械に台本を流す (偽の時計・マイク・スピーカー・通信) | `python3 tools/test_talk_host.py` |
 | `wifi_main.c` | **段階 3**。Wi-Fi の状態機械に台本を流す (偽の無線) | `python3 tools/test_wifi_host.py` |
+| `clip_main.c` | **クリップ** (2026-09-30)。同期の状態機械と再生の順番 (`main/stackee_clipsm.c`) に台本を流す (偽の時計・通信・FAT) | `python3 tools/test_clip_host.py` |
 | `subtitle_main.c` | **字幕**。`main/stackee_font16.c` と `stackee_draw.c` に本物の `assets/font16.bin` を通し、帯 (240x30) の CRC32 と字形を出す | `python3 tools/test_subtitle_host.py` |
 
 `stub/` は ESP-IDF と TinyUSB の代わり。呼び出しの形だけ合わせた最小のもので、

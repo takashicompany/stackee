@@ -79,6 +79,13 @@ const char *stackee_volume_source(void){return "nvs";}
 const char *stackee_audio_talk_state(void){return "idle";}
 bool stackee_audio_null(void){return false;}
 bool stackee_audio_busy(void){return false;}
+// クリップの要約 (status に混ぜる ,"clips":{…})。
+size_t stackee_audio_clips_summary(char *buf, size_t cap, size_t at){
+    int n = snprintf(buf + at, at < cap ? cap - at : 0,
+                     ",\"clips\":{\"n\":2,\"auto\":1,\"bytes\":64000,\"free\":9000000,"
+                     "\"rev\":3,\"phase\":\"idle\",\"result\":\"ok\",\"fails\":0}");
+    return at + (n > 0 ? (size_t)n : 0);
+}
 bool stackee_http_configured(void){return true;}
 bool stackee_http_has_token(void){return true;}
 // ★ 返答文には日本語と引用符が入る。JSON として壊れないことを見るために

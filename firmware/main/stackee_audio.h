@@ -89,3 +89,15 @@ size_t stackee_audio_look_json(char *buf, size_t cap, size_t at);
 // 実際の送信は audio タスクが会話の状態機械で進める。キーは常に鳴らす。
 // ★ 会話・画像・他の Custom の途中なら audio タスクが黙って捨てる。
 void stackee_audio_custom_key(int n);
+
+// ---------------------------------------------------------------------------
+// クリップ (STK_CLIP、2026-09-30、README §17-2f)
+// ---------------------------------------------------------------------------
+// キーの押下。**入力タスクから呼ぶので待たない** (印を 1 つ置くだけ)。
+// audio タスクが FAT から 1 件読んで鳴らす (通信しない)。
+// ★ 会話・画像・Custom・クリップの途中なら audio タスクが黙って捨てる。
+void stackee_audio_clip_key(void);
+// STK_CLIP_AUTO の押下。自動取得の入り切り (印を置くだけ)。
+void stackee_audio_clip_auto_key(void);
+// status に混ぜる ,"clips":{…} (件数・合計・空き・rev・同期の結末)。錠は取らない。
+size_t stackee_audio_clips_summary(char *buf, size_t cap, size_t at);

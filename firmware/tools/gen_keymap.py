@@ -128,6 +128,21 @@ def _user_custom_entry(n):
 
 USER_CUSTOM_KEYS = tuple(_user_custom_entry(n) for n in range(USER_CUSTOM_COUNT))
 
+# ★ Custom_9 のうしろに足す独自キー (番号を動かさないよう、いつもいちばん後ろ)。
+#   STK_CLIP (2026-09-30、0x7E12): 本体の FAT に取り込んだ「クリップ」
+#   (サーバーが先に合成した音声 + 字幕) を、**通信せずに** 1 件ずつ鳴らす
+#   (README §17-2f)。
+TAIL_CUSTOM_KEYS = (
+    ('STK_CLIP', None,
+     'Clip: 本体に取り込んだクリップ (音声+字幕) を 1 件ずつ鳴らす (通信しない)',
+     'Clip'),
+    # STK_CLIP_AUTO (2026-09-30、0x7E13): クリップの自動取得 (5 分ごとの同期) を
+    # 押すたびに ON / OFF。状態は NVS に残る (既定 ON)。
+    ('STK_CLIP_AUTO', None,
+     'Clip_Auto: クリップの自動取得 (5 分ごとの同期) を押すたびに ON/OFF',
+     'Clip_Auto'),
+)
+
 # Remap が customKeycodes を出すのは先頭 32 個まで (QK_KB_0..31)。
 REMAP_CUSTOM_MAX = 32
 
@@ -676,7 +691,7 @@ def user_custom_first_index(ext_mods):
         raise SystemExit('STK_MT_* が %d 個になり、Custom_0 の並びが %d → %d に'
                          'ずれる。移行を足してから USER_CUSTOM_FIRST_INDEX を変えること'
                          % (len(ext_mods), USER_CUSTOM_FIRST_INDEX, index))
-    if index + len(USER_CUSTOM_KEYS) > REMAP_CUSTOM_MAX:
+    if index + len(USER_CUSTOM_KEYS) + len(TAIL_CUSTOM_KEYS) > REMAP_CUSTOM_MAX:
         raise SystemExit('customKeycodes が %d 個を超え、Remap に出ないキーができる'
                          % REMAP_CUSTOM_MAX)
     return index
@@ -706,7 +721,10 @@ def render_keycodes_h(ext_mods):
     custom_base = user_custom_first_index(ext_mods)
     for index, (name, _kmk, _title, _short) in enumerate(USER_CUSTOM_KEYS):
         lines.append('    %-20s = QK_KB_0 + %d,' % (name, custom_base + index))
-    last = custom_base + len(USER_CUSTOM_KEYS) - 1
+    tail_base = custom_base + len(USER_CUSTOM_KEYS)
+    for index, (name, _kmk, _title, _short) in enumerate(TAIL_CUSTOM_KEYS):
+        lines.append('    %-20s = QK_KB_0 + %d,' % (name, tail_base + index))
+    last = tail_base + len(TAIL_CUSTOM_KEYS) - 1
     lines += [
         '};',
         '',
@@ -787,7 +805,7 @@ def render_via(keymap_module, ext_mods, kle=None):
         })
     # ★ STK_MT_* のうしろ (番号を動かさないため。CUSTOM_KEYS の上の注記)。
     user_custom_first_index(ext_mods)
-    for name, _kmk, title, short in USER_CUSTOM_KEYS:
+    for name, _kmk, title, short in USER_CUSTOM_KEYS + TAIL_CUSTOM_KEYS:
         custom.append({'name': name, 'title': title, 'shortName': short})
 
     return {

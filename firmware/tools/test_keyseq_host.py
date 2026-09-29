@@ -378,7 +378,8 @@ class CustomKeyTest(unittest.TestCase):
                     + 't 100\nmark a\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         self.assertEqual(after(lines, 'a'), ['CUSTOM Custom_0 1',
                                              'CUSTOM Custom_0 0'])
-        for code in (0x7E12, 0x7E1F, OLD_CSTM_0, 0x7E29):
+        # ★ 0x7E12 は 2026-09-30 から STK_CLIP (下の test_the_slot_after_custom_9)。
+        for code in (0x7E14, 0x7E1F, OLD_CSTM_0, 0x7E29):
             lines = run('kc 3 9 0x%04X\n' % code
                         + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
             self.assertEqual(after(lines, 'z'), [], hex(code))
@@ -399,10 +400,18 @@ class CustomKeyTest(unittest.TestCase):
             self.assertEqual(after(lines, 'c'), ['CUSTOM Custom_%d 1' % n,
                                                  'CUSTOM Custom_%d 0' % n], n)
 
-    def test_the_slot_after_custom_9_is_nothing(self):
+    def test_the_slot_after_custom_9_is_the_clip_key(self):
+        """0x7E12 = STK_CLIP (2026-09-30)。独自キーとして届き、HID に出ない。"""
         lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + 10)
                     + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
-        self.assertEqual(after(lines, 'z'), [])
+        self.assertEqual(after(lines, 'z'), ['CUSTOM CLIP 1', 'CUSTOM CLIP 0'])
+        # その次 (0x7E13) は STK_CLIP_AUTO、さらに次 (0x7E14) は何でもない。
+        lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + 11)
+                    + 't 100\nmark y\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        self.assertEqual(after(lines, 'y'), ['CUSTOM CLIP_AUTO 1', 'CUSTOM CLIP_AUTO 0'])
+        lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + 12)
+                    + 't 100\nmark x\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        self.assertEqual(after(lines, 'x'), [])
 
     def test_mic_does_not_overlap_the_other_custom_keys(self):
         # 0x7E00..0x7E07 は今までの独自キーのまま (MIC に食われていない)。

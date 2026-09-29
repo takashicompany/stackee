@@ -44,6 +44,14 @@
 //   watchok <0|1>     外の都合 (OTA など) で回してよいか (既定 1)
 //   watchprint        常時ポーリングの様子 (WATCHINFO …)
 //   audiobusy         AUDIOBUSY <busy> <audio_busy> <uses_audio>
+//   clipon            クリップをつなぐ (偽の FAT。stackee_talk_attach_clip)
+//   cliphave <id> <created> <audio_bytes> [subs]  FAT に置いてあるクリップ
+//                     (subs を書くと字幕 2 ページつき。本文は "本文-<id>")
+//   cfsdelay <ms>     FAT の仕事の時間 (既定 3)
+//   clip <play>       STK_CLIP を押したのと同じ流れ。CLIP <0|1>
+//   clipprint         CLIPPLAY …
+//   clipauto          STK_CLIP_AUTO を押したのと同じ。CLIPAUTO <1|0|-1>
+//   clipforce         settings.toml の STACKEE_CLIP_SYNC = 0 (強制 OFF) にする
 //
 // ★ 通信中の要求を閉じた (打ち切った) ときは HABORT が出る。
 //   録音を始めたときに先に張ろうとすると PREWARM <path> が出る。
@@ -53,6 +61,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "stackee_clipsm.h"
 #include "stackee_talksm.h"
 
 #define RESP_MAX 16
@@ -351,9 +360,153 @@ static const stackee_talk_ops_t OPS = {
     .http_prewarm = ops_http_prewarm,
 };
 
+// ---- クリップ (偽の FAT) ---------------------------------------------------
+static stackee_clip_t g_clip;
+static bool g_clip_on;
+static struct {
+    bool     used;
+    uint32_t file;
+    char     id[48];
+    char     created[40];
+    uint32_t audio;
+    char     meta[1024];
+} g_cfiles[16];
+static stackee_clip_job_t *g_cjob;
+static uint32_t g_cjob_at;
+static bool g_cjob_abort;
+static uint32_t g_cfs_delay = 3;
+
+static uint8_t *ops_http_take(size_t *len) {
+    if (!g_http_busy || g_http_body == NULL || g_http_fail) {
+        return NULL;
+    }
+    uint8_t *b = g_http_body;
+    *len = g_http_len;
+    g_http_body = NULL;
+    g_http_len = 0;
+    g_http_busy = false;
+    return b;
+}
+
+static bool ops_fs_submit(stackee_clip_job_t *job) {
+    if (g_cjob != NULL) {
+        return false;
+    }
+    printf("CFS %d %s\n", job->kind, job->id[0] ? job->id : "-");
+    g_cjob = job;
+    g_cjob_abort = false;
+    g_cjob_at = g_now + g_cfs_delay;
+    return true;
+}
+
+static void ops_fs_abort(void) {
+    if (g_cjob != NULL) {
+        printf("CFSABORT %u\n", (unsigned)g_now);
+        g_cjob_abort = true;
+    }
+}
+
+static void cfs_finish(void) {
+    stackee_clip_job_t *job = g_cjob;
+    int st = STACKEE_CLIP_JOB_OK;
+    size_t n = sizeof(g_cfiles) / sizeof(g_cfiles[0]);
+    switch (job->kind) {
+        case STACKEE_CLIP_JOB_SCAN: {
+            int k = 0;
+            uint32_t next = 1;
+            for (size_t i = 0; i < n; i++) {
+                if (!g_cfiles[i].used || k >= job->cap) {
+                    continue;
+                }
+                stackee_clip_entry_t *e = &job->entries[k++];
+                memset(e, 0, sizeof(*e));
+                snprintf(e->id, sizeof(e->id), "%s", g_cfiles[i].id);
+                snprintf(e->created, sizeof(e->created), "%s", g_cfiles[i].created);
+                e->audio_bytes = g_cfiles[i].audio;
+                e->meta_bytes = (uint32_t)strlen(g_cfiles[i].meta);
+                e->file = g_cfiles[i].file;
+                if (g_cfiles[i].file >= next) {
+                    next = g_cfiles[i].file + 1;
+                }
+            }
+            job->count = k;
+            job->next_file = next;
+            break;
+        }
+        case STACKEE_CLIP_JOB_WRITE:
+            if (g_cjob_abort) {
+                st = STACKEE_CLIP_JOB_ABORTED;
+            } else {
+                for (size_t i = 0; i < n; i++) {
+                    if (!g_cfiles[i].used) {
+                        g_cfiles[i].used = true;
+                        g_cfiles[i].file = job->file;
+                        snprintf(g_cfiles[i].id, sizeof(g_cfiles[i].id), "%s", job->id);
+                        g_cfiles[i].audio = (uint32_t)job->pcm_len;
+                        snprintf(g_cfiles[i].meta, sizeof(g_cfiles[i].meta), "%s",
+                                 job->meta);
+                        break;
+                    }
+                }
+            }
+            free(job->meta);
+            free(job->pcm);
+            job->meta = NULL;
+            job->pcm = NULL;
+            break;
+        case STACKEE_CLIP_JOB_REMOVE:
+        case STACKEE_CLIP_JOB_CLEAR:
+            for (size_t i = 0; i < n; i++) {
+                if (g_cfiles[i].used && (job->kind == STACKEE_CLIP_JOB_CLEAR ||
+                                         g_cfiles[i].file == job->file)) {
+                    g_cfiles[i].used = false;
+                }
+            }
+            break;
+        case STACKEE_CLIP_JOB_LOAD: {
+            st = STACKEE_CLIP_JOB_FAIL;
+            for (size_t i = 0; i < n; i++) {
+                if (g_cfiles[i].used && g_cfiles[i].file == job->file) {
+                    size_t ml = strlen(g_cfiles[i].meta);
+                    job->meta_out = malloc(ml + 1);
+                    memcpy(job->meta_out, g_cfiles[i].meta, ml + 1);
+                    job->meta_out_len = ml;
+                    job->pcm_out = g_cfiles[i].audio ? calloc(g_cfiles[i].audio, 1)
+                                                     : NULL;
+                    job->pcm_out_len = g_cfiles[i].audio;
+                    st = STACKEE_CLIP_JOB_OK;
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    job->space_valid = true;
+    job->free_bytes = 8u * 1024u * 1024u;
+    job->cluster = 2048;
+    g_cjob = NULL;
+    printf("CFSDONE %d %d\n", job->kind, st);
+    atomic_store(&job->state, st);
+}
+
+static const stackee_clip_ops_t CLIP_OPS = {
+    .now_ms = ops_now,
+    .http_start = ops_http_start,
+    .http_poll = ops_http_poll,
+    .http_close = ops_http_close,
+    .http_take = ops_http_take,
+    .fs_submit = ops_fs_submit,
+    .fs_abort = ops_fs_abort,
+    .log = ops_log,
+};
+
 static int g_last_state = -1;
 
 static void tick(void) {
+    if (g_cjob != NULL && g_now >= g_cjob_at) {
+        cfs_finish();
+    }
     if (g_ack_running && g_now >= g_ack_until) {
         g_ack_running = false;
         printf("ACK done\n");
@@ -631,6 +784,60 @@ int main(void) {
                    (int)(g_talk.watch_next - g_now),
                    stackee_talk_busy(&g_talk) ? 1 : 0,
                    g_talk.watch_error[0] ? g_talk.watch_error : "-");
+        } else if (strcmp(line, "clipon") == 0) {
+            stackee_clip_init(&g_clip, &CLIP_OPS, "/clips");
+            stackee_talk_attach_clip(&g_talk, &g_clip);
+            g_clip_on = true;
+        } else if (strcmp(line, "cfsdelay") == 0) {
+            g_cfs_delay = arg ? (uint32_t)atol(arg) : 0;
+        } else if (strcmp(line, "cliphave") == 0) {
+            char id[48] = "", created[40] = "", subs[8] = "";
+            unsigned audio = 0;
+            sscanf(arg ? arg : "", "%47s %39s %u %7s", id, created, &audio, subs);
+            for (size_t i = 0; i < sizeof(g_cfiles) / sizeof(g_cfiles[0]); i++) {
+                if (!g_cfiles[i].used) {
+                    g_cfiles[i].used = true;
+                    g_cfiles[i].file = (uint32_t)i + 1;
+                    snprintf(g_cfiles[i].id, sizeof(g_cfiles[i].id), "%s", id);
+                    snprintf(g_cfiles[i].created, sizeof(g_cfiles[i].created), "%s",
+                             created);
+                    g_cfiles[i].audio = audio;
+                    snprintf(g_cfiles[i].meta, sizeof(g_cfiles[i].meta),
+                             "{\"id\":\"%s\",\"created\":%s,\"audio_bytes\":%u,"
+                             "\"sample_rate\":16000,\"channels\":1,\"sample_width\":2,"
+                             "\"reply\":\"本文-%s\"%s}",
+                             id, created, audio, id,
+                             subs[0] ? ",\"subtitles\":\"0\\t一行目\\n1000\\t二行目\\n\"" : "");
+                    break;
+                }
+            }
+        } else if (strcmp(line, "clip") == 0) {
+            bool play = arg ? atoi(arg) != 0 : true;
+            printf("CLIP %d\n", stackee_talk_clip(&g_talk, play) ? 1 : 0);
+        } else if (strcmp(line, "clipauto") == 0) {
+            printf("CLIPAUTO %d\n", stackee_talk_clip_auto(&g_talk));
+        } else if (strcmp(line, "clipforce") == 0) {
+            stackee_clip_auto_init(&g_clip, g_clip.auto_on, true);
+        } else if (strcmp(line, "clipprint") == 0) {
+            printf("CLIPPLAY active=%d final=%s id=%s pages=%d audio=%u played=%d "
+                   "count=%u done=%u empty=%u busy=%u errors=%u unplayed=%u "
+                   "phase=%s n=%d notice=%d reply=%s error=%s flags=",
+                   g_talk.clip_active ? 1 : 0,
+                   g_talk.clip_final ? g_talk.clip_final : "-",
+                   g_talk.clip_id[0] ? g_talk.clip_id : "-", g_talk.clip_pages,
+                   (unsigned)g_talk.clip_audio_bytes, g_talk.clip_played ? 1 : 0,
+                   (unsigned)g_talk.clip_count, (unsigned)g_talk.clip_done,
+                   (unsigned)g_talk.clip_empty, (unsigned)g_talk.clip_busy,
+                   (unsigned)g_talk.clip_errors, (unsigned)g_talk.clip_unplayed,
+                   g_clip_on ? stackee_clip_phase_names[g_clip.phase] : "-",
+                   g_clip_on ? g_clip.count : -1, g_talk.notice_on ? 1 : 0,
+                   g_talk.reply[0] ? g_talk.reply : "-",
+                   g_talk.clip_error[0] ? g_talk.clip_error : "-");
+            for (int i = 0; g_clip_on && i < g_clip.count; i++) {
+                printf("%s%s%s", i ? "," : "", g_clip.local[i].id,
+                       g_clip.local[i].played ? "*" : "");
+            }
+            printf("\n");
         } else if (strcmp(line, "audiobusy") == 0) {
             printf("AUDIOBUSY %d %d %d\n", stackee_talk_busy(&g_talk) ? 1 : 0,
                    stackee_talk_audio_busy(&g_talk) ? 1 : 0,

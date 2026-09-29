@@ -783,6 +783,24 @@ const uint8_t *stackee_http_body(size_t *len) {
     return h.buf;
 }
 
+uint8_t *stackee_http_take(size_t *len) {
+    if (!lock()) {
+        return NULL;
+    }
+    uint8_t *buf = NULL;
+    if (atomic_load(&h.state) == STACKEE_HTTP_DONE && h.buf != NULL) {
+        buf = h.buf;
+        if (len) { *len = atomic_load(&h.received); }
+        // ★ 受信バッファの持ち主を呼び手に移す。通信側は空に戻る
+        //   (release_buffer_locked は h.buf が NULL なので何も返さない)。
+        h.buf = NULL;
+        h.buf_cap = 0;
+        release_buffer_locked();
+    }
+    unlock();
+    return buf;
+}
+
 void stackee_http_close(void) {
     if (!lock()) {
         return;

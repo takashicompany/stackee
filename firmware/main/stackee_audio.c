@@ -20,11 +20,14 @@
 
 #include "stackee_assets.h"
 #include "stackee_camera.h"
+#include "stackee_clipfs.h"
+#include "stackee_clipsm.h"
 #include "stackee_console.h"
 #include "stackee_codec.h"
 #include "stackee_http.h"
 #include "stackee_input.h"
 #include "stackee_jsonlite.h"
+#include "stackee_nvs.h"
 #include "stackee_ota.h"
 #include "stackee_settings.h"
 #include "stackee_talksm.h"
@@ -151,6 +154,14 @@ static struct {
     // console が同時に置いても混ざらないようにする。
     _Atomic int  custom_req;
     _Atomic int  custom_result;       // 0 未処理 / 1 始めた / -1 断った
+    // クリップ (入力タスク / console → audio タスク)。0 = なし / 1 = 鳴らす /
+    // 2 = 鳴らさない (clips.play play=0)。
+    // ★ 同期と目録 (stackee_clip_t、約 13 KB) は PSRAM。触るのは talk の錠の中だけ。
+    _Atomic int  clip_req;
+    _Atomic int  clip_result;         // 0 未処理 / 1 始めた / -1 断った
+    _Atomic bool clip_auto_req;       // STK_CLIP_AUTO (入り切り)
+    stackee_clip_t *clip;
+    uint32_t last_key_ms;             // 最後に打鍵を見た時刻 (NVS へ書く間合い)
     uint32_t stat_records, stat_plays;
     uint32_t last_key_events;
 } a;
@@ -845,8 +856,38 @@ static bool ops_watch_ok(void) {
     return !stackee_ota_busy() && !stackee_camera_busy() &&
            !(st == 1 || st == 2 || st == 4) &&
            atomic_load(&a.inject_req) < 0 && atomic_load(&a.look_req) == 0 &&
-           atomic_load(&a.custom_req) == 0;
+           atomic_load(&a.custom_req) == 0 && atomic_load(&a.clip_req) == 0;
 }
+
+// ---- クリップ (2026-09-30) -------------------------------------------------
+static uint8_t *ops_http_take(size_t *len) {
+    return stackee_http_take(len);
+}
+
+static void ops_clip_log(const char *line) {
+    ESP_LOGI(TAG, "%s", line);
+}
+
+static void ops_clip_save_auto(bool on) {
+    stackee_nvs_save_clip_auto(on ? 1 : 0);
+}
+
+static uint32_t ops_clip_idle_ms(void) {
+    return ops_now() - a.last_key_ms;
+}
+
+static const stackee_clip_ops_t CLIP_OPS = {
+    .now_ms = ops_now,
+    .http_start = ops_http_start,
+    .http_poll = ops_http_poll,
+    .http_close = ops_http_close,
+    .http_take = ops_http_take,
+    .fs_submit = stackee_clipfs_submit,
+    .fs_abort = stackee_clipfs_abort,
+    .log = ops_clip_log,
+    .save_auto = ops_clip_save_auto,
+    .idle_ms = ops_clip_idle_ms,
+};
 
 static const stackee_talk_ops_t TALK_OPS = {
     .now_ms = ops_now,
@@ -1107,6 +1148,26 @@ static void audio_task(void *unused) {
                 }
                 atomic_store(&a.custom_result, ok ? 1 : -1);
             }
+            if (atomic_exchange(&a.clip_auto_req, false)) {
+                stackee_talk_clip_auto(a.talk);     // 帯に ON / OFF (音なし)
+            }
+            int clip = atomic_exchange(&a.clip_req, 0);
+            if (clip > 0) {
+                // ★ Custom と同じ見方: 音が鳴っている・STK_TALK が押されている・
+                //   ほかの依頼が載っている・マイクの自己診断中なら黙って捨てる。
+                int st = atomic_load(&a.selftest_req);
+                bool ok = false;
+                if (a.play_active || atomic_load(&a.talk_pressed) ||
+                    atomic_load(&a.inject_req) >= 0 ||
+                    atomic_load(&a.look_req) != 0 ||
+                    atomic_load(&a.custom_req) != 0 ||
+                    st == 1 || st == 2 || st == 4) {
+                    a.talk->clip_busy++;
+                } else {
+                    ok = stackee_talk_clip(a.talk, clip == 1);
+                }
+                atomic_store(&a.clip_result, ok ? 1 : -1);
+            }
             stackee_talk_set_pressed(a.talk, atomic_load(&a.talk_pressed));
             stackee_talk_step(a.talk);
             talk_unlock();
@@ -1117,6 +1178,7 @@ static void audio_task(void *unused) {
         stackee_input_stats(&input);
         if (input.key_events != a.last_key_events || input.keys_down > 0) {
             a.last_key_events = input.key_events;
+            a.last_key_ms = ops_now();
             stackee_volume_note_input();
         }
         stackee_volume_task_step(stackee_audio_busy());
@@ -1416,6 +1478,218 @@ static size_t reply_inbox_enable(long id, const char *line, char *buf, size_t ca
     return at;
 }
 
+// ---------------------------------------------------------------------------
+// クリップ (clips.*)
+// ---------------------------------------------------------------------------
+static const char *const CLIP_JOB_NAMES[] = {"", "scan", "write", "remove", "load", "clear"};
+
+// clips.status — 件数・合計・FAT の空き・rev・最後の同期・ダウンロード中の id・
+// 失敗回数・各クリップ (id / created / audio_bytes / played)・直近の再生。
+static size_t reply_clips_status(long id, const char *line, char *buf, size_t cap) {
+    if (a.clip == NULL) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"noclip\"}", id);
+    }
+    // 各クリップは from 番から入るだけ (応答の枠は 1.6 KB)。listed が並べた数。
+    long from = stackee_console_int(line, "from", 0);
+    if (!talk_lock()) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    const stackee_clip_t *c = a.clip;
+    const stackee_talk_t *t = a.talk;
+    stackee_clipfs_stats_t fs;
+    stackee_clipfs_stats(&fs);
+    stackee_http_stats_t http;
+    stackee_http_stats(&http);
+    uint32_t now = ops_now();
+    int32_t next_in = (int32_t)(c->next_at - now);
+    size_t at = put(buf, cap, 0,
+                    "{\"id\":%ld,\"ok\":1,\"count\":%d,\"bytes\":%llu,"
+                    "\"free\":%llu,\"free_valid\":%d,\"cluster\":%lu,"
+                    "\"reserve\":%lu,\"scanned\":%d,\"sync_enabled\":%d,"
+                    "\"auto\":%d,\"auto_forced_off\":%d,\"auto_save_pending\":%d,"
+                    "\"phase\":\"%s\",\"rev\":%ld,\"rev_done\":%ld,"
+                    "\"last_sync_ago_ms\":%ld,\"result\":\"%s\",\"status\":%d,"
+                    "\"next_in_ms\":%ld,\"downloading\":\"",
+                    id, c->count, (unsigned long long)c->total_audio,
+                    (unsigned long long)c->free_bytes, c->space_valid ? 1 : 0,
+                    (unsigned long)c->cluster,
+                    (unsigned long)STACKEE_CLIP_RESERVE_BYTES, c->scanned ? 1 : 0,
+                    c->list_path[0] ? 1 : 0, c->auto_on ? 1 : 0,
+                    c->auto_forced_off ? 1 : 0, c->auto_dirty ? 1 : 0,
+                    stackee_clip_phase_names[c->phase],
+                    c->rev_seen, c->rev_done_valid ? c->rev_done : -1L,
+                    c->last_sync_at ? (long)(now - c->last_sync_at) : -1L,
+                    c->last_result, c->last_status,
+                    (long)(next_in > 0 ? next_in : 0));
+    at = put_json_str(buf, cap, at, c->cur_id);
+    at = put(buf, cap, at,
+             "\",\"syncs\":%lu,\"ok_n\":%lu,\"same\":%lu,\"sync_fails\":%lu,"
+             "\"aborts\":%lu,\"downloads\":%lu,\"fails\":%lu,\"removed\":%lu,"
+             "\"evicted\":%lu,\"skipped_space\":%lu,\"skipped_bad\":%lu,"
+             "\"loads\":%lu,\"load_fails\":%lu,\"error\":\"",
+             (unsigned long)c->syncs, (unsigned long)c->sync_ok,
+             (unsigned long)c->sync_same, (unsigned long)c->sync_fail,
+             (unsigned long)c->aborts, (unsigned long)c->downloads,
+             (unsigned long)c->fails, (unsigned long)c->removed,
+             (unsigned long)c->evicted, (unsigned long)c->skipped_space,
+             (unsigned long)c->skipped_bad, (unsigned long)c->loads,
+             (unsigned long)c->load_fails);
+    at = put_json_str(buf, cap, at, c->last_error);
+    at = put(buf, cap, at,
+             "\",\"fs\":{\"busy\":\"%s\",\"jobs\":%lu,\"writes\":%lu,"
+             "\"aborts\":%lu,\"fails\":%lu,\"slices\":%lu,\"bytes\":%llu,"
+             "\"max_slice_us\":%lu,\"last_ms\":%lu,\"deferred\":%lu,\"gave_up\":%lu,"
+             "\"cleanup_pending\":%d,"
+             "\"error\":\"",
+             CLIP_JOB_NAMES[fs.busy_kind >= 0 && fs.busy_kind <= 5 ? fs.busy_kind : 0],
+             (unsigned long)fs.jobs, (unsigned long)fs.writes,
+             (unsigned long)fs.aborts, (unsigned long)fs.fails,
+             (unsigned long)fs.slices, (unsigned long long)fs.bytes,
+             (unsigned long)fs.max_slice_us, (unsigned long)fs.last_ms,
+             (unsigned long)fs.deferred, (unsigned long)fs.gave_up,
+             fs.cleanup_pending ? 1 : 0);
+    at = put_json_str(buf, cap, at, fs.last_error);
+    // 直近の再生 (キー / clips.play)。http_requests は通信の累計 (再生の前後で
+    // 比べて 0 回を確かめる。受け箱の常時ポーリングを止めてから)。
+    at = put(buf, cap, at,
+             "\"},\"play\":{\"active\":%d,\"state\":\"%s\",\"count\":%lu,"
+             "\"done\":%lu,\"empty\":%lu,\"busy\":%lu,\"errors\":%lu,"
+             "\"unplayed\":%lu,\"final\":\"%s\",\"clip\":\"",
+             t->clip_active ? 1 : 0, stackee_talk_state_names[t->state],
+             (unsigned long)t->clip_count, (unsigned long)t->clip_done,
+             (unsigned long)t->clip_empty, (unsigned long)t->clip_busy,
+             (unsigned long)t->clip_errors, (unsigned long)t->clip_unplayed,
+             t->clip_final ? t->clip_final : "");
+    at = put_json_str(buf, cap, at, t->clip_id);
+    at = put(buf, cap, at,
+             "\",\"pages\":%d,\"audio_bytes\":%lu,\"load_ms\":%lu,"
+             "\"end_ms\":%lu,\"play\":%d,\"played\":%d,\"error\":\"",
+             t->clip_pages, (unsigned long)t->clip_audio_bytes,
+             (unsigned long)t->clip_load_ms, (unsigned long)t->clip_end_ms,
+             t->clip_play ? 1 : 0, t->clip_played ? 1 : 0);
+    at = put_json_str(buf, cap, at, t->clip_error);
+    at = put(buf, cap, at,
+             "\"},\"http_requests\":%lu,\"null\":%s,\"next\":%d,\"clips\":[",
+             (unsigned long)http.requests, atomic_load(&a.null_out) ? "true" : "false",
+             stackee_clip_pick(c));
+    // ★ 1 件は [番号, id, created, audio_bytes, played] の配列 (枠が 1.6 KB
+    //   しかないので鍵の名前を省く)。入り切らなければ listed で止め、残りは
+    //   {"from":<番号>} で続きを聞く。
+    int listed = 0;
+    for (int i = (from > 0) ? (int)from : 0; i < c->count && at + 120 < cap; i++) {
+        const stackee_clip_entry_t *e = &c->local[i];
+        at = put(buf, cap, at, "%s[%d,\"%s\",\"", listed ? "," : "", i, e->id);
+        at = put_json_str(buf, cap, at, e->created);
+        at = put(buf, cap, at, "\",%lu,%d]", (unsigned long)e->audio_bytes,
+                 e->played ? 1 : 0);
+        listed++;
+    }
+    at = put(buf, cap, at, "],\"listed\":%d}", listed);
+    talk_unlock();
+    return at;
+}
+
+// clips.play {"play":0|1} — キーと同じ流れ。**非同期** (すぐ返る。進み具合は
+// clips.status の play)。★ play の既定は 0 = 読み終えたところで止め、鳴らさない
+// (字幕も出さない)。1 件も無ければ帯に「クリップがありません」(音なし)。
+static size_t reply_clips_play(long id, const char *line, char *buf, size_t cap) {
+    if (a.clip == NULL) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"noclip\"}", id);
+    }
+    bool play = stackee_console_bool(line, "play", false);
+    int want = play ? 1 : 2;
+    int expected = 0;
+    atomic_store(&a.clip_result, 0);
+    if (!atomic_compare_exchange_strong(&a.clip_req, &expected, want)) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    for (int i = 0; i < 200 && atomic_load(&a.clip_result) == 0; i++) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    int result = atomic_load(&a.clip_result);
+    if (result == 0) {
+        atomic_compare_exchange_strong(&a.clip_req, &want, 0);
+    }
+    return put(buf, cap, 0,
+               "{\"id\":%ld,\"ok\":%d,\"play\":%d,\"started\":%d,\"seq\":%lu}",
+               id, result == 1 ? 1 : 0, play ? 1 : 0, result == 1 ? 1 : 0,
+               (unsigned long)a.talk->clip_count);
+}
+
+// clips.sync — 次の周で (暇なら) 同期する。rev が同じでも一覧と突き合わせる。
+static size_t reply_clips_sync(long id, char *buf, size_t cap) {
+    if (a.clip == NULL) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"noclip\"}", id);
+    }
+    if (!talk_lock()) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    stackee_clip_sync_now(a.clip);
+    size_t at = put(buf, cap, 0,
+                    "{\"id\":%ld,\"ok\":1,\"phase\":\"%s\",\"sync_enabled\":%d,"
+                    "\"syncs\":%lu}",
+                    id, stackee_clip_phase_names[a.clip->phase],
+                    a.clip->list_path[0] ? 1 : 0, (unsigned long)a.clip->syncs);
+    talk_unlock();
+    return at;
+}
+
+// clips.clear — 全部消す (検証用)。同期中なら打ち切ってから。
+// clips.auto {"on":0|1} — 自動取得 (5 分ごとの同期) の入り切り。キーと同じく
+// NVS に残る (打鍵が 2 秒止まってから書く)。帯には出さない。on を省くと読むだけ。
+static size_t reply_clips_auto(long id, const char *line, char *buf, size_t cap) {
+    if (a.clip == NULL) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"noclip\"}", id);
+    }
+    if (!talk_lock()) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    long on = stackee_console_int(line, "on", -1);
+    bool ok = true;
+    if (on == 0 || on == 1) {
+        ok = stackee_clip_set_auto(a.clip, on == 1);
+    }
+    size_t at = put(buf, cap, 0,
+                    "{\"id\":%ld,\"ok\":%d,\"auto\":%d,\"forced_off\":%d,"
+                    "\"active\":%d,\"save_pending\":%d,\"phase\":\"%s\"}",
+                    id, ok ? 1 : 0, a.clip->auto_on ? 1 : 0,
+                    a.clip->auto_forced_off ? 1 : 0,
+                    stackee_clip_auto_active(a.clip) ? 1 : 0,
+                    a.clip->auto_dirty ? 1 : 0, stackee_clip_phase_names[a.clip->phase]);
+    talk_unlock();
+    return at;
+}
+
+static size_t reply_clips_clear(long id, char *buf, size_t cap) {
+    if (a.clip == NULL) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"noclip\"}", id);
+    }
+    if (!talk_lock()) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+    }
+    bool ok = !a.talk->clip_active && stackee_clip_clear(a.clip);
+    size_t at = put(buf, cap, 0, "{\"id\":%ld,\"ok\":%d,\"phase\":\"%s\"}",
+                    id, ok ? 1 : 0, stackee_clip_phase_names[a.clip->phase]);
+    talk_unlock();
+    return at;
+}
+
+size_t stackee_audio_clips_summary(char *buf, size_t cap, size_t at) {
+    // ★ status から。錠は取らない (数字を読むだけ。1 つ古い値でもよい)。
+    const stackee_clip_t *c = a.clip;
+    if (!a.ready || c == NULL) {
+        return put(buf, cap, at, ",\"clips\":null");
+    }
+    return put(buf, cap, at,
+               ",\"clips\":{\"n\":%d,\"auto\":%d,\"bytes\":%llu,\"free\":%llu,"
+               "\"rev\":%ld,\"phase\":\"%s\",\"result\":\"%s\",\"fails\":%lu}",
+               c->count, stackee_clip_auto_active(c) ? 1 : 0,
+               (unsigned long long)c->total_audio,
+               (unsigned long long)c->free_bytes, c->rev_seen,
+               stackee_clip_phase_names[c->phase], c->last_result,
+               (unsigned long)(c->fails + c->sync_fail));
+}
+
 static size_t audio_console(const char *cmd, const char *line, long id,
                             char *buf, size_t cap) {
     if (!a.ready) {
@@ -1554,6 +1828,21 @@ static size_t audio_console(const char *cmd, const char *line, long id,
     if (strcmp(cmd, "key.custom_status") == 0) {
         return reply_custom_status(id, buf, cap);
     }
+    if (strcmp(cmd, "clips.status") == 0) {
+        return reply_clips_status(id, line, buf, cap);
+    }
+    if (strcmp(cmd, "clips.play") == 0) {
+        return reply_clips_play(id, line, buf, cap);
+    }
+    if (strcmp(cmd, "clips.sync") == 0) {
+        return reply_clips_sync(id, buf, cap);
+    }
+    if (strcmp(cmd, "clips.clear") == 0) {
+        return reply_clips_clear(id, buf, cap);
+    }
+    if (strcmp(cmd, "clips.auto") == 0) {
+        return reply_clips_auto(id, line, buf, cap);
+    }
     return 0;
 }
 
@@ -1566,6 +1855,7 @@ esp_err_t stackee_audio_start(const char *post_path) {
     atomic_store(&a.inject_req, -1);
     atomic_store(&a.look_req, 0);
     atomic_store(&a.custom_req, 0);
+    atomic_store(&a.clip_req, 0);
     a.play_ack = -1;
     a.talk_lock = xSemaphoreCreateMutex();
     if (a.talk_lock == NULL) {
@@ -1602,6 +1892,31 @@ esp_err_t stackee_audio_start(const char *post_path) {
     //   settings.toml に STACKEE_INBOX_WATCH = 0 と書けば止まる (逃げ道)。
     stackee_talk_watch_enable(
         a.talk, stackee_settings_int("STACKEE_INBOX_WATCH", 1) != 0, true);
+    // ★ クリップ (2026-09-30)。同期と目録は PSRAM (約 13 KB)。
+    //   送り先は STACKEE_TALK_URL の末尾 "/talk" を "/clips" にしたもの。
+    //   settings.toml に STACKEE_CLIP_SYNC = 0 と書けば同期しない (逃げ道。
+    //   FAT に置いてあるものはキーで鳴らせる)。
+    a.clip = heap_caps_calloc(1, sizeof(*a.clip), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (a.clip == NULL) {
+        a.clip = heap_caps_calloc(1, sizeof(*a.clip), MALLOC_CAP_8BIT);
+    }
+    if (a.clip != NULL) {
+        char clips_path[STACKEE_CLIP_PATH_MAX];
+        if (!stackee_talk_sibling_path(a.talk->path, "clips", clips_path,
+                                       sizeof(clips_path))) {
+            clips_path[0] = '\0';
+        }
+        stackee_clip_init(a.clip, &CLIP_OPS, clips_path);
+        // ★ 自動取得の入り切りは NVS (無ければ ON)。settings.toml の
+        //   STACKEE_CLIP_SYNC = 0 は強制 OFF (キーでは入らない。clips.sync は動く)。
+        uint8_t saved = 1;
+        bool have = stackee_nvs_load_clip_auto(&saved);
+        bool forced = stackee_settings_int("STACKEE_CLIP_SYNC", 1) == 0;
+        stackee_clip_auto_init(a.clip, !have || saved != 0, forced);
+        stackee_talk_attach_clip(a.talk, a.clip);
+        ESP_LOGI(TAG, "クリップ: %s / 自動取得 %s%s", clips_path[0] ? clips_path : "(URL なし)",
+                 (!have || saved != 0) ? "ON" : "OFF", forced ? " (設定で強制 OFF)" : "");
+    }
     ESP_LOGI(TAG, "会話の切り捨て: 最短 %lu ms / 声の RMS %lu x %lu 窓",
              (unsigned long)a.talk->min_ms, (unsigned long)a.talk->voice_rms,
              (unsigned long)a.talk->voice_windows);
@@ -1714,6 +2029,25 @@ void stackee_audio_custom_key(int n) {
 }
 
 // ---------------------------------------------------------------------------
+// クリップ (STK_CLIP、2026-09-30)
+// ---------------------------------------------------------------------------
+void stackee_audio_clip_auto_key(void) {
+    if (!a.ready || a.clip == NULL) {
+        return;
+    }
+    atomic_store(&a.clip_auto_req, true);   // 印を置くだけ
+}
+
+void stackee_audio_clip_key(void) {
+    if (!a.ready || a.clip == NULL) {
+        return;
+    }
+    // ★ 印を置くだけ (入力タスクを待たせない)。載っていれば捨てる。
+    int expected = 0;
+    atomic_compare_exchange_strong(&a.clip_req, &expected, 1);
+}
+
+// ---------------------------------------------------------------------------
 // 画像を見せる (POST /look、2026-09-26)
 // ---------------------------------------------------------------------------
 int stackee_audio_look_reserve(void) {
@@ -1730,7 +2064,7 @@ int stackee_audio_look_reserve(void) {
     //   マイクの自己診断中、のどれかなら撮らない。
     if (a.play_active || atomic_load(&a.talk_pressed) ||
         atomic_load(&a.inject_req) >= 0 || atomic_load(&a.look_req) != 0 ||
-        atomic_load(&a.custom_req) != 0 ||
+        atomic_load(&a.custom_req) != 0 || atomic_load(&a.clip_req) != 0 ||
         st == 1 || st == 2 || st == 4) {
         r = STACKEE_TALK_LOOK_BUSY;
     } else {

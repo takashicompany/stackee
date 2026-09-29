@@ -2,14 +2,17 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "stackee_clipsm.h"
 #include "stackee_jsonlite.h"
 
 const char *const stackee_talk_state_names[STACKEE_TALK_STATES] = {
     "idle", "recording", "upload", "poll_wait", "poll", "subs", "audio",
     "play_wait", "playing",
     "inbox_seq", "key", "inbox_wait", "inbox", "say_text",
+    "clip_load",
 };
 
 const char *const stackee_talk_custom_mode_names[STACKEE_TALK_CUSTOM_MODES] = {
@@ -274,7 +277,10 @@ static void face(stackee_talk_t *t) {
     bool recording = (t->state == STACKEE_TALK_RECORDING);
     bool speaking = (t->state == STACKEE_TALK_PLAYING) ||
                     (t->ops->ack_active != NULL && t->ops->ack_active());
-    bool busy = (t->state != STACKEE_TALK_IDLE) && !recording && !speaking;
+    // ★ クリップを FAT から読んでいる間 (1 秒未満) は考え中の顔にしない
+    //   (通信していないので「考えています」は嘘。ちらつきも避ける)。
+    bool busy = (t->state != STACKEE_TALK_IDLE) && !recording && !speaking &&
+                t->state != STACKEE_TALK_CLIP_LOAD;
     t->ops->face(recording, busy, speaking);
 }
 
@@ -292,6 +298,11 @@ static void cleanup(stackee_talk_t *t) {
     }
     t->audio = NULL;
     t->audio_len = 0;
+    // クリップの読み込み結果 (t->audio はここを指していた)。
+    free(t->clip_pcm);
+    t->clip_pcm = NULL;
+    free(t->clip_meta);
+    t->clip_meta = NULL;
     // 終わり方によらず帯は消す (失敗・中断・鳴り終わり)。
     subtitle_clear(t);
     if (t->samples != NULL) {
@@ -337,7 +348,13 @@ static void look_failed(stackee_talk_t *t, const char *result) {
     }
 }
 
+static void clip_fail(stackee_talk_t *t, const char *why);
+
 static void fail(stackee_talk_t *t, const char *why) {
+    if (t->clip_active) {
+        clip_fail(t, why);          // 「会話エラー」ではなく帯に短く出す
+        return;
+    }
     if (t->watch_say) {
         // ★ 常時ポーリングで受けた発話の失敗。ユーザーが頼んだものではない
         //   ので「会話エラー」は出さず、ログと inbox.status にだけ残して
@@ -417,6 +434,15 @@ void stackee_talk_set_pressed(stackee_talk_t *t, bool pressed) {
 // ---------------------------------------------------------------------------
 static void watch_abort(stackee_talk_t *t, bool count);
 
+// ユーザーの操作 (会話・カメラ・Custom・talk.inject・クリップ) が来た。
+// 受け箱の待ちとクリップの同期を打ち切って通信 (と FAT) を空ける。
+static void user_abort(stackee_talk_t *t) {
+    watch_abort(t, true);
+    if (t->clip != NULL) {
+        stackee_clip_abort(t->clip);
+    }
+}
+
 // 接続が無ければ先に張る (返事は捨てる短い GET)。受け箱の URL が作れる
 // ときだけ (中継が古くても 404 が返るだけで、TLS は張れる)。
 static void prewarm(stackee_talk_t *t) {
@@ -463,7 +489,7 @@ static bool start_recording(stackee_talk_t *t) {
     // ★ 録音を始めてから (押下 → 録音開始を 1 µs も遅らせない)、受け箱の
     //   待ちを打ち切り、録音の数秒のあいだに接続を張っておく。離したあとの
     //   POST が TLS の握手 (実機で約 4.5 秒) を待たずに済む。
-    watch_abort(t, true);
+    user_abort(t);
     prewarm(t);
     return true;
 }
@@ -1553,10 +1579,27 @@ static void watch_step(stackee_talk_t *t) {
     if ((int32_t)(now(t) - t->watch_next) < 0) {
         return;
     }
+    // ★ クリップの同期が通信を使いたい (5 分ごと / clips.sync) なら譲る。
+    //   同期は受け箱と同じ通信タスク・同じ接続を使い、直列に回す。
+    //   待ちの要求 (最大 25 秒) が返ってきたところで、次を撃たずに渡す。
+    if (t->clip != NULL && stackee_clip_wants_net(t->clip)) {
+        return;
+    }
     if (t->watch_phase == STACKEE_TALK_WATCH_SLEEP) {
         t->watch_phase = STACKEE_TALK_WATCH_WAIT;   // 休み明け
     }
     watch_start(t);
+}
+
+// クリップの同期を回してよいか (暇で、通信を使ってよい)。
+// ★ 受け箱の待ちを持っている間は撃たない (返ってくるのを待つ。打ち切ると
+//   接続を捨てて握手からやり直しになる)。
+static bool clip_can_sync(stackee_talk_t *t) {
+    return t->state == STACKEE_TALK_IDLE && !t->look_reserved && !t->pressed &&
+           !t->custom_active && !t->clip_active && !t->watch_http &&
+           !t->watch_say && !t->ops->ack_active() && !t->ops->play_active() &&
+           (t->ops->watch_ok == NULL || t->ops->watch_ok()) &&
+           t->ops->net_ready();
 }
 
 // ---------------------------------------------------------------------------
@@ -1668,6 +1711,9 @@ static void log_turn_timing(stackee_talk_t *t, bool played) {
           (unsigned long)t->last_rec_ms, t->look ? 1 : 0, played ? 1 : 0);
 }
 
+static void clip_finish(stackee_talk_t *t, bool played);
+static void clip_load_step(stackee_talk_t *t);
+
 static void talk_step_inner(stackee_talk_t *t) {
     bool rising = t->pressed && !t->was_pressed;
     t->was_pressed = t->pressed;
@@ -1743,6 +1789,11 @@ static void talk_step_inner(stackee_talk_t *t) {
             return;
 
         case STACKEE_TALK_PLAY_WAIT:
+            // ★ クリップの play=0 (検証) は、FAT から読み終えたここで止める。
+            if (t->clip_active && !t->clip_play) {
+                clip_finish(t, false);
+                return;
+            }
             // ★ 受け箱の発話で play=0 (検証) なら、PCM を受け取り終えた
             //   ここで止めて次を聞きに行く。音は 1 つも出さない。
             if ((t->inbox_loop || t->watch_say) && !t->say_play) {
@@ -1757,7 +1808,7 @@ static void talk_step_inner(stackee_talk_t *t) {
             //   いる (audio_samples が数えてある) ので、鳴らす直前まで
             //   全部の段を通ったことになる。音は 1 つも出さない。
             //   Custom の prompt 方式の play=0 も同じ (/look と同じ後半)。
-            if (!t->inbox_loop && !t->watch_say &&
+            if (!t->inbox_loop && !t->watch_say && !t->clip_active &&
                 ((t->look && !t->look_play) ||
                                    (t->custom && !t->custom_play))) {
                 if (t->audio == NULL || t->audio_samples <= 0) {
@@ -1801,6 +1852,14 @@ static void talk_step_inner(stackee_talk_t *t) {
                 //   字幕だけが音より先に出てしまう)。playing に入った時刻が
                 //   そのまま play_begin の時刻なので、引き算だけで出る。
                 show_page_at(t, since_ms(t, t->since));
+                return;
+            }
+            if (t->clip_active) {
+                if (t->ops->play_failed()) {
+                    fail(t, "音声再生またはマイク復帰に失敗しました");
+                    return;
+                }
+                clip_finish(t, true);
                 return;
             }
             // 受け箱の発話は鳴り終わったら次を聞きに行く (idle には戻らない)。
@@ -1849,6 +1908,10 @@ static void talk_step_inner(stackee_talk_t *t) {
         case STACKEE_TALK_SAY_TEXT: {
             uint32_t at = since_ms(t, t->since);
             show_page_at(t, at);
+            if (at >= t->say_until && t->clip_active) {
+                clip_finish(t, true);
+                return;
+            }
             if (at >= t->say_until) {
                 // 字幕だけの発話は「出し終えた」を played に数えるのは
                 // 常時ポーリングだけ (Custom の記録は従来どおり音の有無)。
@@ -1856,6 +1919,10 @@ static void talk_step_inner(stackee_talk_t *t) {
             }
             return;
         }
+
+        case STACKEE_TALK_CLIP_LOAD:
+            clip_load_step(t);
+            return;
 
         case STACKEE_TALK_UPLOAD:
         case STACKEE_TALK_POLL:
@@ -1885,6 +1952,11 @@ static int guide_want(const stackee_talk_t *t) {
     // ★ 常時ポーリングで届いた発話は「考えています…」ではない (頼まれて
     //   考えているのではなく、知らせが届いた)。字幕が出るまで帯は空。
     if (t->watch_say && t->page_shown < 0 &&
+        !(t->state == STACKEE_TALK_PLAYING || t->state == STACKEE_TALK_SAY_TEXT)) {
+        return STACKEE_TALK_GUIDE_NONE;
+    }
+    // ★ クリップも「考えています…」ではない (通信せず FAT から読むだけ)。
+    if (t->clip_active && t->page_shown < 0 &&
         !(t->state == STACKEE_TALK_PLAYING || t->state == STACKEE_TALK_SAY_TEXT)) {
         return STACKEE_TALK_GUIDE_NONE;
     }
@@ -1953,6 +2025,9 @@ void stackee_talk_step(stackee_talk_t *t) {
     }
     talk_step_inner(t);
     watch_step(t);
+    if (t->clip != NULL) {
+        stackee_clip_step(t->clip, clip_can_sync(t));
+    }
     update_guide(t);
     // ★ 案内の後始末 (帯を消す) のあとで知らせを置く。順が逆だと消される。
     if (t->custom_active && t->state == STACKEE_TALK_IDLE) {
@@ -1989,6 +2064,7 @@ bool stackee_talk_uses_audio(const stackee_talk_t *t) {
         case STACKEE_TALK_INBOX_WAIT:
         case STACKEE_TALK_INBOX:
         case STACKEE_TALK_SAY_TEXT:
+        case STACKEE_TALK_CLIP_LOAD:
             // 音を使わない待ち。撮影のために押さえている間だけは従来どおり。
             return t->look_reserved;
         default:
@@ -2042,7 +2118,7 @@ bool stackee_talk_custom(stackee_talk_t *t, int n, bool play) {
         fail(t, "Wi-Fi 未接続です");
         return true;
     }
-    watch_abort(t, true);       // 受け箱の待ちを打ち切って通信を空ける
+    user_abort(t);       // 受け箱の待ちを打ち切って通信を空ける
     char text[48];
     snprintf(text, sizeof(text), "Custom_%d を送信中…", n);
     // ★ 覚えている seq が新しければ使い回す (GET /inbox の握手を 1 回省く)。
@@ -2086,7 +2162,7 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
         fail(t, "Wi-Fi 未接続です");
         return false;
     }
-    watch_abort(t, true);       // 受け箱の待ちを打ち切って通信を空ける
+    user_abort(t);       // 受け箱の待ちを打ち切って通信を空ける
     t->samples = t->ops->record_alloc(STACKEE_TALK_MAX_SAMPLES);
     if (t->samples == NULL) {
         fail(t, "録音の領域を確保できません");
@@ -2111,6 +2187,200 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
     show(t, "音声を送信中…");
     t->ops->ack_begin();
     face(t);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// クリップ (2026-09-30、STK_CLIP / clips.play)
+// ---------------------------------------------------------------------------
+// ★ **通信しない。** FAT から 1 件読み (stackee_clipsm.c の LOAD)、会話と同じ
+//   再生部品に渡す: 音あり … PLAY_WAIT → PLAYING (字幕は再生位置で)、
+//   字幕だけ … SAY_TEXT。借りる値 (reply など) は常時ポーリングの発話と
+//   同じく写しておき、終えたら戻す (talk.status の「直近の会話」を壊さない)。
+void stackee_talk_attach_clip(stackee_talk_t *t, struct stackee_clip *clip) {
+    t->clip = clip;
+}
+
+static void clip_log(stackee_talk_t *t) {
+    logf_(t, "[clip] {\"id\":\"%s\",\"final\":\"%s\",\"pages\":%d,"
+             "\"audio_bytes\":%lu,\"load_ms\":%lu,\"end_ms\":%lu,"
+             "\"play\":%d,\"played\":%d}",
+          t->clip_id[0] ? t->clip_id : "-", t->clip_final ? t->clip_final : "-",
+          t->clip_pages, (unsigned long)t->clip_audio_bytes,
+          (unsigned long)t->clip_load_ms, (unsigned long)t->clip_end_ms,
+          t->clip_play ? 1 : 0, t->clip_played ? 1 : 0);
+}
+
+static void clip_finish(stackee_talk_t *t, bool played) {
+    t->clip_played = played;
+    t->clip_final = "done";
+    t->clip_end_ms = mark_ms(t, t->clip_started);
+    t->clip_done++;
+    if (!played) {
+        t->clip_unplayed++;
+    }
+    clip_log(t);
+    cleanup(t);                 // PCM とメタを返し、帯を消す
+    t->clip_active = false;
+    watch_keep_restore(t);
+    to(t, STACKEE_TALK_IDLE);
+}
+
+static void clip_fail(stackee_talk_t *t, const char *why) {
+    snprintf(t->clip_error, sizeof(t->clip_error), "%s", why);
+    t->clip_final = "error";
+    t->clip_played = false;
+    t->clip_end_ms = mark_ms(t, t->clip_started);
+    t->clip_errors++;
+    logf_(t, "[clip] %s", why);
+    clip_log(t);
+    if (t->state == STACKEE_TALK_CLIP_LOAD && t->clip != NULL) {
+        stackee_clip_load_cancel(t->clip);
+    }
+    cleanup(t);
+    t->clip_active = false;
+    watch_keep_restore(t);
+    to(t, STACKEE_TALK_IDLE);
+    // ★ 「会話エラー」にはしない (通信していない)。帯に短く出すだけ (音なし)。
+    notice(t, (strstr(why, "読め") != NULL) ? STACKEE_TALK_CLIP_UNREADABLE : why);
+}
+
+// 読み終えたメタ (一覧の物 1 個そのまま) と PCM を再生部品に渡す。
+static void clip_loaded(stackee_talk_t *t, char *meta, uint8_t *pcm, size_t pcm_len) {
+    t->clip_meta = meta;
+    t->clip_pcm = pcm;
+    t->clip_load_ms = mark_ms(t, t->clip_started);
+    subtitle_clear(t);
+    const char *at = NULL;
+    size_t len = 0;
+    if (stackee_json_raw(meta, "subtitles", &at, &len) && len >= 2 && at[0] == '"') {
+        if (stackee_talk_parse_subtitles_json(t, at, len) > 0) {
+            t->sub_src = STACKEE_TALK_SUB_INLINE;
+        }
+    }
+    t->reply[0] = '\0';
+    stackee_json_str(meta, "reply", t->reply, sizeof(t->reply));
+    t->reply_len = (int)strlen(t->reply);
+    // 字幕の本文が無ければ本文を 15 字ずつに割って出す (字幕だけの発話と同じ)。
+    if (t->page_count == 0 && t->reply[0] != '\0') {
+        pages_from_text(t, t->reply);
+    }
+    t->clip_pages = t->page_count;
+    t->clip_audio_bytes = (uint32_t)pcm_len;
+    t->reply_ready_ms = since_ms(t, t->turn_started);
+    if (t->clip_play && t->reply[0] != '\0') {
+        show(t, t->reply);
+    }
+    if (pcm != NULL && pcm_len > 0) {
+        if ((pcm_len % 2) != 0) {
+            fail(t, "クリップの音声が不正です (読めません)");
+            return;
+        }
+        t->audio = pcm;
+        t->audio_len = pcm_len;
+        t->audio_samples = (int)(pcm_len / 2);
+        t->audio_duration_ms =
+            (int)((int64_t)t->audio_samples * 1000 / STACKEE_TALK_RATE);
+        t->audio_ready_ms = since_ms(t, t->turn_started);
+        to(t, STACKEE_TALK_PLAY_WAIT);
+        return;
+    }
+    // 字幕だけ。
+    if (!t->clip_play || t->page_count == 0) {
+        clip_finish(t, false);
+        return;
+    }
+    t->say_until = t->pages[t->page_count - 1].start_ms + STACKEE_TALK_SAY_HOLD_MS;
+    to(t, STACKEE_TALK_SAY_TEXT);
+}
+
+static void clip_load_step(stackee_talk_t *t) {
+    if (t->clip == NULL) {
+        fail(t, "クリップを読めません");
+        return;
+    }
+    char *meta = NULL;
+    uint8_t *pcm = NULL;
+    size_t meta_len = 0, pcm_len = 0;
+    int r = stackee_clip_load_poll(t->clip, &meta, &meta_len, &pcm, &pcm_len);
+    if (r == 0) {
+        if (since_ms(t, t->since) > STACKEE_TALK_CLIP_LOAD_MS) {
+            fail(t, "クリップを読めません (時間切れ)");
+        }
+        return;
+    }
+    if (r < 0) {
+        fail(t, "クリップを読めません");
+        return;
+    }
+    clip_loaded(t, meta, pcm, pcm_len);
+}
+
+int stackee_talk_clip_auto(stackee_talk_t *t) {
+    if (t->clip == NULL) {
+        return -1;
+    }
+    const char *text;
+    if (t->clip->auto_forced_off) {
+        text = STACKEE_TALK_CLIP_AUTO_FORCED;
+    } else {
+        bool on = !t->clip->auto_on;
+        stackee_clip_set_auto(t->clip, on);
+        text = on ? STACKEE_TALK_CLIP_AUTO_ON : STACKEE_TALK_CLIP_AUTO_OFF;
+    }
+    logf_(t, "[clip] %s", text);
+    // ★ 帯に持ち主が居る (会話・再生・案内の途中) ときは上書きしない。
+    if (t->state == STACKEE_TALK_IDLE && !t->ops->ack_active() &&
+        !t->ops->play_active()) {
+        notice(t, text);
+    }
+    return stackee_clip_auto_active(t->clip) ? 1 : 0;
+}
+
+bool stackee_talk_clip(stackee_talk_t *t, bool play) {
+    if (t->clip == NULL) {
+        return false;
+    }
+    // ★ 会話・画像・Custom・クリップの途中は黙って無視する (Custom と同じ約束)。
+    if (t->state != STACKEE_TALK_IDLE || t->look_reserved || t->pressed ||
+        t->custom_active || t->clip_active || t->ops->ack_active() ||
+        t->ops->play_active()) {
+        t->clip_busy++;
+        return false;
+    }
+    // ★ 同期と受け箱の待ちを打ち切る (FAT への書き込みも止めてもらう)。
+    user_abort(t);
+    t->clip_count++;
+    t->clip_started = now(t);
+    t->clip_play = play;
+    t->clip_final = NULL;
+    t->clip_played = false;
+    t->clip_pages = 0;
+    t->clip_audio_bytes = 0;
+    t->clip_load_ms = t->clip_end_ms = 0;
+    t->clip_id[0] = '\0';
+    t->clip_error[0] = '\0';
+    t->notice_on = false;
+    int idx = stackee_clip_pick(t->clip);
+    if (idx < 0) {
+        t->clip_empty++;
+        t->clip_final = "empty";
+        t->clip_end_ms = mark_ms(t, t->clip_started);
+        clip_log(t);
+        notice(t, STACKEE_TALK_CLIP_EMPTY);
+        return true;
+    }
+    snprintf(t->clip_id, sizeof(t->clip_id), "%s", t->clip->local[idx].id);
+    if (!stackee_clip_load_begin(t->clip, idx)) {
+        t->clip_errors++;
+        t->clip_final = "error";
+        notice(t, STACKEE_TALK_CLIP_UNREADABLE);
+        return true;
+    }
+    watch_keep_save(t);
+    t->clip_active = true;
+    t->turn_started = now(t);
+    to(t, STACKEE_TALK_CLIP_LOAD);
     return true;
 }
 
@@ -2177,7 +2447,7 @@ int stackee_talk_look_reserve(stackee_talk_t *t) {
     // ★ カメラのキーも最優先。受け箱の待ちを打ち切って通信を空ける
     //   (撮影の 4 秒のあいだに通信側が畳み終える)。ログにも画面にも
     //   触らない (camera タスクから呼ばれる)。
-    watch_abort(t, true);
+    user_abort(t);
     return STACKEE_TALK_LOOK_OK;
 }
 

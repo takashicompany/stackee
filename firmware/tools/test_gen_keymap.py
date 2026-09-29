@@ -180,8 +180,10 @@ class ViaDefinitionTest(unittest.TestCase):
         names = [c['name'] for c in self.via['customKeycodes']]
         self.assertEqual(names.index('STK_MT_0'), 7)        # 0x7E07 のまま
         self.assertEqual(names.index('STK_CUSTOM_0'), 8)    # 0x7E08 (2026-09-29)
-        self.assertEqual(names[-1], 'STK_CUSTOM_9')         # 0x7E11
-        self.assertEqual(len(names), 18)
+        self.assertEqual(names.index('STK_CUSTOM_9'), 17)   # 0x7E11
+        self.assertEqual(names[-2], 'STK_CLIP')             # 0x7E12 (2026-09-30)
+        self.assertEqual(names[-1], 'STK_CLIP_AUTO')        # 0x7E13 (2026-09-30)
+        self.assertEqual(len(names), 20)
         # ヘッダの enum と VIA の並びが 1 つずつ同じか。
         for index, name in enumerate(names):
             self.assertIn('%-20s = QK_KB_0 + %d,' % (name, index), self.header)
@@ -214,7 +216,7 @@ class ViaDefinitionTest(unittest.TestCase):
         self.assertEqual([e['name'] for e in custom],
                          ['STK_CUSTOM_%d' % n for n in range(10)])
         self.assertEqual(entries[8:18], custom)
-        self.assertEqual(entries[-10:], custom)
+        self.assertEqual(entries[-12:-2], custom)
         for n, entry in enumerate(custom):
             self.assertEqual(entry['shortName'], 'Custom_%d' % n)
             self.assertTrue(entry['title'].startswith('Custom_%d' % n))
@@ -223,6 +225,18 @@ class ViaDefinitionTest(unittest.TestCase):
         self.assertIn('STK_CUSTOM_0         = QK_KB_0 + 8,', self.header)
         self.assertIn('STK_CUSTOM_9         = QK_KB_0 + 17,', self.header)
         self.assertNotIn('CSTM', self.header)
+
+    def test_the_clip_key_follows_custom_9(self):
+        """STK_CLIP は Custom_9 (0x7E11) の次 = 0x7E12。VIA / Remap の表示は Clip。"""
+        entries = self.via['customKeycodes']
+        self.assertEqual(entries[18]['name'], 'STK_CLIP')
+        self.assertEqual(entries[18]['shortName'], 'Clip')
+        self.assertIn('STK_CLIP             = QK_KB_0 + 18,', self.header)
+        self.assertEqual(0x7E00 + 18, 0x7E12)
+        self.assertEqual(entries[19]['name'], 'STK_CLIP_AUTO')
+        self.assertEqual(entries[19]['shortName'], 'Clip_Auto')
+        self.assertIn('STK_CLIP_AUTO        = QK_KB_0 + 19,', self.header)
+        self.assertIn('#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 19)', self.header)
 
     def test_a_new_mod_tap_would_stop_the_generator(self):
         """STK_MT_* が増えると Custom の番号がずれる。生成の段階で止める。"""
