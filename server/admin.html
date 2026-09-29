@@ -75,6 +75,7 @@
     <dt>Claude 会話</dt><dd><span id="s-claude">-</span><span class="reset" id="reset-claude"></span></dd>
     <dt>作業場所</dt><dd id="s-cwd">-</dd>
     <dt>受け箱</dt><dd id="s-inbox">-</dd>
+    <dt>クリップ</dt><dd id="s-clips">-</dd>
     <dt>直近のキー</dt><dd><ol id="presses"></ol><span id="s-presses">(なし)</span></dd>
   </dl>
 </section>
@@ -452,6 +453,11 @@
   function showKeyStatus(data) {
     var inbox = data.inbox || {};
     $("s-inbox").textContent = (inbox.count || 0) + " 件 (最新 seq " + (inbox.seq || 0) + ")";
+    var clips = data.clips;
+    $("s-clips").textContent = clips
+      ? clips.count + " / " + clips.max_count + " 件・" + (clips.bytes / 1048576).toFixed(1) + " / "
+        + (clips.max_bytes / 1048576).toFixed(0) + " MB (rev " + clips.rev + ")"
+      : "無効";
     var list = $("presses");
     list.textContent = "";
     (data.key_presses || []).forEach(function (press) {

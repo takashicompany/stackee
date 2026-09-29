@@ -10,6 +10,8 @@ GET /admin serves the browser page that switches agent, model, effort and instru
 POST /key {"key":"Custom_n"} runs what /admin set for that key: a prompt to the agent (a job
 like /look) or a command line here. `bin/stackee-say` (POST /say, local only) queues an
 utterance in the inbox, which the device picks up with GET /inbox?after=&wait=&job=.
+`bin/stackee-clip` (POST / DELETE /clips, local only) keeps short utterances synthesised in
+advance under agent/clips/; the device lists them with GET /clips and copies them for later.
 """
 from __future__ import annotations
 
@@ -76,6 +78,11 @@ INBOX_TTL = 300
 MAX_INBOX_WAIT = 25
 MAX_SAY_TEXT = 4096
 MAX_SAY_BODY = 64 * 1024
+# Clips: utterances synthesised in advance and kept on disk for the device to copy.
+CLIP_ID = re.compile(r"[A-Za-z0-9_-]{1,40}")
+CLIPS_MAX_COUNT = 20
+CLIPS_MAX_BYTES = 20 * 1024 * 1024
+MAX_CLIPS_LIST = 64 * 1024
 
 
 def read_audio(data, max_seconds=MAX_SECONDS, min_seconds=.3):
@@ -682,6 +689,170 @@ def inbox_body(item, extra=None):
     return job_body(result, item["subtitles"])[0]
 
 
+class Clips:
+    """Utterances kept on disk for the device to copy: <id>.pcm and <id>.json in `directory`.
+
+    The newest `max_count` clips, at most `max_bytes` on disk in all, are kept; beyond
+    that the oldest are deleted, never the one just stored. `rev` goes up with every
+    change and is saved in `.rev` (no id can have that name) before the files change, so
+    it never goes back, not even across restarts. Each clip's JSON also carries the rev
+    that stored it, which orders clips created within the same second.
+    """
+    def __init__(self, directory, max_count=CLIPS_MAX_COUNT, max_bytes=CLIPS_MAX_BYTES):
+        self.directory = Path(directory)
+        self.max_count = max_count
+        self.max_bytes = max_bytes
+        self.lock = threading.Lock()
+        self.items = {}
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.rev_path = self.directory / ".rev"
+        try:
+            self.rev = int(self.rev_path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            self.rev = 0
+        # Leftovers of a write cut short: mkstemp's .<id>.* and write_atomic's *.tmp.
+        for path in self.directory.iterdir():
+            if path.name != ".rev" and (path.name.startswith(".") or path.suffix == ".tmp"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        for path in sorted(self.directory.glob("*.json")):
+            item = self.load(path)
+            if item is None:
+                logging.warning("clip-skipped %s", path.name)
+                continue
+            self.items[item["id"]] = item
+            self.rev = max(self.rev, item["rev"])
+        with self.lock:
+            self.prune()
+
+    def load(self, path):
+        """One clip's metadata from its JSON, or None when it or its PCM does not add up."""
+        if not CLIP_ID.fullmatch(path.stem):
+            return None
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+            pcm = self.directory / (path.stem + ".pcm")
+            if (not isinstance(item, dict) or item.get("id") != path.stem
+                    or not isinstance(item.get("reply"), str)
+                    or not isinstance(item.get("subtitles"), str)
+                    or any(not isinstance(item.get(name), int) or isinstance(item[name], bool)
+                           for name in ("created", "audio_bytes", "rev"))
+                    or pcm.stat().st_size != item["audio_bytes"]):
+                return None
+            item["size"] = item["audio_bytes"] + path.stat().st_size
+        except (OSError, ValueError):
+            return None
+        return item
+
+    def bump(self):
+        """The next rev, saved before anything it stands for changes (call with lock held)."""
+        self.rev += 1
+        stackee_agent.write_atomic(self.rev_path, "%d\n" % self.rev)
+        return self.rev
+
+    def ordered(self):
+        return sorted(self.items.values(), key=lambda item: (item["created"], item["rev"]))
+
+    def remove(self, ident):
+        """Drop one clip's files and entry (call with lock held, after bump())."""
+        self.items.pop(ident, None)
+        for suffix in (".json", ".pcm"):
+            try:
+                (self.directory / (ident + suffix)).unlink()
+            except FileNotFoundError:
+                pass
+
+    def prune(self, keep=None):
+        """Delete the oldest clips until both limits hold; `keep` is never deleted."""
+        while True:
+            used = sum(item["size"] for item in self.items.values())
+            if len(self.items) <= self.max_count and used <= self.max_bytes:
+                return
+            victim = next((item for item in self.ordered() if item["id"] != keep), None)
+            if victim is None:
+                return
+            self.bump()
+            self.remove(victim["id"])
+            logging.info("clip-pruned %s", json.dumps({"id": victim["id"], "rev": self.rev}))
+
+    def put(self, ident, reply, audio, subtitles):
+        """Store (or replace) one clip; returns its entry."""
+        text = subtitles.decode("utf-8") if isinstance(subtitles, bytes) else subtitles
+        with self.lock:
+            rev = self.bump()
+            item = {"id": ident, "created": int(time.time()), "audio_bytes": len(audio),
+                    "reply": reply, "subtitles": text, "rev": rev}
+            data = json.dumps(item, ensure_ascii=False) + "\n"
+            # The PCM first, so a JSON on disk always has its audio beside it.
+            pcm = self.directory / (ident + ".pcm")
+            fd, tmp = tempfile.mkstemp(prefix="." + ident + ".", dir=str(self.directory))
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    out.write(audio)
+                os.replace(tmp, pcm)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+                raise
+            stackee_agent.write_atomic(self.directory / (ident + ".json"), data)
+            item["size"] = len(audio) + len(data.encode("utf-8"))
+            self.items[ident] = item
+            self.prune(keep=ident)
+            return dict(item)
+
+    def delete(self, ident):
+        """False when there is no such clip."""
+        with self.lock:
+            if ident not in self.items:
+                return False
+            self.bump()
+            self.remove(ident)
+            return True
+
+    def audio(self, ident):
+        """The clip's PCM, or None when it is missing or caption-only."""
+        with self.lock:
+            item = self.items.get(ident)
+            if not item or not item["audio_bytes"]:
+                return None
+            try:
+                return (self.directory / (ident + ".pcm")).read_bytes()
+            except OSError:
+                return None
+
+    def listing(self, limit=MAX_CLIPS_LIST):
+        """GET /clips: oldest first, leaving out the oldest while the JSON exceeds `limit`."""
+        with self.lock:
+            rev = self.rev
+            entries = [{"id": item["id"], "created": item["created"],
+                        "audio_bytes": item["audio_bytes"], "sample_rate": RATE, "channels": 1,
+                        "sample_width": 2, "reply": item["reply"], "subtitles": item["subtitles"]}
+                       for item in self.ordered()]
+        shown = []
+        for entry in reversed(entries):
+            body = json.dumps({"rev": rev, "clips": [entry] + shown},
+                              ensure_ascii=False).encode("utf-8")
+            if len(body) > limit:
+                break
+            shown.insert(0, entry)
+        return json.dumps({"rev": rev, "clips": shown}, ensure_ascii=False).encode("utf-8")
+
+    def summary(self):
+        with self.lock:
+            return {"count": len(self.items), "rev": self.rev,
+                    "bytes": sum(item["size"] for item in self.items.values()),
+                    "max_count": self.max_count, "max_bytes": self.max_bytes}
+
+
+def new_clip_id():
+    """A readable, practically unique id for a clip posted without one."""
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+
 class KeyCommandError(RuntimeError):
     """A key's command failed or ran out of time; the message is what the device shows."""
 
@@ -692,8 +863,9 @@ class Jobs:
     /talk, /look and a Custom key's prompt or command share the single slot: while any
     runs, all of them answer 409.
     """
-    def __init__(self, pipeline, keys=None, inbox=None, say_url=None):
+    def __init__(self, pipeline, keys=None, inbox=None, say_url=None, clips=None):
         self.pipeline = pipeline
+        self.clips = clips
         self.lock = threading.Lock()
         self.entries = {}
         self.busy = False
@@ -726,6 +898,7 @@ class Jobs:
         env["STACKEE_KEY"] = key
         if self.say_url:
             env["STACKEE_SAY_URL"] = self.say_url
+            env["STACKEE_CLIP_URL"] = self.say_url.rsplit("/", 1)[0] + "/clips"
         env["PATH"] = str(BIN_DIR) + os.pathsep + env.get("PATH", os.defpath)
         started = time.monotonic()
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
@@ -962,7 +1135,8 @@ class Handler(BaseHTTPRequestHandler):
                                            "key_timeout_max": MAX_KEY_TIMEOUT},
                                "keys": keys, "keys_error": keys_error,
                                "key_presses": jobs.recent_presses(),
-                               "inbox": jobs.inbox.summary()})
+                               "inbox": jobs.inbox.summary(),
+                               "clips": jobs.clips.summary() if jobs.clips else None})
 
     def admin_keys(self):
         """PUT /admin/api/keys: saved at once, used from the next press."""
@@ -1030,8 +1204,12 @@ class Handler(BaseHTTPRequestHandler):
         """
         return local_address(self.client_address[0], self.connection.getsockname()[0])
 
-    def say_post(self):
-        """POST /say from this machine only: speak or caption a text via the inbox."""
+    def local_json(self):
+        """The JSON object posted by a process on this machine, or None once refused.
+
+        Shared by /say and /clips: this machine only, no browser, application/json with
+        one Content-Length up to MAX_SAY_BODY.
+        """
         if not self.local_client():
             return self.send(403, {"error": "local_only"})
         if self.headers.get("Origin"):
@@ -1052,17 +1230,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(408, {"error": "upload_timeout"})
         except (ValueError, UnicodeDecodeError):
             return self.send(400, {"error": "invalid_json"})
-        text = request.get("text") if isinstance(request, dict) else None
-        voice = request.get("voice", True) if isinstance(request, dict) else None
+        return request if isinstance(request, dict) else {}
+
+    def spoken_text(self, request):
+        """(reply, audio, subtitles) for {"text", "voice"} as /say makes them, or None once refused."""
+        text = request.get("text")
+        voice = request.get("voice", True)
         if not isinstance(text, str) or not isinstance(voice, bool):
             return self.send(400, {"error": "expected_text_and_voice"})
         if len(text.encode("utf-8")) > MAX_SAY_TEXT:
             return self.send(413, {"error": "text_too_large"})
         if not text.strip():
             return self.send(400, {"error": "text_empty"})
-        started = time.monotonic()
         try:
-            reply, audio, subtitles = self.server.jobs.pipeline.say(text, voice)
+            return self.server.jobs.pipeline.say(text, voice)
         except ValueError as exc:
             if str(exc) == "nothing_to_say":
                 return self.send(400, {"error": "nothing_to_say"})
@@ -1071,11 +1252,51 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             logging.exception("say failed")
             return self.send(500, {"error": str(exc) or exc.__class__.__name__})
+
+    def say_post(self):
+        """POST /say from this machine only: speak or caption a text via the inbox."""
+        request = self.local_json()
+        if request is None:
+            return None
+        started = time.monotonic()
+        spoken = self.spoken_text(request)
+        if spoken is None:
+            return None
+        reply, audio, subtitles = spoken
         seq = self.server.jobs.inbox.put(reply, audio, subtitles)
         logging.info("inbox-put %s", json.dumps({
-            "seq": seq, "voice": voice, "chars": len(reply), "audio_bytes": len(audio),
-            "ms": round((time.monotonic() - started) * 1000, 2)}))
+            "seq": seq, "voice": request.get("voice", True), "chars": len(reply),
+            "audio_bytes": len(audio), "ms": round((time.monotonic() - started) * 1000, 2)}))
         return self.send(200, {"seq": seq})
+
+    def clip_post(self):
+        """POST /clips from this machine only: synthesise like /say and keep it on disk."""
+        clips = self.server.jobs.clips
+        if clips is None:
+            return self.send(503, {"error": "clips_disabled"})
+        request = self.local_json()
+        if request is None:
+            return None
+        ident = request.get("id")
+        if ident is None:
+            ident = new_clip_id()
+        elif not isinstance(ident, str) or not CLIP_ID.fullmatch(ident):
+            return self.send(400, {"error": "bad_id"})
+        started = time.monotonic()
+        spoken = self.spoken_text(request)
+        if spoken is None:
+            return None
+        reply, audio, subtitles = spoken
+        try:
+            item = clips.put(ident, reply, audio, subtitles)
+        except OSError as exc:
+            logging.exception("clip-put failed")
+            return self.send(500, {"error": str(exc)})
+        logging.info("clip-put %s", json.dumps({
+            "id": ident, "rev": item["rev"], "voice": request.get("voice", True),
+            "chars": len(reply), "audio_bytes": len(audio),
+            "ms": round((time.monotonic() - started) * 1000, 2)}))
+        return self.send(200, {"id": ident, "audio_bytes": len(audio)})
 
     def key_post(self):
         """POST /key {"key":"Custom_n"}: run what the admin page set for that key.
@@ -1143,6 +1364,17 @@ class Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path == "/inbox":
             return self.inbox_get(query)
+        clip = re.fullmatch(r"/clips(?:/([A-Za-z0-9_-]{1,40})/audio)?", self.path)
+        if clip:
+            clips = self.server.jobs.clips
+            if clips is None:
+                return self.send(503, {"error": "clips_disabled"})
+            if not clip[1]:
+                return self.send(200, clips.listing())
+            audio = clips.audio(clip[1])
+            if not audio:
+                return self.send(404, {"error": "not_found"})
+            return self.send(200, audio, "application/octet-stream")
         spoken = re.fullmatch(r"/inbox/([0-9]{1,15})/audio", self.path)
         if spoken:
             audio = self.server.jobs.inbox.audio(int(spoken[1]))
@@ -1188,6 +1420,23 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {"error": "not_found"})
         return self.admin_write(self.path)
 
+    def do_DELETE(self):
+        """DELETE /clips/<id>, from this machine only."""
+        match = re.fullmatch(r"/clips/([A-Za-z0-9_-]{1,40})", self.path)
+        if not match:
+            return self.send(404, {"error": "not_found"})
+        clips = self.server.jobs.clips
+        if clips is None:
+            return self.send(503, {"error": "clips_disabled"})
+        if not self.local_client():
+            return self.send(403, {"error": "local_only"})
+        if self.headers.get("Origin"):
+            return self.send(403, {"error": "device_api_only"})
+        if not clips.delete(match[1]):
+            return self.send(404, {"error": "not_found"})
+        logging.info("clip-delete %s", json.dumps({"id": match[1], "rev": clips.summary()["rev"]}))
+        return self.send(200, {"id": match[1], "deleted": True})
+
     def admin_action(self, call, extra):
         agent = self.agent
         if agent is None:
@@ -1216,6 +1465,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.key_post()
         if self.path == "/say":
             return self.say_post()
+        if self.path == "/clips":
+            return self.clip_post()
         # Per device route: content types, size range, the two error codes, the validator.
         route = {"/talk": (("audio/wav", "audio/x-wav"), 44, MAX_UPLOAD,
                            "recording_too_large_or_empty", "expected_audio_wav", read_audio),
@@ -1287,7 +1538,13 @@ def main():
     parser.add_argument("--speaker", type=int, default=3, help="VOICEVOX style ID")
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--echo", action="store_true", help="STT/TTS test, without the agent")
+    parser.add_argument("--clips-max", type=int, default=CLIPS_MAX_COUNT,
+                        help="clips kept in <agent-dir>/clips (oldest deleted first)")
+    parser.add_argument("--clips-max-mb", type=float, default=CLIPS_MAX_BYTES / 1024 / 1024,
+                        help="total size of the clips on disk, in MiB")
     args = parser.parse_args()
+    if args.clips_max < 1 or args.clips_max_mb <= 0:
+        parser.error("--clips-max and --clips-max-mb must be positive")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     pipeline = Pipeline(args.whisper_model, whisper=args.whisper, codex=args.codex,
                         codex_model=args.codex_model, voice=args.voice, timeout=args.timeout,
@@ -1299,8 +1556,10 @@ def main():
     except BaseException:
         pipeline.close()
         raise
+    clips = Clips(Path(args.agent_dir) / "clips", args.clips_max,
+                  int(args.clips_max_mb * 1024 * 1024))
     server.jobs = Jobs(pipeline, keys=KeySettings(args.agent_dir),
-                       say_url=say_url(server.server_address))
+                       say_url=say_url(server.server_address), clips=clips)
     def stop(signum, frame):
         pipeline.close()
         server.jobs.close()
@@ -1310,6 +1569,7 @@ def main():
     logging.info("Listening on http://%s:%s/talk and /look (admin: http://%s:%s/admin)",
                  *(server.server_address * 2))
     logging.info("Key commands reach stackee-say at %s", server.jobs.say_url)
+    logging.info("Clips: %s", json.dumps(clips.summary()))
     try:
         server.serve_forever()
     finally:

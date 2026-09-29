@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Keep clips for stackee: short utterances synthesised now and played by the device later.
+
+  stackee-clip add [--id ID] [--no-voice] "テキスト"   store (or replace) a clip; prints its id
+  stackee-clip rm <id>                               delete a clip
+  stackee-clip ls                                    list the clips, oldest first
+
+The device lists the clips (GET /clips) from time to time and copies them for offline
+playback; adding one never makes it speak by itself. Without a text argument `add` reads
+standard input. The server is STACKEE_CLIP_URL, which the server sets for the commands it
+runs for Custom keys (default http://127.0.0.1:8766/clips). Only a process on the server's
+own machine may add or delete. Exit status is 0 on success, else 1 (2 for a usage error).
+"""
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+DEFAULT_URL = "http://127.0.0.1:8766/clips"
+
+
+def call(method, url, body=None, timeout=300):
+    data = None
+    headers = {}
+    if body is not None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    # Straight to the server on this machine, never through an http_proxy.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--url", help="the server's /clips (default: $STACKEE_CLIP_URL or "
+                        + DEFAULT_URL + ")")
+    parser.add_argument("--timeout", type=float, default=300,
+                        help="seconds to wait for the server (add waits for synthesis)")
+    commands = parser.add_subparsers(dest="command", required=True)
+    add = commands.add_parser("add", help="store or replace a clip; prints its id")
+    add.add_argument("--id", help="[A-Za-z0-9_-]{1,40}; the same id replaces (default: new id)")
+    add.add_argument("--no-voice", action="store_true", help="captions only, without speech")
+    add.add_argument("text", nargs="*", help="what to say (default: standard input)")
+    remove = commands.add_parser("rm", help="delete a clip")
+    remove.add_argument("id")
+    commands.add_parser("ls", help="list the clips, oldest first")
+    args = parser.parse_args()
+    url = (args.url or os.environ.get("STACKEE_CLIP_URL") or DEFAULT_URL).rstrip("/")
+    try:
+        if args.command == "add":
+            text = " ".join(args.text) if args.text else sys.stdin.read()
+            if not text.strip():
+                add.error("nothing to say")
+            body = {"text": text, "voice": not args.no_voice}
+            if args.id is not None:
+                body["id"] = args.id
+            print(call("POST", url, body, args.timeout)["id"])
+        elif args.command == "rm":
+            call("DELETE", url + "/" + urllib.parse.quote(args.id, safe=""), timeout=args.timeout)
+        else:
+            listing = call("GET", url, timeout=args.timeout)
+            print("rev %d, %d clip(s)" % (listing["rev"], len(listing["clips"])))
+            for clip in listing["clips"]:
+                seconds = clip["audio_bytes"] / (clip["sample_rate"] * clip["sample_width"]
+                                                 * clip["channels"])
+                reply = " ".join(clip["reply"].split())
+                print("%s\t%s\t%s\t%s" % (
+                    clip["id"], time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(clip["created"])),
+                    "%.1fs" % seconds if clip["audio_bytes"] else "no-voice",
+                    reply if len(reply) <= 40 else reply[:40] + "…"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(1000).decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("error", detail)
+        except (ValueError, AttributeError):
+            pass
+        print("stackee-clip: HTTP %d: %s" % (exc.code, detail), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print("stackee-clip: %s: %s" % (url, exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

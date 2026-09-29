@@ -127,6 +127,7 @@ systemctl --user disable --now stackee-talk stackee-voicevox
 | `server/agent/AGENTS.md` / `CLAUDE.md` / `agent.json` | 実行時ファイル。Git 管理外 |
 | `server/agent/.state/session.json` | 継続する会話の ID。Git 管理外 |
 | `server/agent/defaults/keys.json` / `server/agent/keys.json` | 独自キー Custom_0〜9 の設定 (既定は全キー未設定)。実行時ファイルは Git 管理外。旧名 CSTM_n のファイルも読める |
+| `server/agent/clips/` | クリップ (`<id>.pcm` と `<id>.json`、変更番号 `.rev`)。Git 管理外 (下記「クリップ」) |
 
 サーバー起動時、実行時ファイルが無ければ `defaults/` からコピーします。あれば触りません。
 初回配置や、誤って消した場合はサービスを再起動すれば復元されます。
@@ -232,6 +233,9 @@ URL の Web 操作盤からの編集は今後追加します。現在は S3 の�
 | `GET /inbox` | 受け箱。本体が取りに来る発話 (下記「独自キーと受け箱」) |
 | `GET /inbox/{seq}/audio` | 受け箱の発話の生 PCM |
 | `POST /say` | 受け箱に発話を積む。**このマシンからだけ** (`stackee-say` が使う) |
+| `GET /clips` | クリップの一覧 (下記「クリップ」) |
+| `GET /clips/{id}/audio` | クリップの生 PCM |
+| `POST /clips` / `DELETE /clips/{id}` | クリップの追加・置き換え / 削除。**このマシンからだけ** (`stackee-clip` が使う) |
 
 入力 WAV は非圧縮・16kHz・16bit・mono、0.3〜30秒。返答音声は最長120秒です。
 
@@ -442,6 +446,78 @@ make 2>&1 | tail -1 | stackee-say      # 引数が無ければ標準入力を読
 ログには `key-press` (押下と結果)、`key-command` (終了コード・時間・出力の末尾)、`inbox-put` (seq・音声の有無・長さ)
 が出ます。管理画面の「現在の状態」に直近 10 回の押下と受け箱の件数・最新 seq を表示します。
 
+## クリップ (`POST /clips`・`stackee-clip`・`GET /clips`)
+
+クリップは**前もって合成しておく短い発話** (音声 + 字幕) です。このマシンのプログラムがテキストを渡すと、
+サーバーが `/say` と同じ流れで合成して `server/agent/clips/` に保存します。本体は時々一覧を見て
+クリップを本体に取り込み、専用のキーでオフライン再生します。定期的に中身が変わる読み上げ (お知らせなど) を、
+押した瞬間にサーバーへ問い合わせずに鳴らすための仕組みです。中身を作る処理はこのサーバーの外に置き、
+`stackee-clip` か `POST /clips` で渡します。
+
+受け箱 (`/inbox`・`/say`) とは独立しています。クリップを足しても本体が喋り出すことはありません。
+
+### `stackee-clip`
+
+`server/bin/stackee-clip` は Python 標準ライブラリだけのスクリプトです。
+
+```sh
+stackee-clip add "今日の予定は 3 件です。"            # 新しい id で追加し、その id を出力する
+stackee-clip add --id morning "おはようございます。"  # 同じ id なら置き換え
+stackee-clip add --no-voice --id memo "字幕だけ"      # 音声なし
+some-generator | stackee-clip add --id daily          # 引数が無ければ標準入力を読む
+stackee-clip ls                                       # rev と一覧 (古い順。id・作成時刻・秒数・本文の頭)
+stackee-clip rm morning
+```
+
+送り先は `STACKEE_CLIP_URL` (既定 `http://127.0.0.1:8766/clips`、`--url` でも指定可)。キーのコマンドには
+`STACKEE_SAY_URL` と同じく、サーバーが自分の待ち受けアドレスから組み立てた URL を渡します
+(`PATH` の `server/bin/` にあるので名前だけで呼べます)。サーバーを LAN アドレスに絞っていて
+キーと無関係なプロセスから使うときは自分で指定してください。
+成功は終了コード 0、失敗は 1 (使い方の誤りは 2) で理由を標準エラーに出します。`add` は合成が終わるまで待ちます。
+
+### API
+
+| 要求 | 内容 |
+| --- | --- |
+| `POST /clips` | **このマシンからだけ** (判定・`Origin` 付きの `403`・`application/json` のみ・大きさの検査は `/say` と同じ)。本文 `{"id":"任意","text":"...","voice":true}`。応答 `200 {"id":"...","audio_bytes":n}` |
+| `DELETE /clips/<id>` | **このマシンからだけ**。応答 `200 {"id":"...","deleted":true}`、無ければ `404` |
+| `GET /clips` | 誰でも (中継経由で本体が取る)。下記の一覧 |
+| `GET /clips/<id>/audio` | 生 PCM (16kHz / 16bit LE / mono)。無い・音声なしのクリップは `404` |
+
+- `id` は `[A-Za-z0-9_-]{1,40}`。省略 (か `null`) ならサーバーが `20260930-101500-3fa9c1` のような id を付けます。
+  形の違う id は `400 {"error":"bad_id"}`。**同じ id は置き換え**で、作成時刻は新しくなります (一覧の末尾へ移る)。
+- `text` は UTF-8 で 4 KB まで。後処理は `/say` と同じです: URL 除去 → 文ごとの合成 → 120 秒の長さ制限 →
+  音量制限 → 字幕。`voice: false` は字幕だけ (`audio_bytes` は 0、字幕は 2.5 秒ごと)。
+  話す中身が残らない文は `400 nothing_to_say`、合成の失敗は `500` (どちらも何も保存しません)。
+- 合成は `/say`・会話の返答と同じ錠で 1 つずつ行います。ジョブの枠 (`409`) とは無関係です。
+
+一覧 (`GET /clips`):
+
+```json
+{"rev": 12,
+ "clips": [{"id": "morning", "created": 1790000000, "audio_bytes": 51200,
+            "sample_rate": 16000, "channels": 1, "sample_width": 2,
+            "reply": "おはようございます。", "subtitles": "0\tおはようございます。\n"}]}
+```
+
+- `rev` はクリップが変わる (追加・置き換え・削除・上限による削除) たびに増える整数です。
+  `server/agent/clips/.rev` に保存するので、サーバーを再起動しても戻りません。本体は `rev` が前と同じなら
+  何も取り直さずに済みます。
+- `clips` は `created` (UNIX 秒) の古い順 (同じ秒なら保存した順)。`reply` は実際に読み上げた本文、
+  `subtitles` は `/talk` の `done` と同じ形式 (`<開始ミリ秒>\t<本文>` の行、48 行 / 4096 バイトまで)。
+- 応答全体は 64 KB 以内です。超えるときは古いクリップから一覧に載せません (ファイルは残ります)。
+
+### 保存と上限
+
+1 クリップは `server/agent/clips/<id>.pcm` (生 PCM、音声なしなら空) と `<id>.json` (上記の項目) です。
+既定の上限は **20 件・合計 20 MB** (PCM と JSON の合計)。超えたら古い順に削除します。
+ただし今保存したクリップは消しません (1 件で上限を超える場合もそれだけは残る)。
+上限は起動引数 `--clips-max <件数>` と `--clips-max-mb <MiB>` で変えられ、起動時にも適用します。
+起動時に読めない JSON・PCM の長さが合わないクリップは一覧に載せず、書きかけの一時ファイルは消します。
+
+ログには `clip-put` (id・rev・音声の有無・長さ)、`clip-delete`、`clip-pruned` (上限で削除) が出ます。
+管理画面の「現在の状態」にクリップの件数・容量・rev を表示します (`GET /admin/api/state` の `clips`)。
+
 ## 後で外でも使う場合
 
 送信先はURLで独立しているため、同じ API を持つ外部サーバーへ移せます。
@@ -486,6 +562,8 @@ Codex と Claude の会話が別々に保たれること、旧形式の設定・
 `test_stackee_keys.py` は独自キー (3 方式・`409` の共有・コマンドの成功/失敗/時間切れ/裏の子プロセス・環境変数)、
 `stackee-say` → 受け箱 → `/inbox` (after / wait / job の組み合わせ・期限切れ・件数上限・音声)、
 `/say` の `403` と検証、キー設定の保存 API を確かめます。合成は偽物で、音は鳴らしません。
+`test_stackee_clips.py` はクリップ (追加・置き換え・削除・上限による古い順の削除・再起動をまたぐ `rev` の単調性・
+一覧の順序と 64 KB 制限・このマシン以外の `403`・`voice: false`・音声取得・`stackee-clip`) を確かめます。
 通常のテストは偽のエージェントを使い、実際の Codex / Claude を呼びません。
 実際の認証・モデルを使う検証は明示的に実行します。
 
