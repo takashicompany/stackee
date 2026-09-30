@@ -1344,7 +1344,7 @@ static void custom_finish(stackee_talk_t *t) {
 // 撃ってよいか (暇で、外の都合も許す)。
 static bool watch_can_run(stackee_talk_t *t) {
     return t->state == STACKEE_TALK_IDLE && !t->look_reserved && !t->pressed &&
-           !t->custom_active && t->inbox_path[0] != '\0' &&
+           !t->custom_active && !t->watch_held && t->inbox_path[0] != '\0' &&
            !t->ops->ack_active() && !t->ops->play_active() &&
            (t->ops->watch_ok == NULL || t->ops->watch_ok()) &&
            t->ops->net_ready();
@@ -1381,6 +1381,19 @@ static void watch_backoff(stackee_talk_t *t, const char *why) {
     t->watch_next = now(t) + t->watch_backoff;
     t->watch_phase = STACKEE_TALK_WATCH_WAIT;
     logf_(t, "[inbox] %s (次は %lu ms 後)", why, (unsigned long)t->watch_backoff);
+}
+
+void stackee_talk_watch_hold(stackee_talk_t *t, bool held) {
+    if (held == t->watch_held) {
+        return;
+    }
+    t->watch_held = held;
+    if (held) {
+        t->watch_holds++;
+        watch_abort(t, false);      // 次の watch_step を待たずに打ち切る
+    } else {
+        t->watch_next = now(t);     // 閉じたらすぐ続きから聞く
+    }
 }
 
 void stackee_talk_watch_enable(stackee_talk_t *t, bool on, bool play) {

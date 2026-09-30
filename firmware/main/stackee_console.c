@@ -369,6 +369,7 @@ static void reply_hello(long id) {
                 "\"key.custom\",\"key.custom_status\","
                 "\"inbox.status\",\"inbox.enable\",\"heap.info\","
                 "\"clips.status\",\"clips.sync\",\"clips.play\",\"clips.clear\",\"clips.auto\","
+                "\"menu.status\",\"menu.key\",\"menu.open\",\"menu.close\","
                 "\"app.info\",\"app.boot_factory\",\"ota.begin\",\"ota.status\","
                 "\"ota.end\",\"ota.commit\",\"ota.abort\"],"
                 "\"profile\":\"%s\",\"cdc\":%s}",

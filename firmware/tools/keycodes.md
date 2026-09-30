@@ -133,8 +133,14 @@ VIA の `customKeycodes` は **`QK_KB_0` (0x7E00) から順に** 対応づく約
 | 8〜17 | `STK_CUSTOM_0`〜`STK_CUSTOM_9` | — | 済 (VIA / Remap の表示は `Custom_0`〜`Custom_9`、0x7E08〜0x7E11。押した瞬間に `POST /key`。README §17-2c) |
 | 18 | `STK_CLIP` | — | 済 (2026-09-30。VIA / Remap の表示は `Clip`、0x7E12。押した瞬間に本体の FAT のクリップを 1 件、**通信せずに**字幕つきで鳴らす。README §17-2f) |
 | 19 | `STK_CLIP_AUTO` | — | 済 (2026-09-30。表示 `Clip_Auto`、0x7E13。押すたびにクリップの自動取得 (5 分ごとの同期) を ON / OFF。NVS に残る。README §17-2f) |
+| 20 | `STK_SETTINGS` | — | 済 (2026-10-01。表示 `Settings`、0x7E14。押すたびに本体の画面の設定メニューを開く / 閉じる。開いている間のキーは本体が受け取り PC には送らない。README §17-2g) |
 
-★ customKeycodes は **20 個** (0x7E00〜0x7E13)。Remap は customKeycodes を
+★ 0x7E14 は 2026-09-29 まで旧 `MIC_F1` の番号だった。保存済みの配列の旧 `MIC_F1` は
+移行 2 (番号で 1 回だけ当たる) が `MIC(KC_F1)` へ書き換え済みなので、この番号を
+`STK_SETTINGS` に使い直しても意味は化けない (移行 2 を当てる前の像から直接この像へ
+上げた本体でも、起動時に移行 2 が先に当たってから配列が使われる)。
+
+★ customKeycodes は **21 個** (0x7E00〜0x7E14)。Remap は customKeycodes を
 **先頭 32 個 (0x7E00〜0x7E1F) しか出さない**ので、32 個を超えないこと
 (`tools/gen_keymap.py` が生成時に止める)。
 

@@ -520,6 +520,10 @@ typedef struct {
     //   (watch_say)。その間だけ busy。
     bool     watch_on;          // 有効 (既定は audio が立てる。NVS には残さない)
     bool     watch_play;        // 受けた発話を鳴らす (false = 数えるだけ、検証用)
+    // ★ 設定メニューを開いている間は受け箱を見ない (2026-10-01)。待っている要求は
+    //   打ち切り、閉じたら seq の続きから聞く (発話はサーバに 5 分・16 件残る)。
+    bool     watch_held;
+    uint32_t watch_holds;       // 保留した回数
     int      watch_phase;       // stackee_talk_watch_phase_t
     bool     watch_http;        // 受け箱の要求を持っている
     bool     watch_long;        // それは wait= 付き (ロングポーリング)
@@ -698,6 +702,10 @@ int  stackee_talk_clip_auto(stackee_talk_t *t);
 // on / play を切り替える (inbox.enable)。off にすると待っている要求を打ち切る。
 // 呼ぶのは錠を持った console か audio タスク。
 void stackee_talk_watch_enable(stackee_talk_t *t, bool on, bool play);
+
+// 設定メニューを開いている間は受け箱を保留する (待っている要求は打ち切る)。
+// 呼ぶのは audio タスク (錠の中)。
+void stackee_talk_watch_hold(stackee_talk_t *t, bool held);
 
 // 発話の扱いを含めて「音を使っている」か (stackee_audio_busy に使う)。
 // ★ 常時ポーリングの待ちと、受けた発話の PCM を取っている間は false。

@@ -68,7 +68,42 @@ void matrix_scan_kb(void) {
     matrix_scan_user();
 }
 
+// ★ 設定メニュー中 (横取り中) に QMK に処理させてよいキーか。
+//   通すのは「PC へ出るレポートを作るだけ」のキーと、レイヤー・MT・LT。
+//   作られたレポートは横取りされて本体のメニューへ行くので PC には出ない。
+//   既定のレイヤーを変えるもの (DF / PDF。EEPROM を書くものもある)・
+//   QK_BOOT などの特殊キー・Stackee の独自キーは通さない。
+static bool gate_passes(uint16_t keycode) {
+    if (keycode <= QK_MOMENTARY_MAX) {
+        return true;    // 基本キー・修飾つき・MT・LT・LM・TO・MO
+    }
+    if (keycode >= QK_TOGGLE_LAYER && keycode <= QK_LAYER_TAP_TOGGLE_MAX) {
+        return true;    // TG・OSL・OSM・TT
+    }
+    return keycode >= STK_MT_BASE && keycode < STK_MT_BASE + stackee_ext_mt_count;
+}
+
 bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
+    // ★ 設定メニュー (qmk_port.h の「キーの横取り」)。Settings キーはいつでも効く。
+    if (keycode == STK_SETTINGS) {
+        if (record->event.pressed) {
+            s_custom_presses++;
+            stackee_qmk_custom_key(STACKEE_KEY_SETTINGS, true);
+        }
+        return false;   // ★ HID へは出さない
+    }
+    if (stackee_qmk_gate_capturing() && !gate_passes(keycode)) {
+        bool own = (keycode >= STACKEE_KEYCODE_FIRST && keycode <= STACKEE_KEYCODE_LAST) ||
+                   (keycode >= STACKEE_MIC_FIRST && keycode <= STACKEE_MIC_LAST);
+        // 独自キーの**離し**は通す。開く前から押していた Talk / MIC(kc) /
+        // TOUCH_SCROLL の「押している」印を下ろすため (離しで何かを始める
+        // 独自キーは無い)。MIC(kc) の中のキーの離しは横取りされて PC へ出ない。
+        if (!(own && !record->event.pressed)) {
+            stackee_qmk_gate_note_swallowed();
+            return false;
+        }
+    }
+
     // ここより先へ進むキー (= 普通のキー) が押されたら、待機中の
     // 修飾つき HoldTap を割り込みとして扱う。
     if (record->event.pressed &&
@@ -172,6 +207,7 @@ const char *stackee_key_action_name(stackee_key_action_t action) {
         case STACKEE_KEY_MIC: return "MIC_KEY";
         case STACKEE_KEY_CLIP: return "CLIP";
         case STACKEE_KEY_CLIP_AUTO: return "CLIP_AUTO";
+        case STACKEE_KEY_SETTINGS: return "SETTINGS";
         default: break;
     }
     if (action >= STACKEE_KEY_CUSTOM_0 && action <= STACKEE_KEY_CUSTOM_LAST) {

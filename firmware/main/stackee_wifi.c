@@ -496,22 +496,39 @@ static size_t reply_remove(long id, const char *line, char *buf, size_t cap) {
 }
 
 // 全チャネルを 1 回走査する。★ 録音・再生中は断る (現行と同じ制約)。
-static size_t reply_scan(long id, char *buf, size_t cap) {
-    if (stackee_audio_busy()) {
-        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"audio_busy\"}", id);
+// 同じ SSID はいちばん強い 1 つに畳み、強い順に最大 max 件。
+// 呼べるのはメインループ (console / 設定メニューの仕事) だけ。3〜6 秒止まる。
+int stackee_wifi_scan_nets(stackee_wifi_scan_net_t *out, int max,
+                           bool *radio_kept, const char **err) {
+    const char *dummy = NULL;
+    if (err == NULL) {
+        err = &dummy;
     }
-    int64_t t0 = esp_timer_get_time();
+    *err = NULL;
+    if (s_w == NULL || !w.started) {
+        *err = "off";
+        return -1;
+    }
+    if (stackee_audio_busy()) {
+        *err = "audio_busy";
+        return -1;
+    }
     if (!sm_lock()) {
-        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id);
+        *err = "busy";
+        return -1;
     }
     bool held = stackee_wifi_sm_suspend(&w.sm);
     sm_unlock();
+    if (radio_kept != NULL) {
+        *radio_kept = held;
+    }
     if (!ops_radio_on()) {
         if (sm_lock()) {
             stackee_wifi_sm_resume(&w.sm);
             sm_unlock();
         }
-        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"radio\"}", id);
+        *err = "radio";
+        return -1;
     }
     atomic_store(&w.scan_done, false);
     wifi_scan_config_t config = {0};
@@ -524,15 +541,26 @@ static size_t reply_scan(long id, char *buf, size_t cap) {
             stackee_wifi_sm_resume(&w.sm);
             sm_unlock();
         }
-        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"scan\"}", id);
+        *err = "scan";
+        return -1;
     }
     // 全チャネルで 3〜6 秒。ここで待つのは console タスクだけで、キー入力は
     // 別タスク (CPU1) なので打鍵は止まらない。
     for (int i = 0; i < 900 && !atomic_load(&w.scan_done); i++) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    stackee_wifi_seen_t seen[STACKEE_WIFI_SEEN_MAX];
-    int n = ops_scan_read(seen, STACKEE_WIFI_SEEN_MAX);
+    // ★ 認証方式も要る (設定メニューがパスワードを聞くか決める) ので、
+    //   ops_scan_read を通さず records をそのまま読む。
+    uint16_t num = 0;
+    if (esp_wifi_scan_get_ap_num(&num) != ESP_OK) {
+        num = 0;
+    }
+    if (num > SCAN_RECORDS) {
+        num = SCAN_RECORDS;
+    }
+    if (num > 0 && esp_wifi_scan_get_ap_records(&num, w.records) != ESP_OK) {
+        num = 0;
+    }
     esp_wifi_scan_stop();
     if (!held) {
         ops_radio_off();
@@ -542,46 +570,175 @@ static size_t reply_scan(long id, char *buf, size_t cap) {
         sm_unlock();
     }
 
-    // SSID が重複するので、いちばん強い 1 つに畳む。
-    int order[STACKEE_WIFI_SEEN_MAX];
     int count = 0;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < (int)num; i++) {
+        const wifi_ap_record_t *r = &w.records[i];
+        if (r->ssid[0] == '\0') {
+            continue;               // 隠れた SSID は名前で登録できない
+        }
         int found = -1;
         for (int j = 0; j < count; j++) {
-            if (strcmp(seen[order[j]].ssid, seen[i].ssid) == 0) {
+            if (strcmp(out[j].ssid, (const char *)r->ssid) == 0) {
                 found = j;
                 break;
             }
         }
-        if (found < 0) {
-            order[count++] = i;
-        } else if (seen[i].rssi > seen[order[found]].rssi) {
-            order[found] = i;
+        if (found >= 0) {
+            if (r->rssi > out[found].rssi) {
+                out[found].rssi = r->rssi;
+                out[found].channel = r->primary;
+                out[found].secure = r->authmode != WIFI_AUTH_OPEN;
+            }
+            continue;
         }
+        if (count >= max) {
+            // 入れ物がいっぱい。いちばん弱いものより強ければ入れ替える。
+            int weakest = 0;
+            for (int j = 1; j < count; j++) {
+                if (out[j].rssi < out[weakest].rssi) {
+                    weakest = j;
+                }
+            }
+            if (count == 0 || r->rssi <= out[weakest].rssi) {
+                continue;
+            }
+            found = weakest;
+        } else {
+            found = count++;
+        }
+        snprintf(out[found].ssid, sizeof(out[found].ssid), "%s", (const char *)r->ssid);
+        out[found].rssi = r->rssi;
+        out[found].channel = r->primary;
+        out[found].secure = r->authmode != WIFI_AUTH_OPEN;
     }
     // 強い順に並べる。
     for (int i = 0; i < count; i++) {
         for (int j = i + 1; j < count; j++) {
-            if (seen[order[j]].rssi > seen[order[i]].rssi) {
-                int tmp = order[i];
-                order[i] = order[j];
-                order[j] = tmp;
+            if (out[j].rssi > out[i].rssi) {
+                stackee_wifi_scan_net_t tmp = out[i];
+                out[i] = out[j];
+                out[j] = tmp;
             }
         }
     }
-    if (count > 10) {
-        count = 10;             // 1 枠に収まる数 (CDC の送信 FIFO は 2048 B)
+    return count;
+}
+
+static size_t reply_scan(long id, char *buf, size_t cap) {
+    int64_t t0 = esp_timer_get_time();
+    stackee_wifi_scan_net_t nets[10];   // 1 枠に収まる数 (CDC の送信 FIFO は 2048 B)
+    bool held = false;
+    const char *err = NULL;
+    int count = stackee_wifi_scan_nets(nets, 10, &held, &err);
+    if (count < 0) {
+        return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"%s\"}", id, err ? err : "scan");
     }
     size_t at = put(buf, cap, 0, "{\"id\":%ld,\"ok\":1,\"radio_kept\":%d,\"nets\":[",
                     id, held ? 1 : 0);
     for (int i = 0; i < count; i++) {
-        const stackee_wifi_seen_t *net = &seen[order[i]];
         at = put(buf, cap, at, "%s{\"ssid\":\"", i ? "," : "");
-        at = put_json_str(buf, cap, at, net->ssid);
-        at = put(buf, cap, at, "\",\"ch\":%d,\"rssi\":%d}", net->channel, net->rssi);
+        at = put_json_str(buf, cap, at, nets[i].ssid);
+        at = put(buf, cap, at, "\",\"ch\":%d,\"rssi\":%d}", nets[i].channel, nets[i].rssi);
     }
     return put(buf, cap, at, "],\"n\":%d,\"total_ms\":%lu}", count,
                (unsigned long)((esp_timer_get_time() - t0) / 1000));
+}
+
+// ---------------------------------------------------------------------------
+// 設定メニューの口 (メインループから。README §17-2g)
+// ---------------------------------------------------------------------------
+// ★ password は受け取って登録簿へ書くだけ。ログにも戻り値にも出さない。
+const char *stackee_wifi_store_add(const char *ssid, const char *password, int channel) {
+    if (s_w == NULL || !w.started) {
+        return "off";
+    }
+    const char *bad = stackee_wifi_validate(ssid, password, channel);
+    if (bad != NULL) {
+        return bad;
+    }
+    stackee_wifi_list_t list;
+    const char *note = NULL;
+    load_list(&list, &note);
+    bad = stackee_wifi_upsert(&list, ssid, password, channel);
+    bool ok = (bad == NULL) && save_list(&list);
+    memset(&list, 0, sizeof(list));        // ★ password の写しを残さない
+    if (bad != NULL) {
+        return bad;
+    }
+    if (!ok) {
+        return "write_failed";
+    }
+    ESP_LOGI(TAG, "登録簿に %s を足した (設定メニュー)", ssid);
+    return NULL;
+}
+
+const char *stackee_wifi_store_remove(const char *ssid) {
+    if (s_w == NULL || !w.started) {
+        return "off";
+    }
+    stackee_wifi_list_t list;
+    const char *note = NULL;
+    load_list(&list, &note);
+    const char *bad = stackee_wifi_remove_ssid(&list, ssid);
+    bool ok = (bad == NULL) && save_list(&list);
+    memset(&list, 0, sizeof(list));
+    if (bad != NULL) {
+        return bad;
+    }
+    if (!ok) {
+        return "write_failed";
+    }
+    ESP_LOGI(TAG, "登録簿から %s を消した (設定メニュー)", ssid);
+    kick_locked();
+    return NULL;
+}
+
+bool stackee_wifi_prefer(const char *ssid) {
+    if (s_w == NULL || !w.started || !sm_lock()) {
+        return false;
+    }
+    stackee_wifi_sm_prefer(&w.sm, ssid);
+    sm_unlock();
+    return true;
+}
+
+int stackee_wifi_saved_ssids(char out[][STACKEE_WIFI_SSID_MAX], int max) {
+    if (s_w == NULL || !w.started) {
+        return 0;
+    }
+    stackee_wifi_list_t list;
+    const char *note = NULL;
+    load_list(&list, &note);
+    int n = 0;
+    for (int i = 0; i < list.count && n < max; i++) {
+        snprintf(out[n++], STACKEE_WIFI_SSID_MAX, "%s", list.nets[i].ssid);
+    }
+    memset(&list, 0, sizeof(list));
+    return n;
+}
+
+int stackee_wifi_rssi(void) {
+    if (!stackee_wifi_connected()) {
+        return 0;
+    }
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        return 0;
+    }
+    return ap.rssi;
+}
+
+void stackee_wifi_target(char *ssid, size_t cap, int *result, int *reason) {
+    if (s_w == NULL) {
+        if (cap) { ssid[0] = '\0'; }
+        *result = 0;
+        *reason = 0;
+        return;
+    }
+    // ★ 錠は取らない (ui タスクから数百 ms ごと。1 つ古い値でよい)。
+    snprintf(ssid, cap, "%s", w.sm.prefer_last);
+    *result = w.sm.prefer_result;
+    *reason = w.sm.prefer_reason;
 }
 
 static size_t wifi_console(const char *cmd, const char *line, long id,
@@ -632,11 +789,13 @@ static size_t wifi_console(const char *cmd, const char *line, long id,
         size_t at = put(buf, cap, 0,
                    "{\"id\":%ld,\"ok\":1,\"wifi_state\":\"%s\",\"ssid\":\"%s\","
                    "\"ip\":\"%s\",\"nets\":%d,\"passes\":%lu,\"connects\":%lu,"
-                   "\"failures\":%lu,\"connect_ms\":%lu,\"up_ms\":%lu}",
+                   "\"failures\":%lu,\"connect_ms\":%lu,\"up_ms\":%lu,"
+                   "\"target\":\"%s\",\"target_result\":%d,\"target_reason\":%d}",
                    id, stackee_wifi_sm_state_name(&w.sm), w.sm.ssid, w.sm.ip,
                    w.sm.nets.count, (unsigned long)w.sm.passes,
                    (unsigned long)w.sm.connects, (unsigned long)w.sm.failures,
-                   (unsigned long)w.sm.connect_ms, (unsigned long)w.sm.up_at_ms);
+                   (unsigned long)w.sm.connect_ms, (unsigned long)w.sm.up_at_ms,
+                   w.sm.prefer_last, w.sm.prefer_result, w.sm.prefer_reason);
         sm_unlock();
         return at;
     }

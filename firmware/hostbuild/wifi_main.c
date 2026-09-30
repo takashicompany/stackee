@@ -17,6 +17,7 @@
 //   drop              リンクが切れたことにする
 //   kick              console の wifi.connect
 //   suspend / resume  console の wifi.scan が呼ぶもの
+//   prefer <ssid>     設定メニューの「この SSID に切り替える」
 //   print
 #include <stdio.h>
 #include <stdlib.h>
@@ -215,6 +216,9 @@ int main(void) {
         } else if (strcmp(line, "kick") == 0) {
             printf("KICK %s\n", stackee_wifi_sm_kick(&g_sm));
             g_last_state = g_sm.state;
+        } else if (strcmp(line, "prefer") == 0) {
+            printf("PREFER %s\n", stackee_wifi_sm_prefer(&g_sm, arg ? arg : ""));
+            g_last_state = g_sm.state;
         } else if (strcmp(line, "suspend") == 0) {
             printf("SUSPEND %d\n", stackee_wifi_sm_suspend(&g_sm) ? 1 : 0);
             g_last_state = g_sm.state;
@@ -228,6 +232,9 @@ int main(void) {
                    g_sm.ssid, g_sm.ip, g_sm.nets.count, (unsigned)g_sm.passes,
                    (unsigned)g_sm.connects, (unsigned)g_sm.failures,
                    (unsigned)g_sm.up_at_ms, g_scanning ? 1 : 0);
+            printf("TARGET %s RESULT %d REASON %d ACTIVE %d\n",
+                   g_sm.prefer_last[0] ? g_sm.prefer_last : "-", g_sm.prefer_result,
+                   g_sm.prefer_reason, g_sm.prefer[0] ? 1 : 0);
         } else {
             fprintf(stderr, "unknown command: %s\n", line);
             return 2;

@@ -105,6 +105,16 @@ typedef struct {
     uint32_t passes, connects, failures;
     bool     radio_held;
     bool     paused;
+
+    // ★ 設定メニューの「この SSID に切り替える / 追加して繋ぐ」(2026-10-01)。
+    //   prefer が空でない間の 1 周期だけ、登録簿のうち**この SSID だけ**を
+    //   狙う。繋がっても失敗しても空に戻し、次からはいつもの「いちばん強い
+    //   もの」に戻る。結果は prefer_last / prefer_result / prefer_reason に残す。
+    char     prefer[STACKEE_WIFI_SSID_MAX];
+    char     prefer_last[STACKEE_WIFI_SSID_MAX];
+    int      prefer_result;         // 0 なし / 1 試行中 / 2 接続した / 3 失敗
+    int      prefer_reason;         // 失敗の理由 (切断理由 / -1 見つからない / -2 時間切れ)
+    uint32_t prefers;
 } stackee_wifi_t;
 
 void stackee_wifi_sm_init(stackee_wifi_t *w, const stackee_wifi_ops_t *ops);
@@ -114,6 +124,10 @@ void stackee_wifi_sm_step(stackee_wifi_t *w);
 
 // console の wifi.connect。★ ここではブロックしない。
 const char *stackee_wifi_sm_kick(stackee_wifi_t *w);
+
+// 設定メニューの切り替え / 追加。いまの接続を落として、次の 1 周期だけ ssid を
+// 狙う (登録簿に入っていること)。★ ここではブロックしない。
+const char *stackee_wifi_sm_prefer(stackee_wifi_t *w, const char *ssid);
 
 // console の wifi.scan と無線を取り合わないように止まる / 再開する。
 // suspend の戻り値は「接続を維持しているか」。

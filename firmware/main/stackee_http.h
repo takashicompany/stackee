@@ -99,6 +99,11 @@ typedef struct {
     uint32_t last_connect_ms;   // 直近の要求で張った時間 (使い回しなら 0)
     bool     last_reused;
     uint32_t warmups;           // 録音中に先に張った回数
+    // 直近に終わった要求 (打ち切りは数えない。設定メニューの「直近の通信」)
+    bool     any_done;
+    bool     last_ok;           // 通信が通り、HTTP 2xx だった
+    int      last_done_status;
+    uint32_t last_done_ago_ms;
 } stackee_http_stats_t;
 
 void stackee_http_stats(stackee_http_stats_t *out);

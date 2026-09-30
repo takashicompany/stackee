@@ -2427,6 +2427,16 @@ watchprint
         self.assertIn('HABORT', out)
         self.assertEqual(paths(out)[-1], '/inbox?after=7&wait=25')   # 戻ればまた聞く
 
+    def test_menu_holds_the_inbox_and_resumes_from_the_seq(self):
+        """設定メニュー中は受け箱を保留し、閉じたら seq の続きから聞く (2026-10-01)。"""
+        out = run(self.PRE + 'hold 1\nt 3000\nwatchprint\nhold 0\nt 5\n')
+        self.assertIn('HABORT', out)
+        p = paths(out)
+        self.assertEqual(p[-1], '/inbox?after=7&wait=25')
+        # 保留している 3 秒の間は 1 本も撃たない。
+        self.assertEqual(p.count('/inbox?after=7&wait=25'), 2)
+        self.assertEqual(watch_info(out)['http'], 0)
+
 
 class WatchBackoffTest(unittest.TestCase):
     def test_backoff_doubles_up_to_60_seconds(self):

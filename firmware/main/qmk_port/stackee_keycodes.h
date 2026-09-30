@@ -31,10 +31,11 @@ enum stackee_keycodes {
     STK_CUSTOM_9         = QK_KB_0 + 17,
     STK_CLIP             = QK_KB_0 + 18,
     STK_CLIP_AUTO        = QK_KB_0 + 19,
+    STK_SETTINGS         = QK_KB_0 + 20,
 };
 
 #define STACKEE_KEYCODE_FIRST QK_KB_0
-#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 19)
+#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 20)
 #define STK_MT_BASE           (QK_KB_0 + 7)
 
 // stackee 独自キー Custom_0..Custom_9 (押した瞬間にサーバへ POST /key)。

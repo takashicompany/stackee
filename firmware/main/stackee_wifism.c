@@ -73,6 +73,16 @@ static void fail_pass(stackee_wifi_t *w, const char *why) {
     w->ip[0] = '\0';
     w->failures++;
     w->next_at = now(w) + (uint32_t)STACKEE_WIFI_RETRY_S * 1000u;
+    if (w->prefer[0] != '\0') {
+        // ★ 名指しの接続が失敗した。結果を残して、すぐいつもの自動接続に戻す
+        //   (60 秒も無線なしにしない。元の AP が見えていればそちらへ戻る)。
+        w->prefer_result = 3;
+        if (w->prefer_reason == 0) {
+            w->prefer_reason = -1;
+        }
+        w->prefer[0] = '\0';
+        w->next_at = now(w) + STACKEE_WIFI_RELINK_DELAY_MS;
+    }
     char note[160];
     snprintf(note, sizeof(note), "%s / 次は %ds 後", why, STACKEE_WIFI_RETRY_S);
     to(w, STACKEE_WIFI_S_WAIT, note);
@@ -103,6 +113,11 @@ static void do_load(stackee_wifi_t *w) {
     w->note = note;
     w->loaded = true;
     if (nets.count == 0) {
+        if (w->prefer[0] != '\0') {
+            w->prefer_result = 3;       // 名指しした SSID は登録簿に無い
+            w->prefer_reason = -1;
+            w->prefer[0] = '\0';
+        }
         char msg[64];
         snprintf(msg, sizeof(msg), "登録 0 件 (%s)", note ? note : "empty");
         to(w, STACKEE_WIFI_S_OFF, msg);
@@ -173,7 +188,23 @@ static void do_scan_read(stackee_wifi_t *w) {
     w->idx++;
 
     stackee_wifi_pick_t target;
-    if (!stackee_wifi_pick(w->seen, w->seen_count, &w->nets, &target)) {
+    bool picked;
+    if (w->prefer[0] != '\0') {
+        // 名指し。登録簿のうちその SSID だけを候補にする。
+        int at = stackee_wifi_find(&w->nets, w->prefer);
+        picked = false;
+        if (at >= 0) {
+            stackee_wifi_list_t only;
+            memset(&only, 0, sizeof(only));
+            only.nets[0] = w->nets.nets[at];
+            only.count = 1;
+            picked = stackee_wifi_pick(w->seen, w->seen_count, &only, &target);
+            memset(&only, 0, sizeof(only));     // ★ password の写しを残さない
+        }
+    } else {
+        picked = stackee_wifi_pick(w->seen, w->seen_count, &w->nets, &target);
+    }
+    if (!picked) {
         w->state = STACKEE_WIFI_S_SCAN_START;   // 次のチャネルへ (ログは出さない)
         w->entered = now(w);
         return;
@@ -199,6 +230,10 @@ static void do_scan_read(stackee_wifi_t *w) {
 
 static void link_up(stackee_wifi_t *w, uint32_t connect_ms) {
     snprintf(w->ssid, sizeof(w->ssid), "%s", w->target.ssid);
+    if (w->prefer[0] != '\0') {
+        w->prefer_result = (strcmp(w->prefer, w->ssid) == 0) ? 2 : 3;
+        w->prefer[0] = '\0';
+    }
     w->failures = 0;
     w->have_target = false;
     memset(&w->target, 0, sizeof(w->target));
@@ -256,10 +291,12 @@ static void do_linkup(stackee_wifi_t *w) {
         char why[96];
         snprintf(why, sizeof(why), "接続失敗 ssid=%s reason=%d (connect_ms=%lu)",
                  w->target.ssid, state, (unsigned long)elapsed);
+        w->prefer_reason = state;
         fail_pass(w, why);
         return;
     }
     if (elapsed >= STACKEE_WIFI_CONNECT_TIMEOUT_MS) {
+        w->prefer_reason = -2;
         char why[96];
         snprintf(why, sizeof(why), "接続がタイムアウト ssid=%s (%lums)",
                  w->target.ssid, (unsigned long)elapsed);
@@ -338,6 +375,35 @@ const char *stackee_wifi_sm_kick(stackee_wifi_t *w) {
     //   (stackee_wifi.py の kick() も _paused を触らない)。
     w->next_at = now(w);
     to(w, STACKEE_WIFI_S_LOAD, "kick");
+    return stackee_wifi_sm_state_name(w);
+}
+
+const char *stackee_wifi_sm_prefer(stackee_wifi_t *w, const char *ssid) {
+    if (ssid == NULL || ssid[0] == '\0') {
+        return stackee_wifi_sm_state_name(w);
+    }
+    snprintf(w->prefer, sizeof(w->prefer), "%s", ssid);
+    snprintf(w->prefer_last, sizeof(w->prefer_last), "%s", ssid);
+    w->prefer_result = 1;
+    w->prefer_reason = 0;
+    w->prefers++;
+    // ★ いまの接続は落とす (esp_wifi_connect は繋がったままでは別の AP へ
+    //   移らない)。走査の途中なら止める。
+    stop_scan(w);
+    if (w->state == STACKEE_WIFI_S_UP || w->state == STACKEE_WIFI_S_LINKUP ||
+        w->radio_held) {
+        radio_off(w);
+    }
+    w->have_target = false;
+    memset(&w->target, 0, sizeof(w->target));
+    w->ssid[0] = '\0';
+    w->ip[0] = '\0';
+    w->loaded = false;              // 登録が増えているかもしれない
+    w->failures = 0;
+    w->next_at = now(w);
+    char note[64];
+    snprintf(note, sizeof(note), "prefer ssid=%s", w->prefer);
+    to(w, STACKEE_WIFI_S_LOAD, note);
     return stackee_wifi_sm_state_name(w);
 }
 

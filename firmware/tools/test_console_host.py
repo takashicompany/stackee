@@ -338,7 +338,8 @@ class Phase4CommandTest(unittest.TestCase):
                      'key.custom', 'key.custom_status',
                      'inbox.status', 'inbox.enable', 'heap.info',
                      'clips.status', 'clips.sync', 'clips.play', 'clips.clear',
-                     'clips.auto'):
+                     'clips.auto',
+                     'menu.status', 'menu.key', 'menu.open', 'menu.close'):
             self.assertIn(name, features, name)
 
     def test_hello_says_which_profile(self):

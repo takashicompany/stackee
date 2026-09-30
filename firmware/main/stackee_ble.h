@@ -31,6 +31,8 @@ void stackee_ble_tick(void);
 
 bool stackee_ble_ready(void);       // スタックが立ち上がっているか
 bool stackee_ble_connected(void);
+// いま繋がっている相手のアドレス ("AA:BB:CC:DD:EE:FF")。分からなければ false。
+bool stackee_ble_peer_addr(char *out, size_t cap);
 
 // 接続間隔 [ms]。打鍵がホストへ届くまでの遅れの下限になる
 // (1 レポートは次の接続イベントまで待つ)。未接続なら -1。

@@ -181,9 +181,10 @@ class ViaDefinitionTest(unittest.TestCase):
         self.assertEqual(names.index('STK_MT_0'), 7)        # 0x7E07 のまま
         self.assertEqual(names.index('STK_CUSTOM_0'), 8)    # 0x7E08 (2026-09-29)
         self.assertEqual(names.index('STK_CUSTOM_9'), 17)   # 0x7E11
-        self.assertEqual(names[-2], 'STK_CLIP')             # 0x7E12 (2026-09-30)
-        self.assertEqual(names[-1], 'STK_CLIP_AUTO')        # 0x7E13 (2026-09-30)
-        self.assertEqual(len(names), 20)
+        self.assertEqual(names[-3], 'STK_CLIP')             # 0x7E12 (2026-09-30)
+        self.assertEqual(names[-2], 'STK_CLIP_AUTO')        # 0x7E13 (2026-09-30)
+        self.assertEqual(names[-1], 'STK_SETTINGS')         # 0x7E14 (2026-10-01)
+        self.assertEqual(len(names), 21)
         # ヘッダの enum と VIA の並びが 1 つずつ同じか。
         for index, name in enumerate(names):
             self.assertIn('%-20s = QK_KB_0 + %d,' % (name, index), self.header)
@@ -216,7 +217,7 @@ class ViaDefinitionTest(unittest.TestCase):
         self.assertEqual([e['name'] for e in custom],
                          ['STK_CUSTOM_%d' % n for n in range(10)])
         self.assertEqual(entries[8:18], custom)
-        self.assertEqual(entries[-12:-2], custom)
+        self.assertEqual(entries[-13:-3], custom)
         for n, entry in enumerate(custom):
             self.assertEqual(entry['shortName'], 'Custom_%d' % n)
             self.assertTrue(entry['title'].startswith('Custom_%d' % n))
@@ -236,7 +237,20 @@ class ViaDefinitionTest(unittest.TestCase):
         self.assertEqual(entries[19]['name'], 'STK_CLIP_AUTO')
         self.assertEqual(entries[19]['shortName'], 'Clip_Auto')
         self.assertIn('STK_CLIP_AUTO        = QK_KB_0 + 19,', self.header)
-        self.assertIn('#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 19)', self.header)
+
+    def test_the_settings_key_follows_clip_auto(self):
+        """STK_SETTINGS は Clip_Auto (0x7E13) の次 = 0x7E14。表示は Settings。
+
+        ★ 0x7E14 は 2026-09-29 まで旧 MIC_F1 だった。保存済みの配列の旧 MIC_F1 は
+        移行 2 (番号で 1 回だけ) が MIC(F1) へ書き換え済みなので、この番号を
+        使い直しても意味は化けない。
+        """
+        entries = self.via['customKeycodes']
+        self.assertEqual(entries[20]['name'], 'STK_SETTINGS')
+        self.assertEqual(entries[20]['shortName'], 'Settings')
+        self.assertEqual(0x7E00 + 20, 0x7E14)
+        self.assertIn('STK_SETTINGS         = QK_KB_0 + 20,', self.header)
+        self.assertIn('#define STACKEE_KEYCODE_LAST  (QK_KB_0 + 20)', self.header)
 
     def test_a_new_mod_tap_would_stop_the_generator(self):
         """STK_MT_* が増えると Custom の番号がずれる。生成の段階で止める。"""

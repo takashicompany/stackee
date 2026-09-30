@@ -52,6 +52,19 @@
   python3 firmware/tools/check_phase4.py --only custom --custom-key 9
   python3 firmware/tools/check_phase4.py --only custom --custom-key 9 --custom-expect command
 
+  7. 本体の設定メニュー (--only menu を書いたときだけ。**既定では走らない**)
+     `menu.open` で開き、`key.inject F24` を 1 回打って **PC へのレポートが
+     1 件も増えない** (横取りの `to_pc` が変わらない) ことを見る。`menu.key` で
+     ルート → Wi-Fi → 登録済み → 戻る → サーバー → クリップ → 本体 と巡り、
+     階層ごとに `menu.status` の view を tools/menu_expected.py で描いて
+     `lcd.crc y=28 h=292` と突き合わせる。最後に `menu.close` で閉じ、
+     横取りが off に戻ること・バーの下の隙間が白・帯が黒・顔が 32 コマの
+     どれかと一致すること (lcd.crc) を見る。
+     ★ 無音・無人。Wi-Fi の切り替え・追加・削除・走査・接続テストは押さない
+       (登録簿を触らない・通信しない)。音量・送信先の項目でも Enter / ← → は押さない。
+
+  python3 firmware/tools/check_phase4.py --only menu
+
 ★ 音は鳴らさない。ここが触るのは**マイク側だけ**で、スピーカーには 1 度も
   触らない (camera も touch も音とは無関係)。
 """
@@ -320,6 +333,172 @@ def _check_custom_body(client, result, key, verbose):
     result['custom_key_ms'] = lat
 
 
+# ---------------------------------------------------------------------------
+# 7. 本体の設定メニュー。★ 無音・無人・登録簿も通信も触らない
+# ---------------------------------------------------------------------------
+MENU_SETTLE_S = 0.4
+# 巡回: (送るキー, 着くはずの画面)。Enter は「下の階層を開く」項目でしか押さない。
+MENU_WALK = [
+    ([], 'root'),
+    (['enter'], 'wifi'),
+    (['enter'], 'wifi_saved'),          # 登録済みの一覧 (見るだけ。Enter は押さない)
+    (['esc'], 'wifi'),
+    (['bs'], 'root'),
+    (['down', 'enter'], 'server'),
+    (['esc'], 'root'),
+    (['down', 'enter'], 'clips'),
+    (['esc'], 'root'),
+    (['down', 'enter'], 'device'),
+    (['esc'], 'root'),
+]
+
+
+def menu_region_crc(client):
+    reply = client.request('lcd.crc', timeout=5.0, y=28, h=292)
+    return reply.get('crc')
+
+
+def menu_snapshot(client, tries=4):
+    """view と画面の CRC を、view が動いていない瞬間に揃えて取る。"""
+    last = None
+    for _ in range(tries):
+        a = client.request('menu.status', timeout=5.0)
+        crc = menu_region_crc(client)
+        b = client.request('menu.status', timeout=5.0)
+        last = (b, crc)
+        if a.get('view') == b.get('view') and a.get('paints') == b.get('paints'):
+            return b, crc
+        time.sleep(0.15)
+    return last
+
+
+def check_menu(client, result, verbose=True):
+    import gen_font16
+    import menu_expected
+    font = gen_font16.load(menu_expected.FONT16)
+    before = client.request('menu.status', timeout=5.0)
+    result['menu_before'] = before
+    if before.get('error'):
+        return
+    if before.get('open'):
+        client.request('menu.close', timeout=5.0)
+        time.sleep(MENU_SETTLE_S)
+    opened = client.request('menu.open', timeout=5.0)
+    result['menu_open'] = opened
+    if opened.get('error'):
+        return
+    try:
+        time.sleep(MENU_SETTLE_S)
+        base = client.request('menu.status', timeout=5.0)
+        result['menu_base'] = base
+        if verbose:
+            print('  設定メニューを開いた。F24 を 1 回注入 (PC に出ないはず)...')
+        result['menu_inject'] = client.request('key.inject', timeout=5.0,
+                                               kc=INJECT_KEY, hold_ms=30)
+        time.sleep(0.2)
+        result['menu_after_inject'] = client.request('menu.status', timeout=5.0)
+        steps = []
+        for keys, want in MENU_WALK:
+            for k in keys:
+                client.request('menu.key', timeout=5.0, k=k)
+                time.sleep(0.12)
+            time.sleep(MENU_SETTLE_S)
+            st, crc = menu_snapshot(client)
+            view = st.get('view')
+            exp = menu_expected.expected_crc(view, font) if view else None
+            steps.append({'want': want, 'screen': st.get('screen'),
+                          'title': (view or {}).get('title'), 'crc': crc,
+                          'expected': exp, 'truncated': (view or {}).get('truncated'),
+                          'to_pc': (st.get('gate_stats') or {}).get('to_pc')})
+            if verbose:
+                print('    %-11s → %-11s crc %s / 期待 %s'
+                      % (want, st.get('screen'), crc, exp))
+        result['menu_steps'] = steps
+        result['menu_before_close'] = client.request('menu.status', timeout=5.0)
+    finally:
+        result['menu_close'] = client.request('menu.close', timeout=5.0)
+    time.sleep(0.6)
+    result['menu_after'] = client.request('menu.status', timeout=5.0, rows=0)
+    result['menu_after_crc'] = client.request('lcd.crc', timeout=5.0)
+    result['menu_gap_crc'] = client.request('lcd.crc', timeout=5.0, y=28, h=22).get('crc')
+    result['menu_band_crc'] = client.request('lcd.crc', timeout=5.0, y=250, h=70).get('crc')
+    result['menu_ui'] = client.request('ui.status', timeout=5.0)
+
+
+def menu_verdicts(result, out):
+    if 'menu_before' not in result:
+        return
+    before = result['menu_before']
+    if before.get('error'):
+        out.append(('設定メニュー', False, 'menu.status: %s (古い像?)' % before.get('error')))
+        return
+    opened = result.get('menu_open') or {}
+    if opened.get('error'):
+        out.append(('設定メニューを開く', None,
+                    '開けなかった (%s: %s)。会話・写真・Custom・クリップの処理中は'
+                    '開かない決まり' % (opened.get('error'), opened.get('why'))))
+        return
+    base = result.get('menu_base') or {}
+    out.append(('設定メニューを開く', base.get('open') == 1 and base.get('gate') == 'open',
+                'open=%s shown=%s gate=%s screen=%s'
+                % (base.get('open'), base.get('shown'), base.get('gate'),
+                   base.get('screen'))))
+    g0 = base.get('gate_stats') or {}
+    g1 = (result.get('menu_after_inject') or {}).get('gate_stats') or {}
+    out.append(('メニュー中の打鍵は PC に出ない',
+                g1.get('to_pc') == g0.get('to_pc') and
+                (g1.get('keys', 0) or 0) >= (g0.get('keys', 0) or 0),
+                'F24 を注入: PC へのレポート %s → %s / 本体が読んだキー %s → %s '
+                '/ key.inject の press_ms=%s'
+                % (g0.get('to_pc'), g1.get('to_pc'), g0.get('keys'), g1.get('keys'),
+                   (result.get('menu_inject') or {}).get('press_ms'))))
+    steps = result.get('menu_steps') or []
+    bad = [s for s in steps if s['screen'] != s['want']]
+    out.append(('メニューの階層を巡る', bool(steps) and not bad,
+                '%d 画面 / 違った %s'
+                % (len(steps), ', '.join('%s→%s' % (s['want'], s['screen'])
+                                         for s in bad) or 'なし')))
+    mism = [s for s in steps if s['crc'] != s['expected']]
+    out.append(('メニューの画面 (lcd.crc)', bool(steps) and not mism,
+                '%d 画面を tools/menu_expected.py と照合 / 違った %s'
+                % (len(steps), ', '.join(s['want'] for s in mism) or 'なし')))
+    to_pc = [s['to_pc'] for s in steps]
+    out.append(('巡回中も PC に出ない', len(set(to_pc)) <= 1 and
+                (not to_pc or to_pc[0] == g1.get('to_pc')),
+                'to_pc %s' % sorted(set(to_pc))))
+    after = result.get('menu_after') or {}
+    out.append(('閉じたら横取りが off に戻る',
+                after.get('open') == 0 and after.get('gate') == 'off' and
+                after.get('shown') == 0,
+                'open=%s shown=%s gate=%s closes=%s'
+                % (after.get('open'), after.get('shown'), after.get('gate'),
+                   after.get('closes'))))
+    import zlib
+    white = zlib.crc32(b'\xff\xff' * 240 * 22)
+    gap_ok = result.get('menu_gap_crc') == white
+    try:
+        import gen_font16
+        import subtitle_expected
+        band = subtitle_expected.render(
+            gen_font16.load(subtitle_expected.FONT16), '').crc()
+    except Exception:           # noqa: BLE001
+        band = None
+    ui = result.get('menu_ui') or {}
+    band_ok = None if ui.get('sub_len') else (result.get('menu_band_crc') == band)
+    face = (result.get('menu_after_crc') or {}).get('face')
+    try:
+        import render_expected as rex
+        faces = rex.Renderer().expected()['faces']
+    except Exception:           # noqa: BLE001
+        faces = None
+    face_ok = None if faces is None else face in faces
+    out.append(('閉じたら顔に戻る', gap_ok and band_ok is not False and face_ok is not False,
+                '隙間 白=%s / 帯 黒=%s / 顔 %s (%s)'
+                % (gap_ok, band_ok, face,
+                   'コマ %d と一致' % faces.index(face) if face_ok else
+                   ('32 コマのどれとも違う' if faces else '期待値なし (素材が無い)'))))
+
+
 def custom_verdicts(result, args, out):
     start = result.get('custom_start')
     if start is None:
@@ -494,6 +673,9 @@ def collect(args):
         # ★ Custom もサーバに仕事を投げるので、書いたときだけ。
         if args.only and 'custom' in args.only:
             check_custom(client, result, args.custom_key, verbose=not args.json)
+        # ★ 設定メニュー (無音・無人。書いたときだけ)。
+        if args.only and 'menu' in args.only:
+            check_menu(client, result, verbose=not args.json)
         result['status_after'] = client.request('status', timeout=args.timeout)
     finally:
         client.close()
@@ -637,6 +819,7 @@ def verdicts(result, args):
 
     # ---- 6. stackee 独自キー Custom_n ---------------------------------------
     custom_verdicts(result, args, out)
+    menu_verdicts(result, out)
 
     # ---- 3. コンソール --------------------------------------------------
     features = hello.get('features') or []
@@ -770,7 +953,7 @@ def main():
                         help='UAC で 1 秒録る (sox か ffmpeg が要る)')
     parser.add_argument('--only', nargs='*',
                         choices=('touch', 'camera', 'console', 'uac', 'look',
-                                 'custom'),
+                                 'custom', 'menu'),
                         help='一部だけ見る')
     parser.add_argument('--custom-key', type=int, choices=range(10),
                         help='--only custom で押す Custom_n の n (サーバ側に試験用の'

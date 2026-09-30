@@ -21,6 +21,7 @@
 #include "stackee_volume.h"
 #include "stackee_hid_out.h"
 #include "stackee_keymap_migrate.h"
+#include "stackee_menu.h"
 #include "stackee_perf.h"
 #include "stackee_report_queue.h"
 #include "stackee_tca8418.h"
@@ -60,7 +61,31 @@ void stackee_qmk_restart(void) {
     stackee_usb_request_restart();      // strap の固定込み
 }
 
+// ★ 設定メニューのキーの横取り (qmk_port.h)。開いているか (印) と横取りの
+//   状態を揃える。呼ぶのは入力タスクだけ (QMK の状態を触るため)。
+static void gate_sync(void) {
+    bool want = stackee_menu_is_open();
+    bool open = stackee_qmk_gate_state() == STACKEE_GATE_OPEN;
+    if (want != open) {
+        stackee_qmk_gate_set(want);
+    }
+}
+
+// 横取り中に押されたキー。メニューのキューに積むだけ (待たない)。
+void stackee_qmk_menu_key(uint8_t usage, uint8_t mods) {
+    stackee_menu_hid_key(usage, mods);
+}
+
 void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed) {
+    // ★ Settings。開く / 閉じるの印を置き、その場で横取りを揃える
+    //   (同じ周のうしろのキーから本体が受け取る)。
+    if (action == STACKEE_KEY_SETTINGS) {
+        if (pressed) {
+            stackee_menu_settings_key();
+            gate_sync();
+        }
+        return;
+    }
     // ★ STK_TALK だけは押し離しの両方が要る (押している間だけ録音する)。
     //   ここでは印を立てるだけ。実際の録音は audio タスクが進める。
     if (action == STACKEE_KEY_TALK) {
@@ -326,6 +351,9 @@ static void input_task(void *arg) {
 
         stackee_qmk_task();
         inject_step();
+        // 設定メニュー (console の menu.open / ルートの Esc でも開け閉めされる)。
+        gate_sync();
+        stackee_qmk_gate_step();
 
         stackee_report_queue_stats(&stats);
         if (stats.pushed != before) {

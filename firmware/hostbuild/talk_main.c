@@ -763,6 +763,9 @@ int main(void) {
             char *second = arg ? strchr(arg, ' ') : NULL;
             bool play = second ? atoi(second + 1) != 0 : true;
             stackee_talk_watch_enable(&g_talk, on != 0, play);
+        } else if (strcmp(line, "hold") == 0) {
+            // 設定メニューを開いている間の受け箱の保留 (2026-10-01)
+            stackee_talk_watch_hold(&g_talk, arg && atoi(arg) != 0);
         } else if (strcmp(line, "warm") == 0) {
             g_warm = arg && atoi(arg) != 0;
         } else if (strcmp(line, "watchok") == 0) {

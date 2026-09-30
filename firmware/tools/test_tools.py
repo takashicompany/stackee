@@ -674,6 +674,103 @@ class CheckPhase4Test(unittest.TestCase):
         self.assertFalse(self.names(result)['キーボードが生きている'])
 
 
+class CheckPhase4MenuTest(unittest.TestCase):
+    """--only menu の合否。PC に 1 件でも出たら NG にすること。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import check_phase4
+        cls.mod = check_phase4
+
+    def good(self):
+        gate = {'to_pc': 50, 'keys': 3}
+        steps = [{'want': w, 'screen': w, 'title': '', 'crc': 7, 'expected': 7,
+                  'truncated': 0, 'to_pc': 50}
+                 for _k, w in self.mod.MENU_WALK]
+        return {
+            'menu_before': {'ok': 1, 'open': 0},
+            'menu_open': {'ok': 1, 'open': 1},
+            'menu_base': {'open': 1, 'shown': 1, 'gate': 'open', 'screen': 'root',
+                          'gate_stats': dict(gate)},
+            'menu_inject': {'ok': False, 'press_ms': 0},
+            'menu_after_inject': {'gate_stats': {'to_pc': 50, 'keys': 4}},
+            'menu_steps': steps,
+            'menu_after': {'open': 0, 'shown': 0, 'gate': 'off', 'closes': 1},
+            'menu_after_crc': {'face': self.a_face()},
+            'menu_gap_crc': __import__('zlib').crc32(b'\xff\xff' * 240 * 22),
+            'menu_band_crc': None,
+            'menu_ui': {'sub_len': 5},
+        }
+
+    _face = None
+
+    def a_face(self):
+        # 顔の期待値が作れる木 (素材がある) ではその 1 コマ目を使う。
+        if CheckPhase4MenuTest._face is None:
+            try:
+                import render_expected
+                CheckPhase4MenuTest._face = render_expected.Renderer().expected()['faces'][0]
+            except Exception:       # noqa: BLE001
+                CheckPhase4MenuTest._face = 123
+        return CheckPhase4MenuTest._face
+
+    def verdicts(self, result):
+        out = []
+        self.mod.menu_verdicts(result, out)
+        return {name: ok for name, ok, _d in out}
+
+    def test_good(self):
+        got = self.verdicts(self.good())
+        self.assertTrue(got['メニュー中の打鍵は PC に出ない'])
+        self.assertTrue(got['メニューの階層を巡る'])
+        self.assertTrue(got['メニューの画面 (lcd.crc)'])
+        self.assertTrue(got['閉じたら横取りが off に戻る'])
+        self.assertIsNot(got['閉じたら顔に戻る'], False)
+
+    def test_a_report_to_the_pc_is_a_failure(self):
+        r = self.good()
+        r['menu_after_inject']['gate_stats']['to_pc'] = 51
+        self.assertFalse(self.verdicts(r)['メニュー中の打鍵は PC に出ない'])
+        r = self.good()
+        r['menu_steps'][3]['to_pc'] = 52
+        self.assertFalse(self.verdicts(r)['巡回中も PC に出ない'])
+
+    def test_a_wrong_screen_or_crc_is_a_failure(self):
+        r = self.good()
+        r['menu_steps'][2]['screen'] = 'wifi'
+        self.assertFalse(self.verdicts(r)['メニューの階層を巡る'])
+        r = self.good()
+        r['menu_steps'][1]['crc'] = 8
+        self.assertFalse(self.verdicts(r)['メニューの画面 (lcd.crc)'])
+
+    def test_a_face_that_is_not_one_of_the_32_is_a_failure(self):
+        r = self.good()
+        r['menu_after_crc'] = {'face': 1}
+        self.assertIsNot(self.verdicts(r)['閉じたら顔に戻る'], True)
+
+    def test_still_capturing_after_close_is_a_failure(self):
+        r = self.good()
+        r['menu_after']['gate'] = 'drain'
+        self.assertFalse(self.verdicts(r)['閉じたら横取りが off に戻る'])
+
+    def test_refused_while_busy_is_not_a_failure(self):
+        r = self.good()
+        r['menu_open'] = {'error': 'busy', 'why': 'talk'}
+        got = self.verdicts(r)
+        self.assertEqual(list(got.values()), [None])
+
+    def test_the_walk_never_presses_enter_on_an_action(self):
+        # ★ 巡回は Wi-Fi の切り替え・追加・削除・走査・接続テストを押さない。
+        #   Enter はルート・Wi-Fi の「下の階層を開く」項目の上でしか押さない。
+        screens = [w for _k, w in self.mod.MENU_WALK]
+        for keys, want in self.mod.MENU_WALK:
+            if 'enter' in keys:
+                self.assertIn(want, ('wifi', 'wifi_saved', 'server', 'clips', 'device'))
+        self.assertNotIn('wifi_scan', screens)
+        self.assertNotIn('wifi_result', screens)
+        self.assertEqual(screens[-1], 'root')
+
+
 class ConsoleHidFramingTest(unittest.TestCase):
     """console_hid.py の枠づくり (実機なしで見られる部分)。"""
 

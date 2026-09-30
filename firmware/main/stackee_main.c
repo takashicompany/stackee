@@ -37,6 +37,7 @@
 #include "stackee_nvs.h"
 #include "stackee_lcd.h"
 #include "stackee_logbuf.h"
+#include "stackee_menu.h"
 #include "stackee_cryptocheck.h"
 #include <string.h>
 #include "stackee_perf.h"
@@ -235,6 +236,9 @@ void app_main(void) {
         // クリップの FAT の仕事 (目録・4 KB ずつの書き込み・消す・読む)。
         // ★ いちばん低い優先度のここでだけ FAT に書く (README §17-2f)。
         stackee_clipfs_poll();
+        // 設定メニューの頼みごと (Wi-Fi の登録・切り替え・走査、送信先)。
+        // ★ 走査はここで 3〜6 秒止まる (console の wifi.scan と同じ)。
+        stackee_menu_poll();
         int64_t now = esp_timer_get_time();
         stackee_perf_sample(STACKEE_PERF_MAIN, (uint32_t)(now - last));
         last = now;

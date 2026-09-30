@@ -116,6 +116,9 @@ typedef enum {
     STACKEE_KEY_CLIP,
     // ★ クリップの自動取得の入り切り (2026-09-30)。押した瞬間に 1 回。
     STACKEE_KEY_CLIP_AUTO,
+    // ★ 本体の設定メニューを開く / 閉じる (2026-10-01)。押した瞬間に 1 回。
+    //   **メニュー中もこのキーだけは効く** (下の「キーの横取り」)。
+    STACKEE_KEY_SETTINGS,
 } stackee_key_action_t;
 
 const char *stackee_key_action_name(stackee_key_action_t action);
@@ -123,6 +126,62 @@ void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed);
 
 // 独自キーが押された回数 (status / テスト用)。
 uint32_t stackee_qmk_custom_key_count(void);
+
+// ---------------------------------------------------------------------------
+// 設定メニューのキーの横取り (2026-10-01、README §17-2g)
+// ---------------------------------------------------------------------------
+// メニューを開いている間は、QMK が作ったキーボードのレポートを **PC へ
+// 送らず本体が読む**。キーの処理そのもの (レイヤー・MT/LT・Shift) は QMK が
+// いつもどおりやるので、矢印がレイヤー 3 にあっても、Shift が MT でも、
+// 普段と同じ指でメニューを動かせる。
+//
+//   OFF   … 普段。レポートは PC へ。
+//   OPEN  … メニュー中。キーボードのレポートは stackee_qmk_menu_key() へ
+//            (新しく押されたキーだけ)。マウス・コンシューマ・システムは捨てる。
+//            独自キー (Talk / 音量 / Custom / Clip / MIC(kc) …) の**押下**と
+//            QK_BOOT などの特殊キーは握りつぶす (離しは通す。押しっぱなしの
+//            印を下ろすため)。Settings だけは効く。
+//   DRAIN … 閉じた直後。そのとき押されていたキーが全部離れるまで (最大
+//            STACKEE_GATE_DRAIN_MAX_MS) は、まだ PC へ出さない。離れたら
+//            QMK の状態を空にして (これも PC へは出さない) OFF へ。
+//
+// ★ 開くときは、**先に全部離したレポートを PC へ送ってから**横取りを始める
+//   (clear_keyboard)。開いた瞬間に押していたキーが PC に押しっぱなしで
+//   残らない。閉じたあとは、メニュー中に押していたキーの離しも PC には
+//   出ない (QMK の最後のレポートが空のまま = 送る差分が無い)。
+// ★ 呼べるのは input タスクだけ (QMK の状態を触るのはこのタスク 1 本)。
+typedef enum {
+    STACKEE_GATE_OFF = 0,
+    STACKEE_GATE_OPEN,
+    STACKEE_GATE_DRAIN,
+} stackee_gate_state_t;
+
+#define STACKEE_GATE_DRAIN_MAX_MS 1500
+
+void stackee_qmk_gate_set(bool open);
+// 1 周ごと (keyboard_task のあと)。DRAIN を終わらせる。
+void stackee_qmk_gate_step(void);
+stackee_gate_state_t stackee_qmk_gate_state(void);
+bool stackee_qmk_gate_capturing(void);
+const char *stackee_qmk_gate_name(stackee_gate_state_t state);
+
+typedef struct {
+    uint32_t opens, closes;         // 横取りを始めた / DRAIN へ移った回数
+    uint32_t drain_timeouts;        // 離れるのを待ちきれずに終えた回数
+    uint32_t captured;              // 本体が読んだキーボードのレポート
+    uint32_t keys;                  // そこから取り出した「押されたキー」
+    uint32_t dropped;               // 捨てたマウス・コンシューマ・システム
+    uint32_t swallowed;             // 握りつぶした独自キー・特殊キー
+    uint32_t to_pc;                 // PC へ出したキーボード / マウス /
+                                    // コンシューマ / システムのレポート (累計)
+} stackee_qmk_gate_stats_t;
+
+void stackee_qmk_gate_stats(stackee_qmk_gate_stats_t *out);
+void stackee_qmk_gate_note_swallowed(void);
+
+// アプリ (stackee_input.c / ホストの台本) が用意する。メニュー中に新しく
+// 押されたキー (HID の使用番号) と、そのときの修飾 (レポートの mods)。
+void stackee_qmk_menu_key(uint8_t usage, uint8_t mods);
 
 // ---------------------------------------------------------------------------
 // 立ち上げ

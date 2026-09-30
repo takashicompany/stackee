@@ -27,6 +27,8 @@
 #include "stackee_http.h"
 #include "stackee_input.h"
 #include "stackee_jsonlite.h"
+#include "stackee_menu.h"
+#include "stackee_menu_core.h"
 #include "stackee_nvs.h"
 #include "stackee_ota.h"
 #include "stackee_settings.h"
@@ -59,6 +61,22 @@ typedef struct {
     // manifest の acks[].lines が無い旧素材では NULL = 字幕なし。
     char    *lines;
 } ack_t;
+
+// 設定メニューからの頼みごと (README §17-2g)。触るのは audio タスクと、
+// 印を置くだけの ui タスク / console。★ PSRAM に取る。
+struct audio_menu_side {
+    _Atomic int  clip_auto_req;     // 1 = 自動取得を入り切り (帯には出さない)
+    _Atomic int  clip_sync_req;     // 1 = 今すぐ取り込む (clips.sync と同じ)
+    _Atomic int  health_req;        // 1 = GET /health を 1 回
+    int      health_state;          // stackee_menu_job_t
+    bool     health_http;           // 通信中
+    int      health_status;
+    uint32_t health_ms;
+    uint32_t health_started;
+    uint32_t health_n;
+    char     health_error[32];
+    char     health_path[STACKEE_TALK_PATH_MAX];
+};
 
 static struct {
     bool ready;
@@ -161,6 +179,8 @@ static struct {
     _Atomic int  clip_result;         // 0 未処理 / 1 始めた / -1 断った
     _Atomic bool clip_auto_req;       // STK_CLIP_AUTO (入り切り)
     stackee_clip_t *clip;
+    // 設定メニューからの頼みごと (2026-10-01)。★ 実体は PSRAM (内蔵 RAM を増やさない)。
+    struct audio_menu_side *menu;
     uint32_t last_key_ms;             // 最後に打鍵を見た時刻 (NVS へ書く間合い)
     uint32_t stat_records, stat_plays;
     uint32_t last_key_events;
@@ -855,6 +875,8 @@ static bool ops_watch_ok(void) {
     int st = atomic_load(&a.selftest_req);
     return !stackee_ota_busy() && !stackee_camera_busy() &&
            !(st == 1 || st == 2 || st == 4) &&
+           // ★ 設定メニューの接続テスト (GET /health) の間は通信を譲ってもらう。
+           !(a.menu != NULL && a.menu->health_state == STACKEE_MENU_JOB_RUNNING) &&
            atomic_load(&a.inject_req) < 0 && atomic_load(&a.look_req) == 0 &&
            atomic_load(&a.custom_req) == 0 && atomic_load(&a.clip_req) == 0;
 }
@@ -1097,6 +1119,117 @@ static void run_selftest(void) {
 // ---------------------------------------------------------------------------
 // audio タスク
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 設定メニューの接続テスト (GET /health を 1 回、2026-10-01)
+// ---------------------------------------------------------------------------
+// ★ 通信は会話・受け箱・クリップと同じ 1 本の口を使う。口が空いていて、
+//   会話が暇で、クリップの同期が通信していないときにだけ撃つ (メニュー中は
+//   受け箱を保留しているので、ふつうはすぐ空く)。撃っている間は ops_watch_ok
+//   が false を返すので、クリップの同期も受け箱も割り込まない。
+#define HEALTH_WAIT_MS   10000      // 口が空くのを待つ上限
+#define HEALTH_LIMIT_MS  15000      // 1 往復の上限
+
+static void health_fail(struct audio_menu_side *m, const char *why) {
+    m->health_state = STACKEE_MENU_JOB_FAILED;
+    snprintf(m->health_error, sizeof(m->health_error), "%s", why);
+    ESP_LOGI(TAG, "[menu] 接続テスト: %s", why);
+}
+
+static bool clip_uses_net(void) {
+    if (a.clip == NULL) {
+        return false;
+    }
+    int p = a.clip->phase;
+    return !(p == STACKEE_CLIP_SYNC_SCAN || p == STACKEE_CLIP_SYNC_IDLE ||
+             p == STACKEE_CLIP_SYNC_SLEEP);
+}
+
+static void health_step(void) {
+    struct audio_menu_side *m = a.menu;
+    if (m == NULL) {
+        return;
+    }
+    uint32_t now = ops_now();
+    if (atomic_exchange(&m->health_req, 0) == 1 &&
+        m->health_state != STACKEE_MENU_JOB_RUNNING) {
+        m->health_state = STACKEE_MENU_JOB_RUNNING;
+        m->health_http = false;
+        m->health_status = 0;
+        m->health_ms = 0;
+        m->health_error[0] = '\0';
+        m->health_started = now;
+        m->health_n++;
+        if (!stackee_http_configured() || m->health_path[0] == '\0') {
+            health_fail(m, "URL がありません");
+            return;
+        }
+        if (!ops_net_ready()) {
+            health_fail(m, "Wi-Fi に繋がっていません");
+            return;
+        }
+    }
+    if (m->health_state != STACKEE_MENU_JOB_RUNNING) {
+        return;
+    }
+    if (!m->health_http) {
+        int st = stackee_http_state(NULL, NULL, NULL, NULL);
+        if (st == STACKEE_HTTP_IDLE && a.talk->state == STACKEE_TALK_IDLE &&
+            !a.talk->watch_http && !clip_uses_net() &&
+            stackee_http_request("GET", m->health_path, NULL, 0, 1024, NULL)) {
+            m->health_http = true;
+            m->health_started = now;
+            return;
+        }
+        if ((uint32_t)(now - m->health_started) >= HEALTH_WAIT_MS) {
+            health_fail(m, "通信の口が空きません");
+        }
+        return;
+    }
+    int status = 0;
+    size_t got = 0;
+    int err = 0;
+    uint32_t elapsed = 0;
+    int st = stackee_http_state(&status, &got, &err, &elapsed);
+    if (st == STACKEE_HTTP_DONE || st == STACKEE_HTTP_ERROR) {
+        m->health_status = status;
+        m->health_ms = (uint32_t)(now - m->health_started);
+        stackee_http_close();
+        m->health_http = false;
+        if (st == STACKEE_HTTP_DONE && status >= 200 && status < 300) {
+            m->health_state = STACKEE_MENU_JOB_OK;
+            ESP_LOGI(TAG, "[menu] 接続テスト: OK (HTTP %d, %lu ms)", status,
+                     (unsigned long)m->health_ms);
+        } else {
+            health_fail(m, st == STACKEE_HTTP_ERROR ? "通信に失敗しました" : "");
+        }
+        return;
+    }
+    if ((uint32_t)(now - m->health_started) >= HEALTH_LIMIT_MS) {
+        stackee_http_close();
+        m->health_http = false;
+        health_fail(m, "時間切れ");
+    }
+}
+
+// 設定メニューからの頼みごと (talk の錠の中で)。
+static void menu_side_step(void) {
+    struct audio_menu_side *m = a.menu;
+    // ★ メニュー中は受け箱を保留 (待っている要求は打ち切る)。発話はサーバに
+    //   残るので、閉じたら seq の続きから聞く。
+    stackee_talk_watch_hold(a.talk, stackee_menu_is_open());
+    if (m == NULL) {
+        return;
+    }
+    if (atomic_exchange(&m->clip_auto_req, 0) == 1 && a.clip != NULL) {
+        // Clip_Auto キーと同じ切り替え・同じ NVS (帯には出さない)。
+        stackee_clip_set_auto(a.clip, !a.clip->auto_on);
+    }
+    if (atomic_exchange(&m->clip_sync_req, 0) == 1 && a.clip != NULL) {
+        stackee_clip_sync_now(a.clip);          // clips.sync と同じ
+    }
+    health_step();
+}
+
 static void audio_task(void *unused) {
     (void)unused;
     for (;;) {
@@ -1168,6 +1301,7 @@ static void audio_task(void *unused) {
                 }
                 atomic_store(&a.clip_result, ok ? 1 : -1);
             }
+            menu_side_step();
             stackee_talk_set_pressed(a.talk, atomic_load(&a.talk_pressed));
             stackee_talk_step(a.talk);
             talk_unlock();
@@ -1918,6 +2052,12 @@ esp_err_t stackee_audio_start(const char *post_path) {
         ESP_LOGI(TAG, "クリップ: %s / 自動取得 %s%s", clips_path[0] ? clips_path : "(URL なし)",
                  (!have || saved != 0) ? "ON" : "OFF", forced ? " (設定で強制 OFF)" : "");
     }
+    a.menu = heap_caps_calloc(1, sizeof(*a.menu), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (a.menu != NULL &&
+        !stackee_talk_sibling_path(a.talk->path, "health", a.menu->health_path,
+                                   sizeof(a.menu->health_path))) {
+        a.menu->health_path[0] = '\0';
+    }
     ESP_LOGI(TAG, "会話の切り捨て: 最短 %lu ms / 声の RMS %lu x %lu 窓",
              (unsigned long)a.talk->min_ms, (unsigned long)a.talk->voice_rms,
              (unsigned long)a.talk->voice_windows);
@@ -2159,4 +2299,118 @@ size_t stackee_audio_look_json(char *buf, size_t cap, size_t at) {
     at = put(buf, cap, at, "\"}");
     talk_unlock();
     return at;
+}
+
+// ---------------------------------------------------------------------------
+// 設定メニュー (2026-10-01、README §17-2g)
+// ---------------------------------------------------------------------------
+const char *stackee_audio_menu_blocker(void) {
+    // ★ 入力タスクからも呼ぶ。錠は取らない (値を読むだけ)。
+    if (!a.ready || a.talk == NULL) {
+        return NULL;
+    }
+    const stackee_talk_t *t = a.talk;
+    if (atomic_load(&a.talk_pressed) || t->state == STACKEE_TALK_RECORDING) {
+        return "talk";
+    }
+    if (t->custom_active) {
+        return "custom";
+    }
+    if (t->clip_active) {
+        return "clip";
+    }
+    if (t->look_reserved) {
+        return "camera";
+    }
+    if (t->watch_say) {
+        return "inbox";
+    }
+    if (t->state != STACKEE_TALK_IDLE) {
+        return "talk";
+    }
+    if (a.play_active) {
+        return "playing";
+    }
+    if (atomic_load(&a.inject_req) >= 0 || atomic_load(&a.look_req) != 0 ||
+        atomic_load(&a.custom_req) != 0 || atomic_load(&a.clip_req) != 0) {
+        return "busy";
+    }
+    return NULL;
+}
+
+void stackee_audio_menu_clip_auto(void) {
+    if (a.menu != NULL) {
+        atomic_store(&a.menu->clip_auto_req, 1);
+    }
+}
+
+void stackee_audio_menu_clip_sync(void) {
+    if (a.menu != NULL) {
+        atomic_store(&a.menu->clip_sync_req, 1);
+    }
+}
+
+void stackee_audio_menu_health(void) {
+    if (a.menu != NULL) {
+        atomic_store(&a.menu->health_req, 1);
+    }
+}
+
+void stackee_audio_menu_info(stackee_menu_info_t *info) {
+    // ★ ui タスクから数百 ms ごと。錠は取らない (1 つ古い値でよい)。
+    stackee_http_stats_t http;
+    stackee_http_stats(&http);
+    info->http_seen = http.any_done;
+    info->http_last_ok = http.last_ok;
+    info->http_last_status = http.last_done_status;
+    info->http_last_ago_ms = http.last_done_ago_ms;
+    if (!a.ready || a.talk == NULL) {
+        return;
+    }
+    const stackee_talk_t *t = a.talk;
+    info->inbox_on = t->watch_on;
+    info->inbox_held = t->watch_held;
+    snprintf(info->inbox_phase, sizeof(info->inbox_phase), "%s",
+             stackee_talk_watch_phase_names[t->watch_phase]);
+    if (a.menu != NULL) {
+        info->health_state = (a.menu->health_state == STACKEE_MENU_JOB_IDLE &&
+                              atomic_load(&a.menu->health_req) == 1)
+                                 ? STACKEE_MENU_JOB_RUNNING
+                                 : a.menu->health_state;
+        info->health_status = a.menu->health_status;
+        info->health_ms = a.menu->health_ms;
+        snprintf(info->health_error, sizeof(info->health_error), "%s",
+                 a.menu->health_error);
+    }
+    const stackee_clip_t *c = a.clip;
+    // ★ URL が無くても FAT のクリップは Clip キーで鳴らせるので、数字は出す。
+    info->clips_ready = (c != NULL);
+    if (c != NULL) {
+        info->clips_count = c->count;
+        info->clips_bytes = c->total_audio;
+        info->clips_free = c->free_bytes;
+        info->clips_auto = c->auto_on;
+        info->clips_forced_off = c->auto_forced_off;
+        info->clips_synced = c->last_sync_at != 0;
+        info->clips_last_ago_ms = c->last_sync_at ? ops_now() - c->last_sync_at : 0;
+        snprintf(info->clips_result, sizeof(info->clips_result), "%s",
+                 c->last_result ? c->last_result : "");
+        snprintf(info->clips_phase, sizeof(info->clips_phase), "%s",
+                 stackee_clip_phase_names[c->phase]);
+        info->clips_sync_requested = c->now_req ||
+            (a.menu != NULL && atomic_load(&a.menu->clip_sync_req) == 1);
+    }
+}
+
+size_t stackee_audio_menu_json(char *buf, size_t cap, size_t at) {
+    if (a.menu == NULL) {
+        return put(buf, cap, at, ",\"health\":null");
+    }
+    return put(buf, cap, at,
+               ",\"health\":{\"state\":%d,\"status\":%d,\"ms\":%lu,\"n\":%lu,"
+               "\"path\":%d},\"inbox_held\":%d",
+               a.menu->health_state, a.menu->health_status,
+               (unsigned long)a.menu->health_ms, (unsigned long)a.menu->health_n,
+               a.menu->health_path[0] ? 1 : 0,
+               (a.talk != NULL && a.talk->watch_held) ? 1 : 0);
 }

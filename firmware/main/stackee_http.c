@@ -95,6 +95,11 @@ static struct {
 
     uint32_t requests, failures, last_ms;
     size_t   last_bytes;
+    // 直近に終わった要求 (打ち切りは数えない)。設定メニューの「直近の通信」。
+    bool     any_done;
+    bool     last_ok;           // 通信が通り、HTTP 2xx だった
+    int      last_done_status;
+    int64_t  last_done_us;
     uint32_t discarded;         // 打ち切って結果を捨てた要求
     uint32_t shutdowns;         // 待っている要求をソケットごと起こした回数
     uint32_t last_connect_ms;
@@ -541,6 +546,10 @@ static void worker(void *unused) {
             atomic_store(&h.elapsed_ms, ms);
             atomic_store(&h.status, res.status);
             atomic_store(&h.received, res.received);
+            h.any_done = true;
+            h.last_done_us = esp_timer_get_time();
+            h.last_done_status = res.status;
+            h.last_ok = (res.err == STACKEE_HC_OK) && res.status >= 200 && res.status < 300;
             if (res.err != STACKEE_HC_OK) {
                 atomic_store(&h.err, res.err == STACKEE_HC_ERR_OVERFLOW ? -2 : res.err);
                 h.failures++;
@@ -848,4 +857,9 @@ void stackee_http_stats(stackee_http_stats_t *out) {
     out->last_connect_ms = h.last_connect_ms;
     out->last_reused = h.last_reused;
     out->warmups = h.warmups;
+    out->any_done = h.any_done;
+    out->last_ok = h.last_ok;
+    out->last_done_status = h.last_done_status;
+    out->last_done_ago_ms = h.any_done
+        ? (uint32_t)((esp_timer_get_time() - h.last_done_us) / 1000) : 0;
 }

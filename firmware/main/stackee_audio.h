@@ -101,3 +101,19 @@ void stackee_audio_clip_key(void);
 void stackee_audio_clip_auto_key(void);
 // status に混ぜる ,"clips":{…} (件数・合計・空き・rev・同期の結末)。錠は取らない。
 size_t stackee_audio_clips_summary(char *buf, size_t cap, size_t at);
+
+// ---------------------------------------------------------------------------
+// 設定メニュー (2026-10-01、README §17-2g)
+// ---------------------------------------------------------------------------
+// メニューを開けない理由 ("talk" / "custom" / "clip" / "camera" / "inbox" /
+// "playing" / "busy")。開けるなら NULL。★ 入力タスクから呼ぶ (待たない)。
+const char *stackee_audio_menu_blocker(void);
+// 印を置くだけ (audio タスクが拾う)。
+void stackee_audio_menu_clip_auto(void);    // Clip_Auto と同じ入り切り (帯は出さない)
+void stackee_audio_menu_clip_sync(void);    // clips.sync と同じ
+void stackee_audio_menu_health(void);       // GET /health を 1 回
+struct stackee_menu_info_s;
+// サーバー・受け箱・接続テスト・クリップの欄を埋める (錠は取らない)。
+void stackee_audio_menu_info(struct stackee_menu_info_s *info);
+// menu.status に混ぜる ,"health":{…},"inbox_held":N。
+size_t stackee_audio_menu_json(char *buf, size_t cap, size_t at);

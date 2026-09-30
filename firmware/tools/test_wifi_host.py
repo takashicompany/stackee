@@ -250,5 +250,68 @@ class ConsoleTest(unittest.TestCase):
         self.assertIn('SUSPEND 1', out)
 
 
+def last_target(text):
+    rows = re.findall(r'^TARGET (\S+) RESULT (-?\d+) REASON (-?\d+) ACTIVE (\d)$',
+                      text, re.M)
+    assert rows, text
+    ssid, result, reason, active = rows[-1]
+    return {'ssid': ssid, 'result': int(result), 'reason': int(reason),
+            'active': int(active)}
+
+
+class PreferTest(unittest.TestCase):
+    """設定メニューの「この SSID に切り替える / 追加して繋ぐ」(2026-10-01)。"""
+
+    def test_switches_from_the_strongest_to_the_named_one(self):
+        # home のほうが強いのでふだんは home。cafe を名指しすると落として cafe へ。
+        out = run('nets %s\nap home 10 -40\nap cafe 6 -70\nt 4000\nprint\n'
+                  'prefer cafe\nt 4000\nprint\n' % registry([HOME, CAFE]))
+        self.assertIn('PREFER load', out)
+        info = last_print(out)
+        self.assertEqual(info['state'], 'up')
+        self.assertEqual(info['ssid'], 'cafe')
+        self.assertEqual(last_target(out), {'ssid': 'cafe', 'result': 2,
+                                            'reason': 0, 'active': 0})
+        # いまの接続を落としてから (prefer の中で RADIO off) 狙い直している。
+        before, after = out.split('\nTARGET', 1)[1].split('PREFER load', 1)
+        self.assertIn('RADIO off', before)
+        self.assertEqual([c[0] for c in connects(after)], ['cafe'])
+
+    def test_the_next_pass_goes_back_to_the_strongest(self):
+        # 名指しは 1 周期だけ。切れてやり直すと、いつもどおり強いほう (home)。
+        out = run('nets %s\nap home 10 -40\nap cafe 6 -70\nt 4000\nprefer cafe\n'
+                  't 4000\ndrop\nt 20000\nprint\n' % registry([HOME, CAFE]))
+        self.assertEqual(last_print(out)['ssid'], 'home')
+
+    def test_a_name_that_is_not_visible_fails_and_falls_back(self):
+        out = run('nets %s\nap home 10 -40\nt 4000\nprefer cafe\nt 20000\nprint\n'
+                  % registry([HOME, CAFE]))
+        self.assertEqual(last_target(out)['result'], 3)
+        self.assertEqual(last_target(out)['reason'], -1)
+        # ★ 60 秒待たずに、いつもの自動接続で元の AP へ戻る。
+        info = last_print(out)
+        self.assertEqual(info['state'], 'up')
+        self.assertEqual(info['ssid'], 'home')
+
+    def test_a_wrong_password_is_reported(self):
+        out = run('nets %s\nap cafe 6 -50\nnoap\nt 3000\nap cafe 6 -50\nreason 202\n'
+                  'prefer cafe\nt 6000\nprint\n' % registry([CAFE]))
+        self.assertEqual(last_target(out)['result'], 3)
+        self.assertEqual(last_target(out)['reason'], 202)
+        self.assertNotIn('cafepass1', out)
+
+    def test_prefer_from_off_after_adding(self):
+        # 登録 0 件 (off) のところへ追加して名指し → 読み直して繋ぐ。
+        out = run('nets %s\nt 3000\nnets %s\nap cafe 6 -50\nprefer cafe\nt 4000\n'
+                  'print\n' % (registry([]), registry([CAFE])))
+        self.assertEqual(last_print(out)['ssid'], 'cafe')
+        self.assertEqual(last_target(out)['result'], 2)
+
+    def test_a_name_that_is_not_registered_fails(self):
+        out = run('nets %s\nt 3000\nprefer ghost\nt 1000\nprint\n' % registry([]))
+        self.assertEqual(last_target(out)['result'], 3)
+        self.assertEqual(last_target(out)['active'], 0)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

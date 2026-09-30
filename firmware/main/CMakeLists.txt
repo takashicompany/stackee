@@ -59,6 +59,9 @@ idf_component_register(
         "stackee_clipfs.c"
         "stackee_conhid.c"
         "stackee_uac.c"
+        # --- 本体の設定メニュー (2026-10-01) ----------------------------
+        "stackee_menu_core.c"
+        "stackee_menu.c"
         # --- アプリ内 OTA (Raw HID から ota_1 へ) ------------------------
         "stackee_otacore.c"
         "stackee_ota.c"

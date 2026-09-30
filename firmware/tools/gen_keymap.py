@@ -141,6 +141,11 @@ TAIL_CUSTOM_KEYS = (
     ('STK_CLIP_AUTO', None,
      'Clip_Auto: クリップの自動取得 (5 分ごとの同期) を押すたびに ON/OFF',
      'Clip_Auto'),
+    # STK_SETTINGS (2026-10-01、0x7E14): 本体の画面に設定メニューを開く / 閉じる。
+    # 開いている間のキー入力は本体が受け取り、PC には送らない (README §17-2g)。
+    ('STK_SETTINGS', None,
+     'Settings: 本体の画面に設定メニューを開く / 閉じる (開いている間キーは PC に送らない)',
+     'Settings'),
 )
 
 # Remap が customKeycodes を出すのは先頭 32 個まで (QK_KB_0..31)。

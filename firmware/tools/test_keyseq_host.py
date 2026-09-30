@@ -159,6 +159,15 @@ MIC_BASE = 0x7F00
 OLD_MIC_F13 = 0x7E08            # 旧 MIC_F13..MIC_F24 = 0x7E08..0x7E13
 OLD_MIC_F1 = 0x7E14             # 旧 MIC_F1..MIC_F12  = 0x7E14..0x7E1F
 OLD_CSTM_0 = 0x7E20             # 旧 CSTM_0..CSTM_9   = 0x7E20..0x7E29
+SETTINGS = 0x7E14               # STK_SETTINGS (2026-10-01)
+KC_UP, KC_DOWN, KC_ENTER, KC_BSPC = 0x52, 0x51, 0x28, 0x2A
+KC_F24 = 0x73
+POS_K = (1, 7)          # レイヤー 0: LT(3, K)
+POS_I = (0, 7)          # レイヤー 0: I   (レイヤー 3 では RIGHT の上 = なし)
+POS_J = (1, 6)          # レイヤー 0: J   (レイヤー 3 では DOWN)
+POS_ENTER = (1, 9)      # レイヤー 0: ENTER
+POS_A = (1, 0)          # レイヤー 0: A
+POS_SETTINGS = (4, 0)   # 空きスロット (key.inject と同じ場所) に Settings を置く
 
 
 def MIC(kc):
@@ -373,13 +382,17 @@ class CustomKeyTest(unittest.TestCase):
         self.assertEqual(MIC(KC_F1), 0x7F3A)
 
     def test_the_old_mic_entry_numbers_are_no_longer_mic(self):
-        """旧 MIC_F13 (0x7E08) は Custom_0、旧 MIC_F12 (0x7E1F) は何でもない。"""
+        """旧 MIC_F13 (0x7E08) は Custom_0、旧 MIC_F12 (0x7E1F) は何でもない。
+
+        ★ 旧 MIC_F1 (0x7E14) は 2026-10-01 から STK_SETTINGS
+        (test_the_slot_after_clip_auto_is_settings)。
+        """
         lines = run('kc 3 9 0x%04X\n' % OLD_MIC_F13
                     + 't 100\nmark a\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         self.assertEqual(after(lines, 'a'), ['CUSTOM Custom_0 1',
                                              'CUSTOM Custom_0 0'])
         # ★ 0x7E12 は 2026-09-30 から STK_CLIP (下の test_the_slot_after_custom_9)。
-        for code in (0x7E14, 0x7E1F, OLD_CSTM_0, 0x7E29):
+        for code in (0x7E15, 0x7E1F, OLD_CSTM_0, 0x7E29):
             lines = run('kc 3 9 0x%04X\n' % code
                         + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
             self.assertEqual(after(lines, 'z'), [], hex(code))
@@ -405,11 +418,20 @@ class CustomKeyTest(unittest.TestCase):
         lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + 10)
                     + 't 100\nmark z\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         self.assertEqual(after(lines, 'z'), ['CUSTOM CLIP 1', 'CUSTOM CLIP 0'])
-        # その次 (0x7E13) は STK_CLIP_AUTO、さらに次 (0x7E14) は何でもない。
+        # その次 (0x7E13) は STK_CLIP_AUTO。
         lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + 11)
                     + 't 100\nmark y\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         self.assertEqual(after(lines, 'y'), ['CUSTOM CLIP_AUTO 1', 'CUSTOM CLIP_AUTO 0'])
-        lines = run('kc 3 9 0x%04X\n' % (CUSTOM_0 + 12)
+
+    def test_the_slot_after_clip_auto_is_settings(self):
+        """0x7E14 = STK_SETTINGS (2026-10-01)。押下だけが届き、HID に出ない。
+
+        さらに次 (0x7E15) は何でもない。
+        """
+        lines = run('kc 3 9 0x%04X\n' % SETTINGS
+                    + 't 100\nmark s\n' + tap(POS_MIC, 100, 50) + 't 400\n')
+        self.assertEqual(after(lines, 's'), ['CUSTOM SETTINGS 1'])
+        lines = run('kc 3 9 0x%04X\n' % (SETTINGS + 1)
                     + 't 100\nmark x\n' + tap(POS_MIC, 100, 50) + 't 400\n')
         self.assertEqual(after(lines, 'x'), [])
 
@@ -449,6 +471,137 @@ def parse_dump(lines):
             _k, l, r, c, v = line.split()
             out[(int(l), int(r), int(c))] = int(v, 16)
     return out
+
+
+class MenuGateTest(unittest.TestCase):
+    """設定メニューのキーの横取り (2026-10-01、README §17-2g)。
+
+    メニュー中のキーは PC へ出ず (KB 行が 0 本)、本体が MENUKEY で受け取る。
+    開く瞬間に押していたキーは PC 側で離され、閉じたあとの離しは PC に出ない。
+    """
+
+    SETUP = 'autogate 1\nkc 4 0 0x%04X\n' % SETTINGS
+
+    def kb_lines(self, lines):
+        return [l for l in lines if l.startswith(('KB ', 'MOUSE', 'CONS', 'SYS'))]
+
+    def test_settings_opens_and_closes_without_reaching_the_pc(self):
+        lines = run(self.SETUP + 'mark o\n' + tap(POS_SETTINGS, 100, 30)
+                    + 't 200\ngatestat\nmark c\n' + tap(POS_SETTINGS, 300, 30)
+                    + 't 400\ngatestat\n')
+        opened = after(lines, 'o')
+        self.assertEqual(self.kb_lines(opened), [])
+        self.assertIn('CUSTOM SETTINGS 1', opened)
+        self.assertTrue([l for l in opened if l.startswith('GATE open ')], opened)
+        closed = after(lines, 'c')
+        self.assertTrue([l for l in closed if l.startswith('GATE off ')], closed)
+        self.assertEqual(self.kb_lines(closed), [])
+
+    def test_keys_in_the_menu_go_to_the_device_not_the_pc(self):
+        # 普通の文字・Enter・レイヤー 3 の矢印 (LT(3, K) を押さえて J = DOWN)。
+        script = (self.SETUP + tap(POS_SETTINGS, 100, 30) + 'mark m\n'
+                  + tap(POS_A, 200, 30) + tap(POS_ENTER, 300, 30)
+                  + 't 400\nd 1 7\nt 800\nd 1 6\nt 830\nu 1 6\nt 860\nu 1 7\n'
+                  + 't 1300\nmark e\n')
+        lines = run(script)
+        got = after(lines, 'm')
+        self.assertEqual(self.kb_lines(got), [], got)
+        keys = [l for l in got if l.startswith('MENUKEY ')]
+        self.assertEqual(keys, ['MENUKEY %02X 00' % KC_A,
+                                'MENUKEY %02X 00' % KC_ENTER,
+                                'MENUKEY %02X 00' % KC_DOWN], got)
+
+    def test_shift_from_a_mod_tap_reaches_the_menu(self):
+        # MT(LSFT, Z) を押さえたまま A → 大文字の A (パスワード入力で使う)。
+        script = (self.SETUP + tap(POS_SETTINGS, 100, 30) + 'mark m\n'
+                  + 't 300\nd 2 0\nt 320\nd 1 0\nt 350\nu 1 0\nt 380\nu 2 0\nt 700\n')
+        got = after(run(script), 'm')
+        self.assertEqual(self.kb_lines(got), [], got)
+        self.assertIn('MENUKEY %02X %02X' % (KC_A, MOD_LSFT), got)
+
+    def test_a_key_held_when_opening_is_released_on_the_pc(self):
+        # W を押したまま Settings → PC には「全部離した」が 1 回だけ出る。
+        # そのあとの W の離しは PC に出ない。
+        script = (self.SETUP + 't 100\nd 0 1\nt 150\nmark o\n'
+                  + tap(POS_SETTINGS, 200, 30) + 't 300\nmark r\nu 0 1\nt 400\n')
+        lines = run(script)
+        self.assertEqual(self.kb_lines(after(lines, 'o')), [NONE])
+        self.assertEqual(self.kb_lines(after(lines, 'r')), [])
+
+    def test_keys_held_while_closing_do_not_leak(self):
+        # メニュー中に A を押し、押したまま Settings で閉じる。A の離しも、
+        # 閉じたあとに QMK が作るレポートも PC には出ない。次の打鍵は普通に出る。
+        script = (self.SETUP + tap(POS_SETTINGS, 100, 30)
+                  + 't 200\nd 1 0\nt 250\nmark c\n' + tap(POS_SETTINGS, 300, 30)
+                  + 't 400\nu 1 0\nt 500\ngatestat\nmark n\n' + tap(POS_W, 600, 30)
+                  + 't 700\n')
+        lines = run(script)
+        closed = after(lines, 'c')
+        self.assertEqual(self.kb_lines(closed), [], closed)
+        self.assertTrue([l for l in closed if l.startswith('GATE off ')], closed)
+        self.assertEqual(self.kb_lines(after(lines, 'n')), [kb(0, KC_W), NONE])
+
+    def test_drain_waits_for_the_keys_but_not_forever(self):
+        # 閉じたとき A を押したままなら DRAIN のまま。1.5 秒で諦めて OFF。
+        script = (self.SETUP + tap(POS_SETTINGS, 100, 30)
+                  + 't 200\nd 1 0\n' + tap(POS_SETTINGS, 300, 30)
+                  + 't 400\ngatestat\nmark w\nt 2000\ngatestat\nmark x\n'
+                  + 'u 1 0\nt 2100\n')
+        lines = run(script)
+        self.assertTrue([l for l in lines if l.startswith('GATE drain ')], lines)
+        waited = after(lines, 'w')
+        self.assertTrue([l for l in waited if l.startswith('GATE off ')
+                         and 'timeouts=1' in l], waited)
+        self.assertEqual(self.kb_lines(after(lines, 'x')), [])
+
+    def test_own_keys_are_swallowed_in_the_menu(self):
+        # 独自キー (Talk・音量・MIC(kc)) の押下は握りつぶす。離しは通す
+        # (押している印を下ろすため)。MIC(kc) の中の F13 も PC に出ない。
+        script = (self.SETUP + tap(POS_SETTINGS, 100, 30) + 'mark m\n'
+                  + tap(POS_TALK, 200, 30) + tap(POS_VOLDN, 300, 30)
+                  + tap(POS_MIC, 400, 30) + 't 500\ngatestat\n')
+        got = after(run(script), 'm')
+        self.assertEqual(self.kb_lines(got), [], got)
+        self.assertNotIn('CUSTOM TALK 1', got)
+        self.assertNotIn('CUSTOM VOLDN 1', got)
+        self.assertNotIn('CUSTOM MIC_KEY 1', got)
+        self.assertIn('CUSTOM TALK 0', got)
+        self.assertIn('CUSTOM MIC_KEY 0', got)
+        self.assertFalse([l for l in got if l.startswith('MENUKEY ')], got)
+        stat = [l for l in got if l.startswith('GATE ')][0]
+        self.assertIn('swallowed=3', stat)
+
+    def test_a_mic_key_held_when_opening_is_released(self):
+        # MIC(F13) を押したまま開く → PC では F13 が離され、離しで顔の印も下りる。
+        script = (self.SETUP + 't 100\nd 3 9\nt 150\nmark o\n'
+                  + tap(POS_SETTINGS, 200, 30) + 't 300\nmark r\nu 3 9\nt 400\n')
+        lines = run(script)
+        self.assertEqual(self.kb_lines(after(lines, 'o')), [NONE])
+        rel = after(lines, 'r')
+        self.assertEqual(self.kb_lines(rel), [])
+        self.assertIn('CUSTOM MIC_KEY 0', rel)
+
+    def test_boot_key_is_swallowed_in_the_menu(self):
+        script = (self.SETUP + 'kc 4 1 0x%04X\n' % 0x7C00  # QK_BOOT
+                  + tap(POS_SETTINGS, 100, 30) + 'mark m\n'
+                  + 't 200\nD 41\nt 230\nU 41\nt 300\n')
+        got = after(run(script), 'm')
+        self.assertNotIn('BOOTLOADER', got)
+
+    def test_mouse_keys_do_not_move_the_pointer_in_the_menu(self):
+        script = (self.SETUP + 'kc 4 1 0x00CD\n'       # MS_UP
+                  + tap(POS_SETTINGS, 100, 30) + 'mark m\n'
+                  + 't 200\nD 41\nt 400\nU 41\nt 500\n')
+        got = after(run(script), 'm')
+        self.assertEqual(self.kb_lines(got), [], got)
+
+    def test_injected_f24_does_not_reach_the_pc_in_the_menu(self):
+        # check_phase4 --only menu が実機でやること (key.inject F24) と同じ。
+        script = (self.SETUP + tap(POS_SETTINGS, 100, 30) + 'mark m\n'
+                  + 'kc 4 2 0x%04X\nt 200\nD 42\nt 230\nU 42\nt 300\n' % KC_F24)
+        got = after(run(script), 'm')
+        self.assertEqual(self.kb_lines(got), [], got)
+        self.assertIn('MENUKEY %02X 00' % KC_F24, got)
 
 
 class KeymapMigrationTest(unittest.TestCase):

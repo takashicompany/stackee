@@ -1,5 +1,6 @@
 #include "stackee_ble.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_bt.h"
@@ -129,6 +130,9 @@ typedef enum {
 static adv_kind_t s_adv_kind;
 static ble_addr_t s_bond_peer;
 static bool       s_have_bond_peer;
+// いま繋がっている相手の identity address ("AA:BB:CC:DD:EE:FF")。設定メニューが
+// 出す。暗号化が済んだところで埋め、切れたら消す。
+static char       s_peer_text[18];
 static int64_t    s_adv_started_us;
 static uint32_t   s_adv_directed;       // 名指しで撒いた回数
 
@@ -401,6 +405,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
             return 0;
         case BLE_GAP_EVENT_DISCONNECT:
             s_connected = false;
+            s_peer_text[0] = '\0';
             s_disconnects++;
             s_advertising = false;
             s_adv_kind = ADV_OFF;
@@ -424,6 +429,10 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
                 remember_svc_changed_subscription(&desc.peer_id_addr);
+                const uint8_t *v = desc.peer_id_addr.val;
+                snprintf(s_peer_text, sizeof(s_peer_text),
+                         "%02X:%02X:%02X:%02X:%02X:%02X",
+                         v[5], v[4], v[3], v[2], v[1], v[0]);
             }
             send_service_changed(event->enc_change.conn_handle);
             return 0;
@@ -648,6 +657,18 @@ void stackee_ble_tick(void) {
 
 bool stackee_ble_ready(void) {
     return s_ready;
+}
+
+bool stackee_ble_peer_addr(char *out, size_t cap) {
+    if (out == NULL || cap == 0) {
+        return false;
+    }
+    if (!s_connected || s_peer_text[0] == '\0') {
+        out[0] = '\0';
+        return false;
+    }
+    snprintf(out, cap, "%s", s_peer_text);
+    return true;
 }
 
 bool stackee_ble_connected(void) {

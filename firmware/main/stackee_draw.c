@@ -318,3 +318,134 @@ void stackee_draw_bar(const stackee_canvas_t *c, const stackee_bar_state_t *st,
                           pos.battery_text_y, STACKEE_BAR_HEIGHT);
     }
 }
+
+// ---- 本体の設定メニュー ------------------------------------------------------
+// 1 行ぶんの字を置く (len バイトぶん、max_px を超える字は置かない)。
+// 置いた画素数を返す。
+static int draw_run16(const stackee_canvas_t *c, const stackee_font16_t *font,
+                      const char *utf8, size_t len, int x0, int top,
+                      uint32_t rgb, int max_px) {
+    uint16_t fg = stackee_draw_rgb565(rgb);
+    int x = 0;
+    uint32_t cp = 0;
+    const char *end = utf8 + len;
+    for (const char *p = utf8; p < end; ) {
+        const char *next = stackee_font16_utf8(p, &cp);
+        if (next == NULL || next > end) {
+            break;
+        }
+        p = next;
+        stackee_font16_glyph_t g;
+        if (!stackee_font16_glyph_or_tofu(font, cp, &g)) {
+            continue;
+        }
+        if (x + g.width > max_px) {
+            break;                      // はみ出す字は描かない
+        }
+        for (int row = 0; row < STACKEE_FONT16_HEIGHT; row++) {
+            uint32_t bits = (g.width == 8)
+                                ? (uint32_t)g.rows[row]
+                                : (((uint32_t)g.rows[row * 2] << 8) |
+                                   (uint32_t)g.rows[row * 2 + 1]);
+            if (bits == 0) {
+                continue;
+            }
+            for (int col = 0; col < g.width; col++) {
+                if (bits & (1u << (g.width - 1 - col))) {
+                    put(c, x0 + x + col, top + row, fg);
+                }
+            }
+        }
+        x += g.width;
+    }
+    return x;
+}
+
+// max_px に収まるところまでの画素数 (はみ出す字は数えない)。
+static int fit_px16(const stackee_font16_t *font, const char *utf8, int max_px,
+                    size_t *bytes) {
+    size_t n = stackee_font16_fit(font, utf8, max_px);
+    if (bytes != NULL) {
+        *bytes = n;
+    }
+    int px = 0;
+    uint32_t cp = 0;
+    const char *end = utf8 + n;
+    for (const char *p = utf8; p < end; ) {
+        const char *next = stackee_font16_utf8(p, &cp);
+        if (next == NULL || next > end) {
+            break;
+        }
+        p = next;
+        px += stackee_font16_advance(font, cp);
+    }
+    return px;
+}
+
+static void draw_menu_row(const stackee_canvas_t *c, const stackee_font16_t *font,
+                          const stackee_menu_row_t *row, bool selected, int y) {
+    int top = y + (STACKEE_MENU_ROW_H - STACKEE_FONT16_HEIGHT) / 2;
+    if (selected) {
+        stackee_draw_fill(c, 0, y, c->width, STACKEE_MENU_ROW_H,
+                          stackee_draw_rgb565(STACKEE_MENU_SEL_BG));
+    }
+    uint32_t label_rgb = selected ? STACKEE_MENU_SEL_FG
+                         : row->kind == STACKEE_MENU_ROW_INFO ? STACKEE_MENU_INFO
+                         : row->kind == STACKEE_MENU_ROW_NOTE ? STACKEE_MENU_NOTE
+                                                              : STACKEE_MENU_TEXT;
+    uint32_t value_rgb = selected ? STACKEE_MENU_SEL_FG : STACKEE_MENU_TEXT;
+    int right = c->width - STACKEE_MENU_PAD_X;
+    if (row->kind == STACKEE_MENU_ROW_SUB) {
+        static const char MARK[] = "\xEF\xBC\x9E";   // ＞ (U+FF1E)
+        right -= STACKEE_FONT16_HEIGHT;
+        draw_run16(c, font, MARK, sizeof(MARK) - 1, right, top, label_rgb,
+                   STACKEE_FONT16_HEIGHT);
+        right -= 4;
+    }
+    size_t label_bytes = 0;
+    int label_px = fit_px16(font, row->label, right - STACKEE_MENU_PAD_X, &label_bytes);
+    draw_run16(c, font, row->label, label_bytes, STACKEE_MENU_PAD_X, top, label_rgb,
+               right - STACKEE_MENU_PAD_X);
+    if (row->value[0] == '\0') {
+        return;
+    }
+    int left = STACKEE_MENU_PAD_X + label_px + STACKEE_MENU_GAP;
+    int avail = right - left;
+    if (avail <= 0) {
+        return;
+    }
+    size_t value_bytes = 0;
+    int value_px = fit_px16(font, row->value, avail, &value_bytes);
+    draw_run16(c, font, row->value, value_bytes, right - value_px, top, value_rgb,
+               value_px);
+}
+
+void stackee_draw_menu(const stackee_canvas_t *c, const stackee_font16_t *font,
+                       const stackee_menu_view_t *view) {
+    stackee_draw_fill(c, 0, STACKEE_MENU_Y, c->width, STACKEE_MENU_HEIGHT,
+                      stackee_draw_rgb565(STACKEE_MENU_BG));
+    uint16_t bar = stackee_draw_rgb565(STACKEE_MENU_BAR_BG);
+    stackee_draw_fill(c, 0, STACKEE_MENU_Y, c->width, STACKEE_MENU_TITLE_H, bar);
+    stackee_draw_fill(c, 0, STACKEE_MENU_FOOT_Y, c->width, STACKEE_MENU_FOOT_H, bar);
+    if (view == NULL || !stackee_font16_ready(font)) {
+        return;
+    }
+    int width = c->width - 2 * STACKEE_MENU_PAD_X;
+    size_t n = 0;
+    fit_px16(font, view->title, width, &n);
+    draw_run16(c, font, view->title, n, STACKEE_MENU_PAD_X,
+               STACKEE_MENU_Y + (STACKEE_MENU_TITLE_H - STACKEE_FONT16_HEIGHT) / 2,
+               STACKEE_MENU_TITLE_FG, width);
+    fit_px16(font, view->footer, width, &n);
+    draw_run16(c, font, view->footer, n, STACKEE_MENU_PAD_X,
+               STACKEE_MENU_FOOT_Y + (STACKEE_MENU_FOOT_H - STACKEE_FONT16_HEIGHT) / 2,
+               STACKEE_MENU_FOOT_FG, width);
+    for (int i = 0; i < STACKEE_MENU_VISIBLE; i++) {
+        int r = view->top + i;
+        if (r < 0 || r >= view->count) {
+            break;
+        }
+        draw_menu_row(c, font, &view->rows[r], r == view->selected,
+                      STACKEE_MENU_ROWS_Y + i * STACKEE_MENU_ROW_H);
+    }
+}

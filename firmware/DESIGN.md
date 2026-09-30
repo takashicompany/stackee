@@ -118,7 +118,7 @@ ESP32-S3 は IN エンドポイントが EP0 を含めて 5 本まで（docs.esp
   現行 CircuitPython 版の配列まで変わってしまう。ネイティブ版にしか無い
   独自キーは、位置とキーの結び付けをこちら側に置く。
 - **マウスキーは有効**（`MOUSEKEY_ENABLE` / `MOUSE_ENABLE`、`quantum/mousekey.c` を取り込み）。現行 CircuitPython 版も KMK の MouseKeys を入れている（code.py が `keyboard.modules.append(MouseKeys())`）ので、同じように使える状態にしておく。動作モードは QMK 既定（加速つき）。キーコードは標準の `MS_UP` / `MS_DOWN` / `MS_LEFT` / `MS_RGHT` / `MS_BTN1`〜 / `MS_WHLU` / `MS_WHLD` / `MS_ACL0`〜2。レポートは既存の Report ID 2 のコレクションで送る（USB・BLE 共通。将来のタッチパッドと同じ送信キューを通る）。VIA 定義 JSON は標準キーコードなので変更不要（2026-09-16 決定）。keymap.py 側に `KC.MS_*` / `KC.MB_*` / `KC.MW_*` があれば生成時に対応する QMK キーコードへ変換する（対応表は tools/keycodes.md）。
-- 独自キー（VIA の customKeycodes で表示）: STK_TALK、STK_VOLUP、STK_VOLDN、STK_HID_SWITCH、STK_BLE_REFRESH、STK_CAMERA、STK_TOUCH_SCROLL、および上記の STK_MT_n、STK_CUSTOM_0〜9（表示は Custom_0〜9、0x7E08..0x7E11。2026-09-27 に CSTM_n として入れ、2026-09-29 に改名・番号を詰めた。押した瞬間にサーバへ POST /key。README §17-2c）。**QK_KB_0（0x7E00）以降**に割り当て、process_record_kb で処理して false を返す（HID には出さない）。QMK の SAFE_RANGE（= QK_USER = 0x7E40）ではないのは、**VIA の customKeycodes が QK_KB_0 から順に対応づく約束**のため。並び順が実装とずれると VIA 上で別のキーとして表示されるので、生成時に機械照合する（2026-09-16 決定）。
+- 独自キー（VIA の customKeycodes で表示）: STK_TALK、STK_VOLUP、STK_VOLDN、STK_HID_SWITCH、STK_BLE_REFRESH、STK_CAMERA、STK_TOUCH_SCROLL、および上記の STK_MT_n、STK_CUSTOM_0〜9（表示は Custom_0〜9、0x7E08..0x7E11。2026-09-27 に CSTM_n として入れ、2026-09-29 に改名・番号を詰めた。押した瞬間にサーバへ POST /key。README §17-2c）、STK_CLIP（0x7E12）、STK_CLIP_AUTO（0x7E13）、STK_SETTINGS（表示 Settings、0x7E14、2026-10-01。本体の設定メニュー。§6e）。**QK_KB_0（0x7E00）以降**に割り当て、process_record_kb で処理して false を返す（HID には出さない）。QMK の SAFE_RANGE（= QK_USER = 0x7E40）ではないのは、**VIA の customKeycodes が QK_KB_0 から順に対応づく約束**のため。並び順が実装とずれると VIA 上で別のキーとして表示されるので、生成時に機械照合する（2026-09-16 決定）。
 - VIA 定義 JSON: firmware/via/stackee.json（layouts は keymap.py の KLE 定義から生成）。VID/PID は現行の USB 記述子と同じ値を使い、Remap のカタログ登録は行わない（定義 JSON の手動読み込みで使う）。
 - 保存: QMK の eeconfig / dynamic_keymap を NVS 上のブロブに載せる（lucky65 の eeprom.c と同じ方式。書き込みは遅延して input タスクを止めない）。
 
@@ -510,6 +510,70 @@ ESP-IDF の docs（spi_flash_concurrency）どおり、フラッシュの消去�
 * 再生済みの印は RAM だけ。自動取得の入り切りは NVS（打鍵が 2 秒止まってから書く）。
 * 自動取得を OFF にしたら進行中の同期は打ち切る。`clips.sync`（手動）は OFF でも動く。
   settings.toml の `STACKEE_CLIP_SYNC = 0` は強制 OFF。
+
+## 6e. 本体の設定メニュー（2026-10-01）
+
+`STK_SETTINGS`（0x7E14、表示 `Settings`）で、ステータスバーの下（y=28..319）に
+設定メニューを出す。Wi-Fi（状態・登録済みへの切り替え・パスワードを打って追加・
+削除）、サーバー（接続先・直近の通信・受け箱・接続テスト）、クリップ（数字・自動取得・
+今すぐ取り込む）、本体（版・送信先・Bluetooth・電池・USB マイク・音量）。使い方と
+取り決めは README §17-2g。
+
+### 層の分け方
+
+| 層 | 責務 | 置き場 |
+|---|---|---|
+| 決め事（ESP-IDF に依存しない） | 階層・選択・パスワードの編集と消去・画面の中身（行の組み立て）・JIS のキー読み。仕事は ops で頼むだけ、結果は次の「外の様子の写し」で受け取る | `main/stackee_menu_core.c`（`hostbuild/menu_main.c` + `tools/test_menu_host.py`） |
+| 描画 | y=28..319 を丸ごと。題 / 行 11 本 / 足もと。font16 | `main/stackee_draw.c` の `stackee_draw_menu`（期待値 `tools/menu_expected.py`） |
+| キーの横取り | QMK の host driver でレポートを止める。開閉の手順と DRAIN | `main/qmk_port/qmk_port_host.c`・`stackee_holdtap.c`（`test_keyseq_host.py` の `MenuGateTest`） |
+| 糊 | 開閉の印・キーの列・外の様子の写し・メインループの仕事・`menu.*` | `main/stackee_menu.c` |
+| Wi-Fi の名指し | 1 周期だけ 1 つの SSID を狙う（`prefer`） | `main/stackee_wifism.c`（`test_wifi_host.py` の `PreferTest`） |
+
+### キーの横取りを host driver でやる理由（決定）
+
+* **マトリクスで止めない。** 矢印・Esc はレイヤー 3、Shift は MT。マトリクスで
+  止めるとレイヤーと HoldTap を自前で真似ることになり、ふだんの指と違う動きになる。
+* **process_record で止めない。** MT / LT の判定（action_tapping）はその手前で
+  押下を溜めるので、握りつぶすと判定の途中の押下が閉じたあとに漏れる。
+* **QMK にはふだんどおり処理させ、できたレポートを送信キューに積む手前で止める。**
+  レイヤーも MT の Shift も普段と同じで、PC へは 1 件も出ない。止めるのはキーボード・
+  マウス・コンシューマ・システムで、Raw HID（VIA / コンソール）は止めない。
+  独自キー（音量・Custom・Clip・MIC(kc) …）と QK_BOOT・既定レイヤーの変更は、
+  レポートを作らずに副作用を起こすので process_record_kb で押下を握りつぶす
+  （離しは通す: 押している印を下ろすため）。
+* **開く: 全部離したレポートを PC へ送ってから横取りを始める。** 押していた
+  キーが PC で押しっぱなしにならない。
+* **閉じる: 押されているキーが全部離れるまで横取りを続け（DRAIN、上限 1.5 秒）、
+  最後に QMK のレポートを空にしてから戻す。** QMK は前回と同じレポートを送らない
+  ので、PC が最後に見た「全部離した」と QMK の状態がそろい、メニュー中に押した
+  キーの離しは PC に出ない。代わりに DRAIN の間に新しく押したキーは捨てる。
+* タッチパッドは横取りしない（キーではない。ポインタは PC へ）。
+
+### 決めたこと
+
+* **処理中は開かない。** 会話・写真・Custom・クリップ・受け箱の発話・OTA の間は
+  画面と帯を使っているので、Settings は何もしない（`refused` に数えるだけ）。
+  開いている間はキーを握りつぶすので、会話などはそもそも始まらない。
+* **メニュー中は受け箱を保留。** 待ちを打ち切り、撃たない。閉じたら seq の続きから
+  聞く（サーバが 5 分・16 件保持）。クリップの自動取得と Wi-Fi の自動接続は裏で続く。
+* **時間では閉じない**（ユーザー決定）。もう一度 Settings か、ルートの Esc。
+* **顔の素材には触らない。** 上に描くだけ。閉じたら隙間・顔・帯を描き直す。
+* **切り替え・追加は「名指しを 1 周期」。** いまの接続を落として、その SSID だけを
+  探す。繋がっても失敗してもいつもの自動接続に戻り、失敗なら 60 秒待たない。
+  登録簿は `wifi.add` / `wifi.remove` と同じ検査・同じ NVS・同じ上限 8 件。
+* **パスワードはメニューの中にしか置かない。** 画面は伏せ字、渡したら 0 で消す、
+  取消・閉じるでも消す。ログ・`status`・`menu.status` に出さない（長さだけ）。
+* **時間のかかる仕事はメインループ。** 走査（3〜6 秒）・NVS への書き込み・送信先の
+  切り替え。ui タスクは印を置くだけで、キーボードの入力タスクは何も待たない。
+* **接続テストは会話と同じ 1 本の口。** 口が空いたとき（受け箱は保留中、クリップの
+  同期が通信していない）だけ `GET /health` を撃ち、その間は同期も受け箱も譲る。
+* **合否は数字で。** 画面は `menu.status` の view を Mac で描いた CRC と `lcd.crc`、
+  PC に出ていないことは横取りの `to_pc`（PC へ出したレポートの累計）。
+
+### 内蔵 RAM
+
+大きなもの（画面 2 枚ぶんの行・外の様子の写し・走査結果・キーの列、約 10 KB）は
+PSRAM。静的な増分は +96 B（横取りの状態と数・直近の通信の時刻・開いているかの印）。
 
 ## 7. ライセンスと公開範囲
 

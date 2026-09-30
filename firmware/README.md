@@ -190,7 +190,7 @@ python3 tools/check_phase4.py     # 周辺機能と本番構成
 
 ★ Remap のカタログには登録していない (定義 JSON の手動読み込みで使う)。
 ★ **Remap は customKeycodes を先頭 32 個 (0x7E00〜0x7E1F) しか出さない。**
-   独自キーは 20 個 (0x7E00〜0x7E13) にしてある (2026-09-30)。
+   独自キーは 21 個 (0x7E00〜0x7E14) にしてある (2026-10-01)。
 
 独自キーの番号 (customKeycodes の並び = キーコード):
 
@@ -201,6 +201,7 @@ python3 tools/check_phase4.py     # 周辺機能と本番構成
 | 0x7E08〜0x7E11 | `STK_CUSTOM_0`〜`STK_CUSTOM_9` (`Custom_0`〜`Custom_9`、§17-2c) |
 | 0x7E12 | `STK_CLIP` (`Clip`、クリップを 1 件鳴らす。通信しない。§17-2f) |
 | 0x7E13 | `STK_CLIP_AUTO` (`Clip_Auto`、クリップの自動取得を ON / OFF。§17-2f) |
+| 0x7E14 | `STK_SETTINGS` (`Settings`、本体の画面に設定メニューを開く / 閉じる。§17-2g) |
 
 **`MIC(kc)` (押している間だけ顔を「聞き取り中」にする包み、§10-1) は
 customKeycodes に並ばない。** Remap の「カスタム」タブで **16 進を手入力**
@@ -260,6 +261,7 @@ python3 tools/flash.py --rollback           # CircuitPython の像を書き戻�
 | クリップ | `clips.status` `clips.sync` `clips.play` `clips.clear` `clips.auto` (§17-2f) |
 | BLE | `ble.refresh` `ble.clear_bonds` `ble.drop_cccd` `ble.svc_changed` |
 | 画面 | `lcd.crc` `lcd.dump` `lcd.status` `lcd.full` `face.set` `face.auto` `bar.set` `bar.auto` `ui.selftest` `ui.status` `ui.assets` `ui.subtitle` |
+| 設定メニュー | `menu.status` `menu.key` `menu.open` `menu.close` (§17-2g) |
 | Wi-Fi | `wifi.scan` `wifi.list` `wifi.add` `wifi.remove` `wifi.connect` `wifi.status` `wifi.off` `wifi.on` |
 | 音 | `audio.selftest` `audio.null` `audio.play` `audio.status` `talk.inject` `talk.status` |
 | 設定 | `settings.get` `settings.raw` `settings.set` |
@@ -337,6 +339,7 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 
 | タッチパッド | **段階 4**。FT6336 を 5 ms 周期で読み、なぞり = ポインタ / タップ = クリック / `STK_TOUCH_SCROLL` 中はスクロール。Report ID 2 で USB・BLE 両方に出る |
 | カメラ | **段階 4**。GC0308 を ALDO3 で起こして撮り、software で JPEG に畳む。`camera.*` と `STK_CAMERA` キー |
+| 設定メニュー | **2026-10-01**。`STK_SETTINGS` (表示 `Settings`) で本体の画面に設定メニューを出す。矢印で選び Enter で決定、Backspace / Esc で上へ。Wi-Fi (状態・登録済みへの切り替え・パスワードを打って追加・削除)、サーバー (接続先・直近の通信・受け箱・接続テスト)、クリップ (件数・容量・自動取得・今すぐ取り込む)、本体 (版・送信先・Bluetooth・電池・USB マイク・音量)。**開いている間のキーは PC に送らない** (§17-2g) |
 | カメラ → AI | **2026-09-26**。`STK_CAMERA` で撮った JPEG を `POST /look` で見せ、返答を会話と同じく音声 + 字幕で鳴らす。撮影中の顔は `camera`、返答待ちは `thinking` (§17-2b) |
 | 独自キー Custom_0〜9 | **2026-09-27** (2026-09-29 に `CSTM_n` から改名、キーコード 0x7E08〜0x7E11)。`STK_CUSTOM_0`〜`STK_CUSTOM_9` (VIA の表示は `Custom_0`〜`Custom_9`)。押した瞬間に `POST /key` で「Custom_n が押された」と送り、サーバの返事どおりに動く (未設定 / 返答を鳴らす / コマンドの発話を受け箱から取って鳴らす)。会話・カメラと排他 (§17-2c) |
 | USB マイク (UAC) | **段階 4 / full プロファイルのみ**。16 kHz モノラル。会話が優先で、録音中は無音を送る |
@@ -380,6 +383,8 @@ python3 tools/fs_put.py --dest stackee_assets/x.bin path/to/x.bin
 | `main/stackee_board.c` / `stackee_perf.c` | 段階 0 のまま (perf は `ui` / `ui_face` / `ui_bar` が増えた) |
 | `main/stackee_assets.c` | FAT の読み取り (段階 0) + 素材の読み込みと zlib 展開 (段階 2) |
 | `main/stackee_ui.c` | **段階 2**。ui タスク (CPU0 / 中優先度 / 5 ms)、素材の読み込み、console の画面コマンド |
+| `main/stackee_menu_core.c` | **設定メニュー** (2026-10-01)。階層・選択・パスワードの編集・画面の中身・JIS のキー読み。ESP-IDF に依存しない (`tools/test_menu_host.py`) |
+| `main/stackee_menu.c` | **設定メニュー**の糊。開け閉め・キーの列・外の様子の写し・メインループの仕事 (Wi-Fi の登録・切り替え・走査、送信先)・`menu.*` |
 | `main/stackee_draw.c` | **段階 2**。画素を置く実体 (顔 4bpp / アイコン 2bpp / BDF)。ESP-IDF に依存しない |
 | `main/stackee_icons.c` | **段階 2**。`firmware/kmk/stackee_icons.py` の移植 (タイル番号・色・配置) |
 | `main/stackee_faceanim.c` | **段階 2**。`firmware/kmk/stackee_face.py` の移植 (状態機械と差分の段取り) |
@@ -524,11 +529,12 @@ python3 firmware/tools/test_conhid_host.py     # 段階 4: Raw HID コンソー�
 python3 firmware/tools/test_subtitle_host.py   # 字幕: フォント・帯・一次回答/案内の行 (38 件)
 python3 firmware/tools/test_ota_host.py        # アプリ内 OTA の中核 + ブラウザ経路 (55 件、§25)
 python3 firmware/tools/test_micopen_host.py    # マイクの開け方の印 (8 件、§11-5)
+python3 firmware/tools/test_menu_host.py       # 本体の設定メニュー: 階層・パスワード・画面の CRC (35 件、§17-2g)
 python3 firmware/tools/gen_keymap.py --check   # 生成物が最新か
 python3 firmware/tools/gen_font16.py --check   # 字幕フォントが最新か
 ```
 
-全部で **546 件** (2026-09-26、`tools/test_*.py` を全部回した数)。どれも実機に触らない。
+全部で **775 件** (2026-10-01、`tools/test_*.py` を全部回した数)。どれも実機に触らない。
 
 ★ 段階 4 の 2 本のうち `test_touch_host.py` は、**現行 CircuitPython 版の
 `stackee_touch.py` をそのまま import して**同じ座標列を流し、出てくる
@@ -2703,6 +2709,155 @@ Are Disabled」— フラッシュの読み書き・消去の間は**両コア�
 * 取り込み中の打鍵の遅延 (2 打目以降は遅れず、最初の 1 打が最大 ~10 ms の見込み)。
 * 実機の FAT のクラスタの大きさ (2 KB の見込み。`clips.status` の `cluster`)。
 * 3.84 MB のクリップを読む時間 (メインループが 1 秒前後止まる見込み)。
+
+### 17-2g. 本体の設定メニュー (`STK_SETTINGS`、表示 `Settings`、0x7E14、2026-10-01)
+
+`Settings` を押すと、ステータスバーの下 (y=28..319) に**設定メニュー**が出る。
+**もう一度 `Settings` を押すか、いちばん上の階層で Esc** で閉じる。時間では
+閉じない。既定の配列には置いていない (VIA / Remap の customKeycodes から
+好きな位置に置く。Remap の「カスタム」タブなら `7E14`)。
+
+#### 操作
+
+| キー | いつもの画面 | パスワードを打っている間 |
+|---|---|---|
+| ↑ ↓ (Tab / Shift+Tab も) | 項目を選ぶ | 使わない |
+| Enter | 決定 (下の階層へ / 切り替える / 始める) | 確定 (保存して接続) |
+| Esc | 1 つ上の階層へ。**いちばん上なら閉じる** | 取消 (打った分は消える) |
+| Backspace (Delete も) | 1 つ上の階層へ (いちばん上では何もしない) | 1 文字消す (空なら何もしない = うっかり抜けない) |
+| ← → | 「音量」の上で ±5 | 使わない |
+| 文字 | 使わない | 入力 (JIS 配列として読む。Shift は MT の Shift でもよい) |
+
+★ 押しっぱなしで繰り返しはしない (押すたびに 1 回)。
+
+★ **キーの読み方はいつもと同じ。** レイヤー・MT / LT・Shift は QMK がふだん
+どおり処理するので、矢印はいつものレイヤー 3 (既定の配列なら `LT(3, K)` を押さえて
+E S D F、`LT(3, R)` を押さえて U H J K)、Esc も同じレイヤーの Q の位置、記号は
+記号のレイヤーで打てる。
+変わるのは「できたレポートを PC へ送らず本体が読む」ところだけ (下の「キーの
+横取り」)。
+
+#### 画面の中身
+
+```
+設定
+├ Wi-Fi                     状態 / SSID / 電波 (dBm と ■ 4 段) / IP
+│ ├ 登録済みネットワーク     一覧。Enter でその SSID に接続を切り替え → 結果
+│ ├ ネットワークを追加       走査 → 選ぶ → (鍵付きなら) パスワード → 保存して接続 → 結果
+│ └ 登録を削除               一覧 → 選ぶ → 確認 (既定は「やめる」)
+├ サーバー                  接続先 (ホスト:ポート) / 直近の通信 / 受け箱 / 接続テスト
+├ クリップ                  件数 / 合計 / FAT の空き / 最後の取り込み / 結果 / 状態
+│                           自動取得 ON・OFF (Enter で切り替え) / 今すぐ取り込む
+└ 本体                      ファームの版 / 送信先 BLE・USB (Enter で切り替え) /
+                            Bluetooth / 電池 / USB マイク / 音量 (← → で ±5)
+```
+
+| 画面 | 決まり |
+|---|---|
+| Wi-Fi の状態 | 自動接続の状態名 (§11-3) を日本語で (接続中 / 探しています / 接続しています / 待機中 / 登録なし)。電波は ≥ -55 dBm で 4 段、≥ -65 で 3、≥ -75 で 2、それ未満 1 |
+| 接続の切り替え | **いまの接続を落として**、その SSID だけを 1 周期 (全チャネル) 探して繋ぐ。繋がっても失敗しても、次からはいつもの「見えている中でいちばん強い登録済み AP」に戻る。失敗したら 60 秒待たずにすぐいつもの自動接続へ (元の AP が見えていればそこへ戻る)。結果の画面は「接続しています… / 接続しました (+ IP) / 接続できませんでした (理由: 見つからない / パスワード違い? / 時間切れ / コード N)」 |
+| ネットワークを追加 | 走査は `wifi.scan` と同じ (全チャネル 3〜6 秒。その間メインループ = コンソールは止まる。録音・再生中は「探せません (audio_busy)」)。隠れた SSID は出ない。強い順に最大 12 件、「鍵」「開」つき。鍵付きはパスワード (8〜63 文字) を打つ。オープンな AP はパスワード無しで登録する。保存は `wifi.add` と同じ検査・同じ NVS (`stackee` / `wifi_nets`)・同じ上限 (8 件。いっぱいなら「保存できません (full)」)。保存したらその SSID を名指しで接続 (切り替えと同じ) |
+| パスワード | 画面には `*` しか出さない (最後の 1 文字を見せることもしない)。打った文字は本体のメニューの中にしか無く、登録簿へ渡したら**すぐ 0 で消す**。取消・閉じる・Esc でも消す。**ログ・`status`・`menu.status` には出ない** (`menu.status` は文字数 `pass_len` だけ) |
+| 登録を削除 | `wifi.remove` と同じ (消したら探し直す)。確認の既定は「やめる」 |
+| サーバー | 接続先は `STACKEE_TALK_URL` のホスト:ポートだけ (パスとトークンは出さない)。直近の通信は会話・受け箱・クリップ・接続テストのどれでも**最後に終わった 1 回** (打ち切りは数えない。HTTP 2xx なら「成功」) と何秒前か。受け箱はメニュー中は「保留中 (メニュー中)」 |
+| 接続テスト | `GET /health` を 1 回 (`STACKEE_TALK_URL` の末尾 `/talk` を `/health` にしたもの。Bearer と HTTPS も同じ)。会話・受け箱・クリップと同じ 1 本の口を使うので、口が空くのを最大 10 秒待ち、1 往復 15 秒まで。「OK n ms / 失敗 HTTP n / 失敗」 |
+| クリップ | 数字は `clips.status` と同じもの。自動取得は **`Clip_Auto` キーと同じ切り替え・同じ NVS** (帯には出さない)。`settings.toml` の `STACKEE_CLIP_SYNC = 0` なら切り替わらず「settings.toml で OFF です」。今すぐ取り込むは `clips.sync` と同じ |
+| 本体 | 版は `app.info` の `version`。送信先は **`STK_HID_SWITCH` / `hid.set` と同じ切り替え** (NVS に残る。USB を選んでいてケーブルが無ければ「USB (未接続→BLE)」)。Bluetooth は接続中なら相手のアドレス、でなければ「待ち受け中 / 止まっています」。電池が無ければ「なし」。音量は **Vol キーと同じ** (±5、NVS へは打鍵が 2 秒止まってから) |
+
+#### キーの横取り (メニュー中のキーは PC に送らない)
+
+QMK がキーを処理して作ったレポートを、**送信キューに積む手前** (QMK の host
+driver) で止める。USB でも BLE でも同じ。
+
+| いつ | 何が起きるか |
+|---|---|
+| 開いた瞬間 | まず**全部離したレポートを PC へ 1 回**送る (Settings の前から押していた文字や、MT で効いていた Shift が PC に押しっぱなしで残らない)。マウスキーのボタン / 移動も離す。そのあと横取りを始める |
+| 開いている間 | キーボードのレポートは PC へ出さず、**新しく押されたキー**だけを本体が読む。マウスキー・コンシューマ・システムのレポートは捨てる。**独自キー** (Talk・音量・送信先・BLE_REFRESH・カメラ・TOUCH_SCROLL・Custom_n・Clip・Clip_Auto・MIC(kc)) と **QK_BOOT などの特殊キー・既定レイヤーの変更** は押下を握りつぶす (離しは通す。開く前から押していた Talk / MIC(kc) / TOUCH_SCROLL の「押している」印を下ろすため)。効くのは `Settings` だけ |
+| 閉じた直後 | そのとき押されていたキーが**全部離れるまで** (最大 1.5 秒) は横取りを続け、最後に QMK のレポートを空にしてから戻す。PC が最後に見たのは開いたときの「全部離した」なので、**メニュー中に押していたキーの離しは PC に出ない**。この間に新しく押したキーは捨てる (Settings を離してから打てば普通に出る) |
+
+★ タッチパッドのポインタは横取りしない (キーではないので PC へ出る)。
+★ `key.inject` の打鍵も同じ道を通るので、メニュー中は PC に出ない (下の検査で使う)。
+
+#### 処理中に開いたら / メニュー中に発話が来たら (決めたこと)
+
+| いつ | 何が起きるか |
+|---|---|
+| 会話 (録音・送信・返答待ち・再生・一次回答)・写真の往復・Custom の処理中・クリップの読み込みと再生・受け箱の発話を扱っている間・OTA の書き込み中 | `Settings` を押しても**開かない** (画面にも何も出さない。`menu.status` の `refused` / `refused_why` が増える)。画面と帯を使っているため。終わってから押し直す |
+| メニュー中の受け箱 (常時ポーリング §17-2e) | **保留**。待っている要求は打ち切り、新しく撃たない。閉じたらすぐ **seq の続きから**聞くので、その間に来た発話は閉じてから鳴る (サーバーは 5 分・16 件残す。**5 分より長く開いていると古いものは取りこぼしうる**) |
+| メニュー中の会話・写真・Custom・Clip | キーを握りつぶすので始まらない |
+| メニュー中のクリップの自動取得・Wi-Fi の自動接続 | 裏で続く (音も画面も使わない) |
+
+#### 顔と帯
+
+メニューは顔と帯の**上に描くだけ**。顔の素材 (`faces.bin`・元絵) には触らない。
+閉じたら、バーの下の隙間 (白)・顔 (いまのコマを全面)・帯 (字幕の文字を描き直す)
+を描き直し、顔の状態機械はそのまま続く。ステータスバーは開いている間も動く。
+日本語は字幕と同じ `font16.bin`。1 行 22 px で 11 行見え、選んでいる行が画面から
+出ないように送る。画面の割り付け (題 24 px / 行 22 px x 11 / 足もと 22 px、色) は
+`main/stackee_draw.h` の `STACKEE_MENU_*`、期待値は `tools/menu_expected.py`。
+
+#### 誰がどのタスクで何をするか
+
+| 仕事 | タスク |
+|---|---|
+| Settings の押下・横取りの入り切り・キーをキューへ | 入力タスク (待たない。印を置くだけ) |
+| キーを捌く・画面を組み立てる・変わったときだけ描く (250 ms ごとに外の様子を写す) | ui タスク |
+| 登録・削除・切り替え・走査・送信先の切り替え (NVS / 数秒かかるもの) | メインループ (`stackee_menu_poll`) |
+| 受け箱の保留・接続テスト・クリップの入り切り / 取り込み | audio タスク (talk の錠の中) |
+
+#### 内蔵 RAM
+
+メニューの状態・画面 2 枚ぶんの行・外の様子の写し・走査結果・キーの列は **PSRAM**
+(約 10 KB。起動ログ `menu: 設定メニューの用意ができた (N B, PSRAM)`)。内蔵 RAM の静的な増分は **+96 B** (横取りの状態と数、直近の通信の時刻、
+開いているかの印)。数字は RESULTS.md「設定メニュー」。
+
+#### console (人手ゼロ・無音で確かめる)
+
+| コマンド | 中身 |
+|---|---|
+| `menu.status` `{"rows":0}` | `open` (開きたいか) `shown` (画面に出ているか) `gate` (`off` / `open` / `drain`) `screen` `depth` `sel` `pass_len` `keys` `opens` `closes` `refused` `refused_why` `blocker` (いま開けない理由) `paints` `paint_us` `paint_max_us` `queue_drops`、`gate_stats:{opens, closes, timeouts, captured, keys, dropped, swallowed, to_pc}` (`to_pc` = PC へ出したキーボード / マウス / コンシューマ / システムのレポートの累計)、`job:{busy, state, done, failed, error}`、`scan:{state, n, runs}`、`saved`、`health:{state, status, ms, n, path}`、`inbox_held`、`view:{title, footer, selected, top, count, rows:[[種類, 動作, 引数, 見出し, 値], …], truncated}` (いま画面に出ているもの。`rows=0` で行を省く) |
+| `menu.key` `{"k":"up\|down\|left\|right\|enter\|esc\|bs\|char","c":"a"}` | 検証用に本体へキーを 1 つ入れる (横取りしたキーと同じ列)。閉じていれば `closed` |
+| `menu.open` | `Settings` を押したのと同じ (処理中なら `{"error":"busy","why":"talk"}`) |
+| `menu.close` | 閉じる |
+
+`ui.status` にも `menu` (開いているか)、`wifi.status` に名指しの結果
+`target` / `target_result` (0 なし / 1 試行中 / 2 接続 / 3 失敗) / `target_reason`。
+
+```
+python3 tools/check_phase4.py --only menu                  # 無音・無人 (下)
+python3 tools/console_hid.py menu.open
+python3 tools/console_hid.py menu.key k=down
+python3 tools/console_hid.py menu.status
+python3 tools/console_hid.py menu.close
+```
+
+`check_phase4.py --only menu` は: 開く → `key.inject F24` を 1 回 (PC への
+レポート `to_pc` が**増えない**こと) → `menu.key` でルート / Wi-Fi / 登録済み /
+サーバー / クリップ / 本体を巡り、階層ごとに `menu.status` の view を
+`tools/menu_expected.py` で描いて `lcd.crc y=28 h=292` と突き合わせる → 閉じる →
+横取りが `off`、隙間が白、帯が黒、顔が 32 コマのどれか (`lcd.crc`)。
+**Wi-Fi の切り替え・追加・削除・走査・接続テスト・送信先・音量は押さない**
+(登録簿も NVS も触らない・通信しない)。
+
+ホストテスト: `tools/test_menu_host.py` (階層・選択・パスワードの編集と消去・
+切り替え / 追加 / 削除 / 走査の呼び出し・音量・送信先・クリップ・接続テスト・JIS の
+キー読み・11 画面の CRC を `menu_expected.py` と照合・決まり文句が 1 行に収まる)、
+`tools/test_keyseq_host.py` の `MenuGateTest` (QMK ごと: メニュー中は KB / MOUSE 行が
+0 本・開いた瞬間に押していたキーは PC で 1 回離される・閉じたあと離しが漏れない・
+DRAIN の 1.5 秒・独自キーと QK_BOOT とマウスキーは効かない・MT の Shift が届く・
+レイヤー 3 の矢印が届く)、`tools/test_wifi_host.py` の `PreferTest` (名指しの
+切り替え・見えない / パスワード違い / 未登録で失敗してすぐ戻る)、
+`tools/test_talk_host.py` (メニュー中の受け箱の保留と seq の続き)。
+
+#### まだ確かめていないこと
+
+* 実機での描画時間 (`menu.status` の `paint_us`。240x292 を塗り直すので字幕の帯の
+  約 4 倍、20〜30 ms の見込み。変わったときだけ描く)。
+* 実機での Wi-Fi の切り替え・追加 (登録簿を触るので検査では押さない。人が
+  普段使いで試したあと `wifi.status` の `target_result` と `log.tail` を読む)。
+* 中継 (pi400) が `/health` を通すか (通さなければ「失敗 HTTP 404」)。
+* 閉じた直後 1.5 秒以内に打ち始めたときに捨てるキー (Settings を押したまま打つと
+  捨てられる。離してから打てば出る)。
 
 ### 17-3. Raw HID の上のコンソール
 

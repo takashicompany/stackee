@@ -26,6 +26,7 @@
 #include "stackee_icons.h"
 #include "stackee_input.h"
 #include "stackee_lcd.h"
+#include "stackee_menu.h"
 #include "stackee_perf.h"
 #include "stackee_selftest.h"
 #include "stackee_talksm.h"
@@ -351,6 +352,7 @@ static void selftest_step(void) {
         // 「出しているもの」を忘れて描き直させる。
         ui.sub_shown_valid = false;
         paint_face_full(ui.view.current);
+        stackee_menu_invalidate();      // メニュー中なら次の周で描き直す
         stackee_lcd_flush();
     }
 }
@@ -456,6 +458,33 @@ static void ui_task(void *unused) {
             paint_bar(&want);
             ui.shown = want;
             ui.shown_valid = true;
+        }
+
+        // ★ 本体の設定メニュー (README §17-2g)。開いている間はバーの下
+        //   (y=28..319) を丸ごとメニューにして、顔と帯は描かない。**顔の素材には
+        //   触らない** (上に重ねて描くだけ)。閉じたら顔と帯を描き直す。
+        stackee_menu_ui_t menu = stackee_menu_ui_tick(
+            &ui.canvas, ui.have_font16 ? &ui.font16 : NULL, ui.battery, ui.charging);
+        if (menu == STACKEE_MENU_UI_PAINTED) {
+            stackee_lcd_mark_rows(STACKEE_MENU_Y, STACKEE_MENU_HEIGHT);
+        }
+        if (menu == STACKEE_MENU_UI_SHOWN || menu == STACKEE_MENU_UI_PAINTED) {
+            stackee_lcd_flush();
+            xSemaphoreGive(ui.lock);
+            continue;
+        }
+        if (menu == STACKEE_MENU_UI_CLOSED) {
+            // バーの下の隙間 (白) → 顔を全面 (途中の差分は捨てる) → 帯は
+            // 「出しているもの」を忘れさせて、下の字幕の処理で描き直す。
+            stackee_draw_fill(&ui.canvas, 0, STACKEE_BAR_AREA_HEIGHT, ui.canvas.width,
+                              FACE_Y - STACKEE_BAR_AREA_HEIGHT,
+                              stackee_draw_rgb565(STACKEE_SCREEN_BG));
+            stackee_lcd_mark_rows(STACKEE_BAR_AREA_HEIGHT, FACE_Y - STACKEE_BAR_AREA_HEIGHT);
+            ui.view.target = -1;
+            if (ui.faces != NULL) {
+                paint_face_full(ui.view.current);
+            }
+            ui.sub_shown_valid = false;
         }
 
         // 字幕。★ 同じ文字列なら 1 画素も触らない。取れなければこの周は
@@ -750,7 +779,7 @@ static size_t reply_ui_status(long id, char *buf, size_t cap) {
                     "\"updates\":%lu,\"paints\":%lu,\"skipped\":%lu,\"frames\":%lu,"
                     "\"font\":\"%s\",\"selftest\":%d,"
                     "\"sub_paints\":%lu,\"sub_len\":%u,\"font16\":%s,"
-                    "\"mic_held\":%s}",
+                    "\"mic_held\":%s,\"menu\":%s}",
                     id, atomic_load(&ui.ready) ? "true" : "false",
                     ui.view.frozen ? "true" : "false",
                     ui.bar_forced ? "true" : "false",
@@ -762,7 +791,8 @@ static size_t reply_ui_status(long id, char *buf, size_t cap) {
                     atomic_load(&ui.selftest),
                     (unsigned long)ui.sub_paints, (unsigned)strlen(ui.sub_shown),
                     ui.have_font16 ? "true" : "false",
-                    stackee_input_mic_held() ? "true" : "false");
+                    stackee_input_mic_held() ? "true" : "false",
+                    stackee_menu_is_open() ? "true" : "false");
     unlock();
     return at;
 }
@@ -803,6 +833,14 @@ static size_t ui_console(const char *cmd, const char *line, long id,
     if (strcmp(cmd, "ui.status") == 0)    { return reply_ui_status(id, buf, cap); }
     if (strcmp(cmd, "ui.subtitle") == 0)  { return reply_subtitle(id, line, buf, cap); }
     if (strcmp(cmd, "ui.assets") == 0)    { return reply_assets(id, buf, cap); }
+    if (strncmp(cmd, "menu.", 5) == 0) {
+        // 本体の設定メニュー (README §17-2g)。画面と同じ錠の中で答える
+        // (menu.status の view と lcd.crc が同じ絵を指すように)。
+        if (!lock()) { return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id); }
+        size_t at = stackee_menu_console(cmd, line, id, buf, cap);
+        unlock();
+        return at;
+    }
     if (strcmp(cmd, "face.auto") == 0) {
         if (!lock()) { return put(buf, cap, 0, "{\"id\":%ld,\"error\":\"busy\"}", id); }
         ui.view.frozen = false;
@@ -951,6 +989,7 @@ esp_err_t stackee_ui_start(void) {
     snprintf(ui.wifi, sizeof(ui.wifi), "off");      // 段階 3 まで Wi-Fi は無い
 
     load_assets();
+    stackee_menu_start();       // 設定メニュー (PSRAM を取るだけ)
 
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     stackee_face_view_init(&ui.view, &ui.cases, ui.changes, FACE_COUNT, now_ms);

@@ -18,6 +18,7 @@
 #include "stackee_bdf.h"
 #include "stackee_font16.h"
 #include "stackee_icons.h"
+#include "stackee_menu_core.h"
 
 // ---- 顔の切り詰め ----------------------------------------------------------
 // 顔の素材 (faces.bin) は 240x240 のまま。**描くときだけ** 上 29 行・下 11 行を
@@ -128,3 +129,39 @@ void stackee_draw_subtitle(const stackee_canvas_t *c,
 // 帯に要る幅 [px] = **いちばん長い行**の画素数 (改行は数えない)。
 // 1 行だけなら stackee_font16_text_px と同じ値になる。
 int stackee_draw_subtitle_px(const stackee_font16_t *font, const char *utf8);
+
+// ---- 本体の設定メニュー (2026-10-01、README §17-2g) -----------------------
+// ステータスバーの下 (y=28..319) を丸ごと使う。**顔の領域の上に描くだけ**で、
+// 顔の素材には触らない (閉じたら ui が顔と帯を描き直す)。
+//
+//   y=28..51    題 (24 px、濃い灰に白)
+//   y=52..293   行 11 本 (1 行 22 px = 余白 3 + 字形 16 + 余白 3)
+//   y=298..319  足もと (22 px、濃い灰に薄い灰。キーの案内)
+//
+//   行: 左に見出し (x=6)、右寄せで値 (右端 x=234)。「＞」は下の階層。
+//       選んでいる行は黒地に白。見出しは黒、情報の見出しは灰、お知らせは青。
+//   はみ出す字は描かない (途中で切らない)。値は見出しの 8 px 右までに収める。
+//
+// ★ 描き方は tools/menu_expected.py と 1 画素ずつ同じ (CRC32 で突き合わせる)。
+#define STACKEE_MENU_Y          STACKEE_BAR_AREA_HEIGHT
+#define STACKEE_MENU_HEIGHT     (320 - STACKEE_MENU_Y)
+#define STACKEE_MENU_TITLE_H    24
+#define STACKEE_MENU_ROW_H      22
+#define STACKEE_MENU_ROWS_Y     (STACKEE_MENU_Y + STACKEE_MENU_TITLE_H)
+#define STACKEE_MENU_FOOT_H     22
+#define STACKEE_MENU_FOOT_Y     (320 - STACKEE_MENU_FOOT_H)
+#define STACKEE_MENU_PAD_X      6
+#define STACKEE_MENU_GAP        8
+#define STACKEE_MENU_BG         0xFFFFFFu
+#define STACKEE_MENU_BAR_BG     0x303030u
+#define STACKEE_MENU_TITLE_FG   0xFFFFFFu
+#define STACKEE_MENU_FOOT_FG    0xC8C8C8u
+#define STACKEE_MENU_TEXT       0x000000u
+#define STACKEE_MENU_INFO       0x606060u
+#define STACKEE_MENU_NOTE       0x0050A0u
+#define STACKEE_MENU_SEL_BG     0x000000u
+#define STACKEE_MENU_SEL_FG     0xFFFFFFu
+
+// メニューを丸ごと描き直す (y=28..319)。font が無ければ地と帯だけ。
+void stackee_draw_menu(const stackee_canvas_t *c, const stackee_font16_t *font,
+                       const stackee_menu_view_t *view);

@@ -2146,3 +2146,123 @@ rev 1 = 古い 3.84 MB を 2 件 → `clips.sync` → rev 2 = その 2 件 + **�
 書き込み後の確認: サーバーで同じ id を作り直す (rev を進めても進めなくても) →
 `clips.sync` → `clips.status` で `replaced` +1、その id の `created` / `audio_bytes` が
 新しい値、`played=0`。`clips.play play=0` の `play.audio_bytes` が新しい長さ。
+
+## 本体の設定メニュー (`STK_SETTINGS`、0x7E14) 2026-10-01 — **予定 (まだ書き込んでいない)**
+
+README §17-2g / DESIGN.md §6e。`Settings` でステータスバーの下に設定メニュー
+(Wi-Fi / サーバー / クリップ / 本体)。開いている間のキーは QMK の host driver で
+止めて本体が読み、PC には送らない。処理中 (会話・写真・Custom・クリップ・受け箱の
+発話・OTA) は開かない。メニュー中は受け箱を保留。sdkconfig は変えていない。
+
+### ビルド (実機に触らない)
+
+| | dev | full |
+|---|---:|---:|
+| 像 (`stackee.bin`) | 1,457,904 B | 1,459,440 B |
+| 変更前 (`89c049e` を同じ手順でビルド) | 1,438,560 B | 1,440,080 B |
+| 内蔵 RAM の静的合計 (DIRAM) | **180,188 B** (変更前 180,092、**+96**) | **178,412 B** (変更前 178,316、**+96**) |
+| うち `.bss` / `.data` | 57,192 / 29,105 B | 55,416 / 29,105 B |
+
+増分 +96 B は横取りの状態と数 (`qmk_port_host.c`)・直近の通信の時刻 (`stackee_http.c`)・
+開いているかの印とポインタ。メニューの状態・画面 2 枚ぶんの行・外の様子の写し・
+走査結果・キーの列 (約 10 KB) と Wi-Fi の名指しの欄は PSRAM。
+警告は変更前からの `tud_init` の deprecated だけ。
+
+### ホストテスト
+
+**775 件** (`tools/test_*.py` をファイルごとに、全部 OK。前 713 件)。
+`test_menu_host` **35 件 (新規)**: 階層 (Enter で下へ・Esc / BS で上へ・選んでいた所に
+戻る・ルートの Esc で閉じる・ルートの BS は何もしない・閉じている間のキーは無視・
+開くといつもルート)・Wi-Fi (状態の行・登録済みへの切り替え → 結果の画面 → 戻り先は
+Wi-Fi・いまの AP は切り替えない・失敗の理由・走査 → パスワード → 保存して接続・
+**伏せ字だけで中身は画面に出ない・渡したら 0 で消す・Esc / 閉じるでも消す**・空の BS
+で抜けない・オープンな AP・断られたら留まる・走査の失敗・削除は確認の既定が
+「やめる」)・サーバー / クリップ / 本体の行と頼みごと (接続テストはテスト中に撃ち直さない・
+強制 OFF の自動取得・音量 ±5・送信先)・JIS のキー読み (記号 30 通り・使わないキー)・
+**11 画面の CRC を `tools/menu_expected.py` と照合**・送り (選んでいる行が見える)・
+決まり文句が 1 行に収まる。
+`test_keyseq_host` 53 → **65** (`MenuGateTest` 11 件: メニュー中は KB / MOUSE 行が
+0 本・開いた瞬間に押していたキーは PC で 1 回だけ離される・閉じたあと離しが漏れない・
+DRAIN の 1.5 秒・独自キーと QK_BOOT とマウスキーは効かない・MT の Shift とレイヤー 3 の
+矢印が届く・`key.inject` の F24 も出ない。ほか 0x7E14 = SETTINGS)。
+`test_wifi_host` 21 → **27** (`PreferTest`: 名指しで切り替え・次の周期はいつもの一番
+強いもの・見えない / パスワード違い / 未登録で失敗してすぐ戻る・off から追加して繋ぐ)。
+`test_talk_host` 188 → **189** (メニュー中の受け箱の保留と seq の続き)。
+`test_tools` **+7** (`--only menu` の合否: PC に 1 件でも出たら NG・画面違い・閉じても
+横取り中・処理中で開けないのは NG にしない・巡回が Enter を「下へ」以外で押さない)。
+`test_gen_keymap` (customKeycodes 21 個)、`test_console_host` (`hello` に `menu.*`)。
+`gen_keymap.py --check` は「生成物は最新」。
+
+### 書き込み後に回す確認 (人手ゼロ・無音)
+
+★ ここで触るのはメニューの表示と横取りだけ。**Wi-Fi の切り替え・追加・削除・走査・
+接続テスト・送信先・音量は押さない** (登録簿も NVS も触らない・通信しない)。
+★ `key.inject` は本物のキーなので `kc=F24` だけを使う (メニュー中は PC に出ない
+はずだが、出ても害の無いキー)。
+
+**1. 起動直後**
+
+```
+python3 tools/console_hid.py hello           # features に menu.status / menu.key / menu.open / menu.close
+python3 tools/console_hid.py menu.status     # open=0, shown=0, gate=off, saved=登録件数, blocker=""
+python3 tools/console_hid.py log.tail        # 「menu: 設定メニューの用意ができた (N B, PSRAM)」
+python3 tools/console_hid.py status          # heap_internal が前の版と同じ水準
+```
+
+**2. 一式**
+
+```
+python3 tools/check_phase4.py --only menu                     # dev (シリアル)
+python3 tools/check_phase4.py --transport hid --only menu     # full
+```
+
+| 見るもの | 期待値 |
+|---|---|
+| 設定メニューを開く | `open=1 gate=open screen=root` |
+| メニュー中の打鍵は PC に出ない | F24 を注入しても `to_pc` が同じ、`gate_stats.keys` +1 |
+| メニューの階層を巡る | 11 画面 (root / wifi / wifi_saved / … / device / root) で違い なし |
+| メニューの画面 (lcd.crc) | 11 画面とも `menu_expected.py` と一致 |
+| 巡回中も PC に出ない | `to_pc` が 1 つの値のまま |
+| 閉じたら横取りが off に戻る | `open=0 shown=0 gate=off` |
+| 閉じたら顔に戻る | 隙間 白、帯 黒 (字幕が無ければ)、顔が 32 コマのどれかと一致 |
+
+**3. 開いた瞬間に押していたキーが PC に残らない**
+
+```
+python3 tools/console_hid.py menu.status rows=0                               # gate_stats.to_pc を控える (A)
+python3 tools/console_hid.py key.inject kc=F24 hold_ms=1500 wait=false        # F24 を 1.5 秒押す
+python3 tools/console_hid.py menu.open                                         # 押している間に開く
+python3 tools/console_hid.py menu.status rows=0                               # 2 秒後
+python3 tools/console_hid.py menu.close
+```
+
+`to_pc` = A + 2 (F24 の押下 1 + 開いたときの「全部離した」1)。F24 の離しは
+横取りされて増えない。`gate_stats.captured` が増える。
+
+**4. 受け箱の保留**
+
+| 手順 | 期待値 |
+|---|---|
+| 開く前の `inbox.status` | `waiting=1` (待っている) |
+| `menu.open` → `inbox.status` | `waiting=0`、`aborts` +1。`menu.status` の `inbox_held=1` |
+| 30 秒開いたまま | `polls` が増えない |
+| `menu.close` → 数秒後の `inbox.status` | `waiting=1`、`seq` は開く前と同じ (続きから) |
+
+**5. 描画の時間**: `menu.status` の `paint_us` / `paint_max_us` (見込み 20〜30 ms。
+変わったときだけ)。巡回中に `key.inject kc=F24` を 20 回 (メニュー中なので PC には
+出ない) → `status.perf.input` の中央値 ≤ 2 ms / 最大 ≤ 5 ms。
+
+**6. 処理中は開かない (任意)**: `audio.null on=true` のうえで `clips.play play=0` の
+直後に `menu.open` → `{"error":"busy","why":"clip"}` (読み込みが短いと間に合わず
+開いてしまうことがある。そのときは `menu.close`)。`menu.status` の `refused` +1。
+最後に `audio.null` を元の値に戻す。
+
+### 未確認のまま
+
+| 項目 | なぜ |
+|---|---|
+| 実機での Wi-Fi の切り替え・追加・削除 | 登録簿と接続を触るので自動の検査では押さない。人が普段使いで試したあと `wifi.status` の `target` / `target_result` / `target_reason` と `log.tail` (`[wifi] … prefer ssid=…`) を読む |
+| 中継 (pi400) が `/health` を通すか | 通さなければ接続テストは「失敗 HTTP 404」 |
+| 実機の描画時間 | 5 で測る |
+| 閉じた直後 1.5 秒以内に押したキー | Settings を押したまま打つと捨てられる (離してから打てば出る)。設計どおりだが体感は未確認 |
+| 物理キーでの操作感 (レイヤー 3 の矢印・MT の Shift でのパスワード入力) | 打鍵列テストでは通っている。実機の指では未確認 |

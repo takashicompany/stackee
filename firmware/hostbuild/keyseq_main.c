@@ -18,6 +18,9 @@
 //                               既定配列に無いキーを試すため)
 //   ovf             FIFO 溢れ相当。押下中を全部離す
 //   mark <文字列>   出力に目印を入れる
+//   gate <1|0>      設定メニューの横取りを始める / 閉じる (実機の input タスクと同じ口)
+//   autogate <1|0>  Settings キーの押下で横取りを入り切りする (実機と同じ振る舞い)
+//   gatestat        横取りの状態と数
 //
 // 出るもの:
 //
@@ -30,6 +33,8 @@
 //   MIGLEVEL <番号> / MIGRATE changed=N level=M  既定配列の移行
 //   MIGREPORT from=A level=B changed=N mic=M custom=C  直近の移行の記録 (migreport)
 //   BOOTLOADER / RESET                        QK_BOOT の行き先
+//   MENUKEY <usage> <mods>                    横取り中に押されたキー (16 進)
+//   GATE <状態> opens=.. closes=.. ...        gatestat の答え
 //
 // ★ ここで通っても実機で動く保証にはならない。見ているのは
 //   「同じ押下列に同じレポート列が出るか」だけで、I2C も USB も入っていない。
@@ -76,8 +81,18 @@ void stackee_qmk_restart(void) {
     printf("RESET\n");
 }
 
+static bool s_autogate;
+
 void stackee_qmk_custom_key(stackee_key_action_t action, bool pressed) {
     printf("CUSTOM %s %d\n", stackee_key_action_name(action), pressed ? 1 : 0);
+    // 実機 (stackee_input.c) と同じ: Settings の押下で開く / 閉じる。
+    if (s_autogate && action == STACKEE_KEY_SETTINGS && pressed) {
+        stackee_qmk_gate_set(stackee_qmk_gate_state() != STACKEE_GATE_OPEN);
+    }
+}
+
+void stackee_qmk_menu_key(uint8_t usage, uint8_t mods) {
+    printf("MENUKEY %02X %02X\n", usage, mods);
 }
 
 // EEPROM の保存先は RAM。再起動をまたぐ話は実機でしか確かめられない。
@@ -146,6 +161,7 @@ static void drain(void) {
 static void step_1ms(void) {
     s_now_ms++;
     stackee_qmk_task();
+    stackee_qmk_gate_step();
     stackee_qmk_eeprom_task();
     drain();
 }
@@ -235,6 +251,21 @@ int main(void) {
         } else if (strcmp(cmd, "mark") == 0) {
             char *rest = strtok(NULL, "\r\n");
             printf("MARK %s\n", rest ? rest : "");
+        } else if (strcmp(cmd, "gate") == 0) {
+            stackee_qmk_gate_set(atoi(strtok(NULL, " \t\r\n")) != 0);
+            drain();
+        } else if (strcmp(cmd, "autogate") == 0) {
+            s_autogate = atoi(strtok(NULL, " \t\r\n")) != 0;
+        } else if (strcmp(cmd, "gatestat") == 0) {
+            stackee_qmk_gate_stats_t st;
+            stackee_qmk_gate_stats(&st);
+            printf("GATE %s opens=%lu closes=%lu timeouts=%lu captured=%lu "
+                   "keys=%lu dropped=%lu swallowed=%lu\n",
+                   stackee_qmk_gate_name(stackee_qmk_gate_state()),
+                   (unsigned long)st.opens, (unsigned long)st.closes,
+                   (unsigned long)st.drain_timeouts, (unsigned long)st.captured,
+                   (unsigned long)st.keys, (unsigned long)st.dropped,
+                   (unsigned long)st.swallowed);
         } else if (strcmp(cmd, "nvs") == 0) {
             printf("NVS saves=%d valid=%d\n", s_nvs_saves, s_nvs_valid ? 1 : 0);
         } else {
