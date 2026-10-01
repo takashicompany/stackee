@@ -279,8 +279,12 @@ static void face(stackee_talk_t *t) {
                     (t->ops->ack_active != NULL && t->ops->ack_active());
     // ★ クリップを FAT から読んでいる間 (1 秒未満) は考え中の顔にしない
     //   (通信していないので「考えています」は嘘。ちらつきも避ける)。
+    //   読み終えてスピーカーの支度を待つ PLAY_WAIT も同じ (2026-10-01:
+    //   ここが抜けていて、クリップの頭で考え中の顔が一瞬出ていた)。
+    bool clip_wait = t->state == STACKEE_TALK_CLIP_LOAD ||
+                     (t->state == STACKEE_TALK_PLAY_WAIT && t->clip_active);
     bool busy = (t->state != STACKEE_TALK_IDLE) && !recording && !speaking &&
-                t->state != STACKEE_TALK_CLIP_LOAD;
+                !clip_wait;
     t->ops->face(recording, busy, speaking);
 }
 

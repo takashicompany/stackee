@@ -2949,6 +2949,10 @@ class ClipPlayTest(unittest.TestCase):
         # 借りた返答文は戻す (talk.status の「直近の会話」を壊さない)。
         self.assertEqual(last_print(out)['reply'], '')
         self.assertNotIn('考えています', out)            # 考え中の案内は出さない
+        # 考え中の顔も一瞬たりとも出さない (読み込み・スピーカー待ちの間も)。
+        # 2026-10-01: PLAY_WAIT で busy が立ち、クリップの頭で一瞬出ていた。
+        self.assertIn('FACE rec=0 busy=0 speak=1', out)
+        self.assertNotIn('busy=1', out)
 
     def test_no_clips_shows_a_notice_without_sound(self):
         out = run('net 0\nclipon\nt 20\nclip 1\nt 100\nclipprint\nt 2500\n')

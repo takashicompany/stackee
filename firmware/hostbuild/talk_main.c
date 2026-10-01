@@ -328,10 +328,14 @@ static bool ops_http_prewarm(const char *path) {
 }
 static bool ops_watch_ok(void) { return g_watch_ok; }
 
+// 表情の入力 (考え中 = busy)。値が変わったときだけ出す。
+static int g_face_last = -1;
 static void ops_face(bool recording, bool busy, bool speaking) {
-    (void)recording;
-    (void)busy;
-    (void)speaking;
+    int v = (recording ? 4 : 0) | (busy ? 2 : 0) | (speaking ? 1 : 0);
+    if (v != g_face_last) {
+        g_face_last = v;
+        printf("FACE rec=%d busy=%d speak=%d\n", recording, busy, speaking);
+    }
 }
 
 static const stackee_talk_ops_t OPS = {
