@@ -623,10 +623,14 @@ static void finish_recording(stackee_talk_t *t) {
         return;
     }
     t->http_open = true;
+    // 一次回答は返事を待つ前に鳴らし始める。その間も通信は進む。
+    // ★ UPLOAD へ移る**前に**鳴らし始める (2026-10-02)。ack_begin は
+    //   マイク→スピーカーの切り替えで少し止まるので、先に UPLOAD に移ると
+    //   その間「送信中・まだ喋っていない」= 考え中の顔が一瞬出ていた。
+    //   先に鳴らせば顔は聞き取り中から直接喋り中へ移る。
+    t->ops->ack_begin();
     to(t, STACKEE_TALK_UPLOAD);
     show(t, "音声を送信中…");
-    // 一次回答は返事を待つ前に鳴らし始める。その間も通信は進む。
-    t->ops->ack_begin();
     face(t);
 }
 
@@ -2200,9 +2204,9 @@ bool stackee_talk_inject(stackee_talk_t *t, const int16_t *pcm, int samples) {
         return false;
     }
     t->http_open = true;
+    t->ops->ack_begin();            // ★ UPLOAD より先 (上の start_upload と同じ理由)
     to(t, STACKEE_TALK_UPLOAD);
     show(t, "音声を送信中…");
-    t->ops->ack_begin();
     face(t);
     return true;
 }

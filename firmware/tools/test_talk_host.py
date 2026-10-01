@@ -569,6 +569,23 @@ class GuideTest(unittest.TestCase):
         for line in GUIDE_REC.replace('\\n', '\n').split('\n'):
             self.assertLessEqual(ack_lines.page_width(line), 15)
 
+    # ---- 表情: 一次回答の頭で考え中を挟まない (2026-10-02) -------------------
+    def test_the_face_goes_from_listening_straight_to_the_first_reply(self):
+        out = self.turn(ack_ms=1500)
+        faces = [s for s in out.splitlines() if s.startswith('FACE ')]
+        rec = faces.index('FACE rec=1 busy=0 speak=0')
+        speak = faces.index('FACE rec=0 busy=0 speak=1')
+        # 聞き取り中 → (考え中を挟まず) → 一次回答で喋り中。
+        self.assertEqual(speak, rec + 1, faces)
+        # 一次回答が終わってから返事待ちの考え中になるのはよい。
+        self.assertIn('FACE rec=0 busy=1 speak=0', faces[speak:])
+
+    def test_without_a_first_reply_the_thinking_face_follows_listening(self):
+        out = self.turn(ack_ms=0)
+        faces = [s for s in out.splitlines() if s.startswith('FACE ')]
+        rec = faces.index('FACE rec=1 busy=0 speak=0')
+        self.assertEqual(faces[rec + 1], 'FACE rec=0 busy=1 speak=0', faces)
+
     # ---- 考え中 ----------------------------------------------------------
     def test_the_thinking_guide_follows_the_recording_one(self):
         out = self.turn(subs=self.SUBS)
