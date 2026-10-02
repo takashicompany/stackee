@@ -360,6 +360,9 @@ class AckLinesTest(unittest.TestCase):
             self.skipTest('public/server/stackee_server.py を import できない')
         self.assertEqual(ack_lines.COLUMNS, self.server.SUBTITLE_COLUMNS)
         self.assertEqual(ack_lines.NO_PAGE_START, self.server.NO_PAGE_START)
+        self.assertEqual(ack_lines.CLAUSE_BREAK,
+                         self.server.SUBTITLE_CLAUSE_BREAK)
+        self.assertEqual(ack_lines.MIN_LAST, self.server.SUBTITLE_MIN_LAST)
         probes = [ack['text'] for ack in self.acks] + [
             'あいうえおかきくけこさしすせそたちつてと',
             'ABC 123 and some English words mixed in here too.',
@@ -368,6 +371,9 @@ class AckLinesTest(unittest.TestCase):
             'うん。そうなのだ。',
             'えっと、うん、そうなのだ、たぶんね。',
             'ほんとう？！すごいのだ、「やった」。',
+            'あいうえおかきくけこさしすせっちゅう〜ーのだ。',
+            'みじかい、ことばを、たくさん、ならべて、みたのだ、どうかな。',
+            'あいうえおかきくけこさしすせそた。',
             '',
         ]
         for text in probes:
@@ -426,9 +432,10 @@ class GuideTextTest(unittest.TestCase):
                       % sub.GUIDE_THINKING.replace('\n', '\\n'), self.header)
 
     def test_it_matches_the_server_way_of_splitting(self):
+        # 行の切れ目は改行で渡す (流し込むと「話しかけ」の途中で折れる。
+        # 「…」は句読点ではない)。
         self.assertEqual(sub.GUIDE_RECORDING.split('\n'),
-                         ack_lines.subtitle_lines('AI質問キーを押したまま話しかけてみてください'))
-        # 「…」は句読点ではないので、行の切れ目は改行で渡す。
+                         ack_lines.subtitle_lines('AI質問キーを押したまま\n話しかけてみてください'))
         self.assertEqual(sub.GUIDE_THINKING.split('\n'),
                          ack_lines.subtitle_lines('考えています…\nしばらくお待ちください'))
         for text in (sub.GUIDE_RECORDING, sub.GUIDE_THINKING):

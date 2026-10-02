@@ -177,6 +177,10 @@ BYTES_PER_MS = RATE * 2 // 1000
 # Subtitles: one televised line is 15 full-width characters, and the device draws
 # ASCII half as wide. A page never opens with punctuation or a closing bracket.
 SUBTITLE_COLUMNS = 15
+# A line may end after a clause (a comma) only once it is this full; a shorter one goes on.
+SUBTITLE_CLAUSE_BREAK = 10
+# A sentence's last line narrower than this takes a few characters from the line before.
+SUBTITLE_MIN_LAST = 4
 SUBTITLE_MAX_LINES = 48
 SUBTITLE_MAX_BYTES = 4096
 # The device fetches the status with one request; a second one for the subtitles cost it
@@ -185,7 +189,8 @@ SUBTITLE_MAX_BYTES = 4096
 MAX_JOB_BYTES = 8192
 # A caption-only utterance (`stackee-say --no-voice`) turns a page this often.
 SUBTITLE_ONLY_PAGE_MS = 2500
-NO_PAGE_START = "。、．，,.！？!?」』）)】〕》〉］]｝}・ー:;：；"
+NO_PAGE_START = ("。、．，,.！？!?」』）)】〕》〉］]｝}・ー〜～:;：；"
+                 "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ")
 
 
 def split_parts(text, marks):
@@ -211,30 +216,6 @@ def opens_badly(text, index):
     return bool(rest) and rest[0] in NO_PAGE_START
 
 
-def split_columns(text, columns=SUBTITLE_COLUMNS):
-    """Cut text into pieces of at most `columns` columns, none opening with punctuation.
-
-    The pieces are as even as possible: what is left is always shared between the
-    fewest pages that can hold it, so a long clause never ends in a stub page.
-    """
-    pieces, start = [], 0
-    while start < len(text):
-        rest = page_width(text[start:])
-        target = rest / -(-rest // columns)   # ceil division: the fewest pages left
-        end, width, best = start, 0., None
-        while end < len(text) and width + page_width(text[end]) <= columns:
-            width += page_width(text[end])
-            end += 1
-            if best is None or abs(width - target) < best[1]:
-                best = end, abs(width - target)
-        end = best[0]
-        while start + 1 < end < len(text) and opens_badly(text, end):
-            end -= 1
-        pieces.append(text[start:end])
-        start = end
-    return pieces
-
-
 def clause_spans(text):
     """Character ranges of the clauses of one sentence, in order, covering the text."""
     spans, start = [], 0
@@ -250,35 +231,43 @@ def clause_spans(text):
 def subtitle_pages(text):
     """Pages of one sentence as (character offset within the sentence, page text).
 
-    Clauses that follow one another share a page while together they fit in a line, so
-    a short clause does not leave half a line empty. A clause too long for one line is
-    split evenly on its own. Pages never span two sentences: a sentence's start is exact,
-    and a page holding the next one would show it before it is spoken.
+    The sentence flows into lines of up to 15 columns. A line may end early after a
+    clause only once it holds `SUBTITLE_CLAUSE_BREAK` columns; a shorter line takes the
+    next clause in and wraps inside it, so lines stay nearly full. When the next line
+    would open with a character that may not open one, the end of this line moves down
+    with it, so no line ever passes 15 columns (the device band is exactly 15 wide).
+    Pages never span two sentences: a sentence's start is exact, and a page holding the
+    next one would show it before it is spoken.
     """
-    pages, group = [], None   # group: (start, end) of the clauses waiting for a page
-
-    def flush():
-        if group is not None:
-            page = " ".join(text[group[0]:group[1]].split())
-            if page:
-                pages.append((group[0], page))
-
-    for start, end in clause_spans(text):
-        if page_width(" ".join(text[start:end].split())) > SUBTITLE_COLUMNS:
-            flush()
-            group, offset = None, start
-            for piece in split_columns(text[start:end]):
-                page = " ".join(piece.split())
-                if page:
-                    pages.append((offset, page))
-                offset += len(piece)
-        elif group is not None and page_width(
-                " ".join(text[group[0]:end].split())) <= SUBTITLE_COLUMNS:
-            group = group[0], end
-        else:
-            flush()
-            group = start, end
-    flush()
+    breaks = {end for _, end in clause_spans(text)}
+    pages, start = [], 0
+    while start < len(text):
+        while start < len(text) and text[start].isspace():
+            start += 1
+        end, width, cut = start, 0., None
+        while end < len(text) and width + page_width(text[end]) <= SUBTITLE_COLUMNS:
+            width += page_width(text[end])
+            end += 1
+            if end in breaks and width >= SUBTITLE_CLAUSE_BREAK:
+                cut = end
+        if end < len(text) and cut is not None:
+            end = cut
+        while start + 1 < end < len(text) and opens_badly(text, end):
+            end -= 1   # push the line's last character down so punctuation never opens one
+        page = " ".join(text[start:end].split())
+        if page:
+            pages.append((start, page))
+        start = end
+    if len(pages) > 1 and page_width(pages[-1][1]) < SUBTITLE_MIN_LAST:
+        # A stub such as 「た。」 borrows the end of the line before it, just enough to
+        # stop being a stub, without opening on punctuation or emptying that line.
+        before, cut = pages[-2][0], pages[-1][0]
+        while cut - 1 > before and (page_width(text[cut:].strip()) < SUBTITLE_MIN_LAST
+                                    or opens_badly(text, cut)):
+            cut -= 1
+        if not opens_badly(text, cut) and page_width(text[cut:].strip()) <= SUBTITLE_COLUMNS:
+            pages[-2:] = [(before, " ".join(text[before:cut].split())),
+                          (cut, " ".join(text[cut:].split()))]
     return pages
 
 

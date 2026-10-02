@@ -3514,7 +3514,8 @@ TLS の張り直しも関係なくなる。`subtitles_url` の道は旧サーバ
 `tools/subtitle_expected.py` で同じ `font16.bin` から描いた期待値と
 **1 ビットも違わない**。`ui.status` の `sub_len` (21 / 24 / 27 / 30 B) も
 その文字のバイト数と一致する。1 文を 15 桁で割るとき**均等に割る**
-(17 字 → 8 + 9) というサーバの決まりも、ここに出ている。
+(17 字 → 8 + 9) というサーバの決まりも、ここに出ている (当時の決まり。
+2026-10-03 から均等には割らず、行をできるだけ 15 桁まで埋める)。
 
 ★ 挟み幅 (130〜166 ms) は**こちらのポーリングの往復時間**であって本体の
 遅れではない。本体側は audio タスクが 1 周ごとにページを選び、ui タスクが
@@ -3743,12 +3744,13 @@ API は `stackee_ui_set_subtitle(const char *utf8)` のまま。中身が
 | `ack_02.pcmz` | 了解なのだ。ちょっと考えるのだ。 | 「了解なのだ。」 / 「ちょっと考えるのだ。」 |
 | `ack_03.pcmz` | 聞こえたのだ。今から確認するのだ。 | 「聞こえたのだ。」 / 「今から確認するのだ。」 |
 | `ack_04.pcmz` | 任せてほしいのだ。少し待っていてね。 | 「任せてほしいのだ。」 / 「少し待っていてね。」 |
-| `ack_05.pcmz` | うん、考えてみるのだ。 | 「うん、考えてみるのだ。」 (同じ文の続く節は 15 桁に収まる限り 1 行に詰める) |
+| `ack_05.pcmz` | うん、考えてみるのだ。 | 「うん、考えてみるのだ。」 (文の中は流し込み、読点で改行するのは行が 10 桁以上のときだけ) |
 
 **割り方はサーバの規則そのもの。** `tools/ack_lines.py` が
 `public/server/stackee_server.py` の `page_width` / `opens_badly` /
-`split_parts` / `split_columns` / `clause_spans` / `subtitle_pages` の写しで
-(文ごとに割り、文をまたいでは詰めない)、
+`split_parts` / `clause_spans` / `subtitle_pages` と字幕の定数
+(`SUBTITLE_COLUMNS` / `SUBTITLE_CLAUSE_BREAK` / `SUBTITLE_MIN_LAST` /
+`NO_PAGE_START`) の写しで (文ごとに割り、文をまたいでは詰めない)、
 `tools/import_faces.py` が manifest を書くときに `text` から引き直す。
 写しなのでずれうる — `tools/test_subtitle_host.py` の `AckLinesTest` が
 **本物のサーバを import して** 5 文と見本の文で突き合わせる (ずれたら落ちる)。

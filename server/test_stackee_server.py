@@ -785,88 +785,96 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual(len(audio), 7 * 16000 * 2 + len(s.SILENCE))
         self.assertEqual(self.lines(body), [['0', 'ひとつ目です。'], ['3650', 'ふたつ目です。']])
 
-    def test_a_long_clause_is_split_evenly_without_a_stub_page(self):
-        # 40 columns need three pages, so they come out 13 + 13 + 14, not 15 + 15 + 10.
-        self.assertEqual(s.split_columns('あ' * 40), ['あ' * 13, 'あ' * 13, 'あ' * 14])
-        self.assertEqual(s.split_columns('北の地域では雪が多く降る季節です。'),
-                         ['北の地域では雪が', '多く降る季節です。'])
-        self.assertEqual(s.split_columns('あ' * 15), ['あ' * 15])
-        for width in range(1, 121):
-            pages = s.split_columns('あ' * width)
-            with self.subTest(width=width):
-                self.assertEqual(''.join(pages), 'あ' * width)
-                self.assertEqual(len(pages), -(-width // 15))
-                self.assertLessEqual(max(map(s.page_width, pages)), 15)
-                self.assertLessEqual(max(map(s.page_width, pages))
-                                     - min(map(s.page_width, pages)), 1)
+    def pages(self, text):
+        return [page for _, page in s.subtitle_pages(text)]
+
+    def assertWithinLines(self, text):
+        """Pages rejoin into the text, never open with punctuation, never pass 15 columns."""
+        pages = self.pages(text)
+        self.assertEqual(''.join(pages), text)
+        for page in pages:
+            self.assertNotIn(page[0], s.NO_PAGE_START)
+            self.assertLessEqual(s.page_width(page), 15, page)
+        return pages
+
+    def test_lines_fill_to_fifteen_columns_and_wrap_inside_a_clause(self):
+        # The reply that showed lines broken at half width on the device.
+        self.assertEqual(self.pages('環さんが、天キーを機にスタビライザーとフォームの導入、'
+                                    'スイッチ交換を進めています。'),
+                         ['環さんが、天キーを機にスタビラ', 'イザーとフォームの導入、',
+                          'スイッチ交換を進めています。'])
+        self.assertEqual(self.pages('写真では、分解した左右分割キーボードや、'
+                                    '白いスイッチを取り付けた様子が見えます。'),
+                         ['写真では、分解した左右分割キー', 'ボードや、白いスイッチを取り付',
+                          'けた様子が見えます。'])
+        self.assertEqual(self.pages('あ' * 40), ['あ' * 15, 'あ' * 15, 'あ' * 10])
+        self.assertEqual(self.pages('春です、夏です。'), ['春です、夏です。'])
+
+    def test_a_line_ends_at_a_comma_only_once_it_holds_ten_columns(self):
+        self.assertEqual(s.SUBTITLE_CLAUSE_BREAK, 10)
+        # Nine columns at the comma: the line goes on into the next clause.
+        self.assertEqual(self.pages('あ' * 8 + '、' + 'い' * 10 + '。'),
+                         ['あ' * 8 + '、' + 'い' * 6, 'い' * 4 + '。'])
+        # Ten columns at the comma: the line may end there rather than cut the clause.
+        self.assertEqual(self.pages('あ' * 9 + '、' + 'い' * 10 + '。'),
+                         ['あ' * 9 + '、', 'い' * 10 + '。'])
+        # The last comma that still fits wins, so the line is as full as it can be.
+        self.assertEqual(self.pages('春はあたたかいです、夏は、あついです。'),
+                         ['春はあたたかいです、夏は、', 'あついです。'])
+
+    def test_exactly_fifteen_columns_is_one_page_and_sixteen_is_two(self):
+        self.assertEqual(self.pages('あいう、' + 'え' * 11), ['あいう、' + 'え' * 11])
+        # Sixteen columns: one character would be left over, so the stub takes four.
+        self.assertEqual(self.pages('あいう、' + 'え' * 12), ['あいう、' + 'え' * 8, 'え' * 4])
 
     def test_a_half_width_page_holds_thirty_characters(self):
         self.assertEqual(s.page_width('abc'), 1.5)
         self.assertEqual(s.page_width('あa'), 1.5)
-        self.assertEqual(s.split_columns('a' * 30), ['a' * 30])
-        self.assertEqual(s.split_columns('a' * 40), ['a' * 20, 'a' * 20])
-        self.assertEqual(s.split_columns('あ' * 10 + 'ab' * 20),
-                         ['あ' * 10 + 'ab' * 5, 'ab' * 15])
+        self.assertEqual(self.pages('a' * 30), ['a' * 30])
+        self.assertEqual(self.pages('a' * 40), ['a' * 30, 'a' * 10])
+        self.assertEqual(self.pages('OK, ' + 'あ' * 12 + '。'), ['OK, ' + 'あ' * 12 + '。'])
 
-    def test_punctuation_never_opens_a_page(self):
-        # An even split would open the second page with the bracket, so it moves back one.
-        text = 'あ' * 12 + '」' + 'い' * 11
-        pages = [page for _, page in s.subtitle_pages(text)]
-        self.assertEqual(pages, ['あ' * 11, 'あ」' + 'い' * 11])
-        # The space before the bracket is dropped when the page is trimmed, so it counts too.
-        self.assertEqual([page for _, page in s.subtitle_pages('あ' * 12 + ' 」' + 'い' * 10)],
-                         ['あ' * 11, 'あ 」' + 'い' * 10])
-        for text in ('あ' * 15 + '」' + 'い' * 20 + '。', 'あ、' * 30, 'あ' * 12 + '」' + 'い' * 11,
-                     'あ' * 12 + ' 」' + 'い' * 10):
-            pages = [page for _, page in s.subtitle_pages(text)]
-            with self.subTest(text=text):
-                self.assertEqual(''.join(pages), text)
-                for page in pages:
-                    self.assertNotIn(page[0], s.NO_PAGE_START)
-                    self.assertLessEqual(s.page_width(page), 15)
-
-    def test_short_clauses_share_a_line(self):
-        self.assertEqual(s.subtitle_pages('春です、夏です。'), [(0, '春です、夏です。')])
-        # Greedy: a clause joins the page while the page stays within 15 columns.
-        self.assertEqual(s.subtitle_pages('うん、そうだね、今日はいい天気だから、散歩に行こうか。'),
-                         [(0, 'うん、そうだね、'), (8, '今日はいい天気だから、'),
-                          (19, '散歩に行こうか。')])
-        # Half-width text counts half a column.
-        self.assertEqual(s.subtitle_pages('OK, ' + 'あ' * 12 + '。'), [(0, 'OK, ' + 'あ' * 12 + '。')])
-
-    def test_exactly_fifteen_columns_is_one_page_and_sixteen_is_two(self):
-        self.assertEqual(s.subtitle_pages('あいう、' + 'え' * 10 + '。'),
-                         [(0, 'あいう、' + 'え' * 10 + '。')])
-        self.assertEqual(s.subtitle_pages('あいう、' + 'え' * 11 + '。'),
-                         [(0, 'あいう、'), (4, 'え' * 11 + '。')])
-
-    def test_a_long_clause_is_split_evenly_on_its_own(self):
-        # The short clauses around it keep their own pages; the 17-column clause splits 8 + 9.
-        text = 'はい、' + 'あ' * 16 + '、' + 'うん。'
-        self.assertEqual(s.subtitle_pages(text),
-                         [(0, 'はい、'), (3, 'あ' * 8), (11, 'あ' * 8 + '、'), (20, 'うん。')])
-
-    def test_a_closing_bracket_after_a_comma_stays_with_its_clause(self):
+    def test_what_cannot_open_a_line_pushes_characters_down(self):
+        # The band is exactly 15 columns, so punctuation never hangs past it: the end of
+        # the line moves down with it instead, and the line is shorter.
+        self.assertEqual(self.pages('リニアから静音タクタイルに替え、仕事仕様にしたとのことです。'),
+                         ['リニアから静音タクタイルに替', 'え、仕事仕様にしたとのこ', 'とです。'])
+        for mark in '。」ーっゃ':
+            with self.subTest(mark=mark):
+                self.assertEqual(self.pages('あ' * 15 + mark + 'い' * 10),
+                                 ['あ' * 14, 'あ' + mark + 'い' * 10])
+        # Two marks in a row push two characters (then the stub rule evens the end).
+        self.assertEqual(self.pages('あ' * 15 + '」。'), ['あ' * 13, 'ああ」。'])
+        # A space before the mark is skipped when looking for what opens the line.
+        self.assertEqual(self.pages('あ' * 14 + ' 」' + 'い' * 10),
+                         ['あ' * 13, 'あ 」' + 'い' * 10])
         self.assertEqual(s.clause_spans('「はい、」と言った。'), [(0, 10)])
-        text = '「はい、」と言ったけれど、本当はまだ準備ができていなかった。'
-        pages = [page for _, page in s.subtitle_pages(text)]
-        self.assertEqual(''.join(pages), text)
-        for page in pages:
-            self.assertNotIn(page[0], s.NO_PAGE_START)
-            self.assertLessEqual(s.page_width(page), 15)
+        for text in ('あ' * 15 + '」' + 'い' * 20 + '。', 'あ、' * 30, 'あ' * 12 + '」' + 'い' * 11,
+                     'ちょっとだけ、キャッシュをクリアしてからもういっぺんビルドしてみます。',
+                     '「はい、」と言ったけれど、本当はまだ準備ができていなかった。',
+                     'あ' * 15 + '」。' + 'い' * 15 + 'ー' * 3, 'ab' * 7 + 'a.' + 'c' * 40):
+            with self.subTest(text=text):
+                self.assertWithinLines(text)
+
+    def test_a_stub_last_line_borrows_from_the_line_before(self):
+        self.assertEqual(s.SUBTITLE_MIN_LAST, 4)
+        self.assertEqual(self.pages('あ' * 16), ['あ' * 12, 'あ' * 4])
+        # It does not leave the borrowed line opening with a small kana.
+        self.assertEqual(self.pages('「はい、」と言ったけれど、本当はまだ準備ができていなかった。'),
+                         ['「はい、」と言ったけれど、', '本当はまだ準備ができていな', 'かった。'])
+        self.assertEqual(self.pages('はい。'), ['はい。'])
 
     def test_pages_never_join_two_sentences(self):
         body = s.subtitle_body([(0, 1000., 'はい。'), (1150, 1000., 'そうです。')])
         self.assertEqual(body.decode(), '0\tはい。\n1150\tそうです。\n')
 
-    def test_page_starts_are_the_first_clause_start_and_never_go_back(self):
-        sentences = [(0, 3000., 'うん、そうだね、今日はいい天気だから、散歩に行こうか。'),
-                     (3150, 2000., 'はい、' + 'あ' * 16 + '、' + 'うん。')]
-        body = s.subtitle_body(sentences)
+    def test_page_starts_are_their_first_character_and_never_go_back(self):
+        first = '環さんが、天キーを機にスタビライザーとフォームの導入、スイッチ交換を進めています。'
+        second = 'あ' * 16
+        body = s.subtitle_body([(0, 4000., first), (4150, 2000., second)])
         starts = [int(line.split('\t')[0]) for line in body.decode().splitlines()]
-        self.assertEqual(starts, [0, round(3000 * 8 / 27), round(3000 * 19 / 27),
-                                  3150, round(3150 + 2000 * 3 / 23), round(3150 + 2000 * 11 / 23),
-                                  round(3150 + 2000 * 20 / 23)])
+        self.assertEqual(starts, [0, round(4000 * 15 / len(first)), round(4000 * 27 / len(first)),
+                                  4150, round(4150 + 2000 * 12 / 16)])
         self.assertEqual(starts, sorted(starts))
 
     def test_the_body_stops_at_forty_eight_lines_and_four_kilobytes(self):
@@ -922,10 +930,8 @@ class SubtitleTests(unittest.TestCase):
         for start, page in rows:
             self.assertLessEqual(s.page_width(page), 15)
             self.assertNotIn(page[0], s.NO_PAGE_START)
-        for (_, page), (_, following) in zip(rows, rows[1:] + [('', 'x' * 8)]):
-            # A page is only short when its clause is short, never as the stub of a long one.
-            self.assertTrue(s.page_width(page) > 3 or page.endswith(tuple(s.NO_PAGE_START))
-                            or s.page_width(page + following) <= 15, page)
+            # No stub lines: every page is at least SUBTITLE_MIN_LAST columns wide.
+            self.assertGreaterEqual(s.page_width(page), s.SUBTITLE_MIN_LAST, page)
         self.assertEqual(''.join(page for _, page in rows), reply[:len(''.join(
             page for _, page in rows))])
 

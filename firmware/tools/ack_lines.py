@@ -7,13 +7,13 @@
 (素材に入っている音声をその場で鳴らす) ので、**同じ規則で前もって割った行**を
 `assets/manifest.json` の `acks[].lines` に持たせる。
 
-  ・全角 1 桁 / 半角 0.5 桁、1 行 15 桁まで
+  ・全角 1 桁 / 半角 0.5 桁、1 行 15 桁まで (必ず 15 桁以内)
   ・文 (句点など) ごとに割り、文をまたいでは 1 行に詰めない
-  ・文の中は読点で区切り (clause)、続く区切りは 15 桁に収まる限り 1 行に詰める
-  ・1 つで 15 桁を超える区切りだけ桁で割る
-  ・句読点の直後が句読点・閉じ括弧なら、そこでは区切らない
-  ・句読点や閉じ括弧で行を**始めない**
-  ・15 桁を超えるときは「収まる最小の行数」で均等に割る
+  ・文の中は流し込み、各行をできるだけ 15 桁まで埋める
+  ・読点のあとで改行してよいのは、その行が 10 桁以上のときだけ
+  ・行頭禁則は追い出し (句読点・閉じ括弧・ー・〜・小書き仮名が行頭に
+    来ないよう、行末を次の行へ送る)
+  ・文の最後の行が 4 桁未満なら、前の行の末尾を少しもらう
 
 写しである以上ずれうるので、`tools/test_subtitle_host.py` の `AckLinesTest`
 が**本物のサーバを import して** 5 文と見本の文で突き合わせる。ずれたら落ちる。
@@ -23,43 +23,15 @@
 """
 import sys
 
-# stackee_server.py と同じ値 (SUBTITLE_COLUMNS / SENTENCE_MARKS /
-# CLAUSE_MARKS / NO_PAGE_START)。
+# stackee_server.py と同じ値 (SUBTITLE_COLUMNS / SUBTITLE_CLAUSE_BREAK /
+# SUBTITLE_MIN_LAST / SENTENCE_MARKS / CLAUSE_MARKS / NO_PAGE_START)。
 COLUMNS = 15
+CLAUSE_BREAK = 10
+MIN_LAST = 4
 SENTENCE_MARKS = "。．！？!?\n"
 CLAUSE_MARKS = "、，,"
-NO_PAGE_START = "。、．，,.！？!?」』）)】〕》〉］]｝}・ー:;：；"
-
-
-def page_width(text):
-    """桁数。ASCII は半角 (0.5 桁)、それ以外は全角 (1 桁)。"""
-    return sum(.5 if " " <= character <= "~" else 1. for character in text)
-
-
-def opens_badly(text, index):
-    """index から始めると句読点・閉じ括弧で行が始まってしまうか。"""
-    rest = text[index:].lstrip()
-    return bool(rest) and rest[0] in NO_PAGE_START
-
-
-def split_columns(text, columns=COLUMNS):
-    """15 桁以内の断片へ。残りは常に「収まる最小の行数」で分け合う。"""
-    pieces, start = [], 0
-    while start < len(text):
-        rest = page_width(text[start:])
-        target = rest / -(-rest // columns)     # 切り上げ除算 = 残りの最小行数
-        end, width, best = start, 0., None
-        while end < len(text) and width + page_width(text[end]) <= columns:
-            width += page_width(text[end])
-            end += 1
-            if best is None or abs(width - target) < best[1]:
-                best = end, abs(width - target)
-        end = best[0]
-        while start + 1 < end < len(text) and opens_badly(text, end):
-            end -= 1
-        pieces.append(text[start:end])
-        start = end
-    return pieces
+NO_PAGE_START = ("。、．，,.！？!?」』）)】〕》〉］]｝}・ー〜～:;：；"
+                 "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ")
 
 
 def split_parts(text, marks):
@@ -74,11 +46,21 @@ def split_parts(text, marks):
     return [part for part in parts if part.strip()]
 
 
+def page_width(text):
+    """桁数。ASCII は半角 (0.5 桁)、それ以外は全角 (1 桁)。"""
+    return sum(.5 if " " <= character <= "~" else 1. for character in text)
+
+
+def opens_badly(text, index):
+    """index から始めると行頭に来てはいけない字で行が始まってしまうか。"""
+    rest = text[index:].lstrip()
+    return bool(rest) and rest[0] in NO_PAGE_START
+
+
 def clause_spans(text):
     """1 文の中の区切りの範囲。全部つなぐと元の文になる。
 
-    句読点の直後が句読点・閉じ括弧なら、そこでは区切らない
-    (行がそれで始まってしまうので)。
+    句読点の直後が行頭に来てはいけない字なら、そこでは区切らない。
     """
     spans, start = [], 0
     for index, character in enumerate(text):
@@ -94,33 +76,39 @@ def clause_spans(text):
 def sentence_pages(text):
     """1 文の行 (サーバの `subtitle_pages()` の本文)。
 
-    続く区切りは、合わせて 15 桁に収まる限り 1 行に詰める。1 つで 15 桁を
-    超える区切りだけ、単独で桁で割る。
+    文を 15 桁の行へ流し込む。読点のあとで改行してよいのは、その行が
+    10 桁以上埋まっているときだけ。行頭禁則は追い出し (行末を次の行へ送る)
+    なので、どの行も 15 桁を超えない。最後の行が 4 桁未満なら前の行の
+    末尾を少しもらう。
     """
-    pages, group = [], None      # group: 行を待っている区切りの (start, end)
-
-    def flush():
-        if group is not None:
-            page = " ".join(text[group[0]:group[1]].split())
-            if page:
-                pages.append(page)
-
-    for start, end in clause_spans(text):
-        if page_width(" ".join(text[start:end].split())) > COLUMNS:
-            flush()
-            group = None
-            for piece in split_columns(text[start:end]):
-                page = " ".join(piece.split())
-                if page:
-                    pages.append(page)
-        elif group is not None and page_width(
-                " ".join(text[group[0]:end].split())) <= COLUMNS:
-            group = group[0], end
-        else:
-            flush()
-            group = start, end
-    flush()
-    return pages
+    breaks = {end for _, end in clause_spans(text)}
+    pages, start = [], 0
+    while start < len(text):
+        while start < len(text) and text[start].isspace():
+            start += 1
+        end, width, cut = start, 0., None
+        while end < len(text) and width + page_width(text[end]) <= COLUMNS:
+            width += page_width(text[end])
+            end += 1
+            if end in breaks and width >= CLAUSE_BREAK:
+                cut = end
+        if end < len(text) and cut is not None:
+            end = cut
+        while start + 1 < end < len(text) and opens_badly(text, end):
+            end -= 1
+        page = " ".join(text[start:end].split())
+        if page:
+            pages.append((start, page))
+        start = end
+    if len(pages) > 1 and page_width(pages[-1][1]) < MIN_LAST:
+        before, cut = pages[-2][0], pages[-1][0]
+        while cut - 1 > before and (page_width(text[cut:].strip()) < MIN_LAST
+                                    or opens_badly(text, cut)):
+            cut -= 1
+        if not opens_badly(text, cut) and page_width(text[cut:].strip()) <= COLUMNS:
+            pages[-2:] = [(before, " ".join(text[before:cut].split())),
+                          (cut, " ".join(text[cut:].split()))]
+    return [page for _offset, page in pages]
 
 
 def subtitle_lines(text):

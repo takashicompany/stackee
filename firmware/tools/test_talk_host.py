@@ -566,8 +566,9 @@ class GuideTest(unittest.TestCase):
         # サーバと同じ規則で割ってある (tools/ack_lines.py と突き合わせる)。
         import ack_lines
         for guide, text in (
-                (GUIDE_REC, 'AI質問キーを押したまま話しかけてみてください'),
-                # 「…」は句読点ではないので、行の切れ目は改行で指定する。
+                # 行の切れ目は改行で指定する (流し込むと「話しかけ」の途中で
+                # 折れる。「…」は句読点ではない)。
+                (GUIDE_REC, 'AI質問キーを押したまま\n話しかけてみてください'),
                 (GUIDE_THINK, '考えています…\nしばらくお待ちください')):
             lines = guide.replace('\\n', '\n').split('\n')
             self.assertEqual(len(lines), 2, guide)
