@@ -344,9 +344,15 @@ class AckLinesTest(unittest.TestCase):
         if self.server is None:
             self.skipTest('public/server/stackee_server.py を import できない')
         for ack in self.acks:
-            want = [page for _offset, page in
-                    self.server.subtitle_pages(ack['text'])]
-            self.assertEqual(ack['lines'], want, ack['file'])
+            self.assertEqual(ack['lines'], self.server_lines(ack['text']),
+                             ack['file'])
+
+    def server_lines(self, text):
+        """サーバが字幕にする行。文ごとに subtitle_pages() (文をまたいで
+        詰めない。subtitle_only_body() と同じ並べ方)。"""
+        return [page for sentence in
+                self.server.split_parts(text, self.server.SENTENCE_MARKS)
+                for _offset, page in self.server.subtitle_pages(sentence)]
 
     def test_our_copy_of_the_rule_matches_the_server(self):
         """tools/ack_lines.py がサーバの写しとしてずれていないか。"""
@@ -359,12 +365,14 @@ class AckLinesTest(unittest.TestCase):
             'ABC 123 and some English words mixed in here too.',
             'これは、とても長い一文で、十五桁を超えるので複数行に分かれるはずなのだ。',
             'うん。',
+            'うん。そうなのだ。',
+            'えっと、うん、そうなのだ、たぶんね。',
+            'ほんとう？！すごいのだ、「やった」。',
             '',
         ]
         for text in probes:
             self.assertEqual(ack_lines.subtitle_lines(text),
-                             [page for _o, page in
-                              self.server.subtitle_pages(text)], text)
+                             self.server_lines(text), text)
             self.assertEqual(ack_lines.page_width(text),
                              self.server.page_width(text), text)
 
@@ -385,7 +393,7 @@ class AckLinesTest(unittest.TestCase):
     def test_the_band_only_shows_the_first_three(self):
         """帯は 3 行。4 行以上あれば本体は先頭 3 行だけ出す。
 
-        ★ いまの 5 文はどれも 2 行なので切られない。ここは「切るときの
+        ★ いまの 5 文はどれも 2 行以下なので切られない。ここは「切るときの
           決まり」を固定するためのもの (本体は main/stackee_audio.c の
           ack_lines())。
         """
@@ -415,13 +423,17 @@ class GuideTextTest(unittest.TestCase):
         self.assertIn('#define STACKEE_TALK_GUIDE_RECORDING "%s"'
                       % sub.GUIDE_RECORDING.replace('\n', '\\n'), self.header)
         self.assertIn('#define STACKEE_TALK_GUIDE_THINKING  "%s"'
-                      % sub.GUIDE_THINKING, self.header)
+                      % sub.GUIDE_THINKING.replace('\n', '\\n'), self.header)
 
     def test_it_matches_the_server_way_of_splitting(self):
         self.assertEqual(sub.GUIDE_RECORDING.split('\n'),
-                         ack_lines.subtitle_lines('マイクに向かって話しかけてください'))
-        self.assertEqual([sub.GUIDE_THINKING],
-                         ack_lines.subtitle_lines('考えています…'))
+                         ack_lines.subtitle_lines('AI質問キーを押したまま話しかけてみてください'))
+        # 「…」は句読点ではないので、行の切れ目は改行で渡す。
+        self.assertEqual(sub.GUIDE_THINKING.split('\n'),
+                         ack_lines.subtitle_lines('考えています…\nしばらくお待ちください'))
+        for text in (sub.GUIDE_RECORDING, sub.GUIDE_THINKING):
+            for line in text.split('\n'):
+                self.assertLessEqual(ack_lines.page_width(line), 15, line)
 
     def test_it_fits_the_band(self):
         for text in (sub.GUIDE_RECORDING, sub.GUIDE_THINKING):

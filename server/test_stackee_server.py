@@ -825,9 +825,49 @@ class SubtitleTests(unittest.TestCase):
                     self.assertNotIn(page[0], s.NO_PAGE_START)
                     self.assertLessEqual(s.page_width(page), 15)
 
-    def test_clauses_start_their_own_page_with_the_comma_kept(self):
-        pages = s.subtitle_pages('春です、夏です。')
-        self.assertEqual(pages, [(0, '春です、'), (4, '夏です。')])
+    def test_short_clauses_share_a_line(self):
+        self.assertEqual(s.subtitle_pages('春です、夏です。'), [(0, '春です、夏です。')])
+        # Greedy: a clause joins the page while the page stays within 15 columns.
+        self.assertEqual(s.subtitle_pages('うん、そうだね、今日はいい天気だから、散歩に行こうか。'),
+                         [(0, 'うん、そうだね、'), (8, '今日はいい天気だから、'),
+                          (19, '散歩に行こうか。')])
+        # Half-width text counts half a column.
+        self.assertEqual(s.subtitle_pages('OK, ' + 'あ' * 12 + '。'), [(0, 'OK, ' + 'あ' * 12 + '。')])
+
+    def test_exactly_fifteen_columns_is_one_page_and_sixteen_is_two(self):
+        self.assertEqual(s.subtitle_pages('あいう、' + 'え' * 10 + '。'),
+                         [(0, 'あいう、' + 'え' * 10 + '。')])
+        self.assertEqual(s.subtitle_pages('あいう、' + 'え' * 11 + '。'),
+                         [(0, 'あいう、'), (4, 'え' * 11 + '。')])
+
+    def test_a_long_clause_is_split_evenly_on_its_own(self):
+        # The short clauses around it keep their own pages; the 17-column clause splits 8 + 9.
+        text = 'はい、' + 'あ' * 16 + '、' + 'うん。'
+        self.assertEqual(s.subtitle_pages(text),
+                         [(0, 'はい、'), (3, 'あ' * 8), (11, 'あ' * 8 + '、'), (20, 'うん。')])
+
+    def test_a_closing_bracket_after_a_comma_stays_with_its_clause(self):
+        self.assertEqual(s.clause_spans('「はい、」と言った。'), [(0, 10)])
+        text = '「はい、」と言ったけれど、本当はまだ準備ができていなかった。'
+        pages = [page for _, page in s.subtitle_pages(text)]
+        self.assertEqual(''.join(pages), text)
+        for page in pages:
+            self.assertNotIn(page[0], s.NO_PAGE_START)
+            self.assertLessEqual(s.page_width(page), 15)
+
+    def test_pages_never_join_two_sentences(self):
+        body = s.subtitle_body([(0, 1000., 'はい。'), (1150, 1000., 'そうです。')])
+        self.assertEqual(body.decode(), '0\tはい。\n1150\tそうです。\n')
+
+    def test_page_starts_are_the_first_clause_start_and_never_go_back(self):
+        sentences = [(0, 3000., 'うん、そうだね、今日はいい天気だから、散歩に行こうか。'),
+                     (3150, 2000., 'はい、' + 'あ' * 16 + '、' + 'うん。')]
+        body = s.subtitle_body(sentences)
+        starts = [int(line.split('\t')[0]) for line in body.decode().splitlines()]
+        self.assertEqual(starts, [0, round(3000 * 8 / 27), round(3000 * 19 / 27),
+                                  3150, round(3150 + 2000 * 3 / 23), round(3150 + 2000 * 11 / 23),
+                                  round(3150 + 2000 * 20 / 23)])
+        self.assertEqual(starts, sorted(starts))
 
     def test_the_body_stops_at_forty_eight_lines_and_four_kilobytes(self):
         body = s.subtitle_body([(0, 60000., 'あ' * 15 * 60)])

@@ -239,7 +239,7 @@ def clause_spans(text):
     """Character ranges of the clauses of one sentence, in order, covering the text."""
     spans, start = [], 0
     for index, character in enumerate(text):
-        if character in CLAUSE_MARKS + SENTENCE_MARKS:
+        if character in CLAUSE_MARKS + SENTENCE_MARKS and not opens_badly(text, index + 1):
             spans.append((start, index + 1))
             start = index + 1
     if start < len(text):
@@ -248,15 +248,37 @@ def clause_spans(text):
 
 
 def subtitle_pages(text):
-    """Pages of one sentence as (character offset within the sentence, page text)."""
-    pages = []
-    for start, end in clause_spans(text):
-        offset = start
-        for piece in split_columns(text[start:end]):
-            page = " ".join(piece.split())
+    """Pages of one sentence as (character offset within the sentence, page text).
+
+    Clauses that follow one another share a page while together they fit in a line, so
+    a short clause does not leave half a line empty. A clause too long for one line is
+    split evenly on its own. Pages never span two sentences: a sentence's start is exact,
+    and a page holding the next one would show it before it is spoken.
+    """
+    pages, group = [], None   # group: (start, end) of the clauses waiting for a page
+
+    def flush():
+        if group is not None:
+            page = " ".join(text[group[0]:group[1]].split())
             if page:
-                pages.append((offset, page))
-            offset += len(piece)
+                pages.append((group[0], page))
+
+    for start, end in clause_spans(text):
+        if page_width(" ".join(text[start:end].split())) > SUBTITLE_COLUMNS:
+            flush()
+            group, offset = None, start
+            for piece in split_columns(text[start:end]):
+                page = " ".join(piece.split())
+                if page:
+                    pages.append((offset, page))
+                offset += len(piece)
+        elif group is not None and page_width(
+                " ".join(text[group[0]:end].split())) <= SUBTITLE_COLUMNS:
+            group = group[0], end
+        else:
+            flush()
+            group = start, end
+    flush()
     return pages
 
 

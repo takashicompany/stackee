@@ -49,8 +49,8 @@ SCREEN_BG = 0xFFFFFF
 # 案内の字幕 (main/stackee_talksm.h の STACKEE_TALK_GUIDE_RECORDING /
 # _THINKING と**同じ文字列**)。行の割り方はサーバと同じ規則
 # (tools/ack_lines.py。tools/test_talk_host.py が突き合わせる)。
-GUIDE_RECORDING = 'マイクに向かって\n話しかけてください'
-GUIDE_THINKING = '考えています…'
+GUIDE_RECORDING = 'AI質問キーを押したまま\n話しかけてみてください'
+GUIDE_THINKING = '考えています…\nしばらくお待ちください'
 
 # check_phase2.py が実機に投げる文字列。1 行・3 行・頁めくり直後・空・
 # 字形なし・半角混在・案内を含む。

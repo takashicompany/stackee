@@ -140,7 +140,7 @@ class SayPipelineTests(unittest.TestCase):
         p = self.pipeline()
         reply, audio, subtitles = p.say('ひとつ目です。ふたつ目、みっつ目です。', voice=False)
         self.assertEqual((reply, audio, p.calls), ('ひとつ目です。ふたつ目、みっつ目です。', b'', []))
-        self.assertEqual(subtitles.decode(), '0\tひとつ目です。\n2500\tふたつ目、\n5000\tみっつ目です。\n')
+        self.assertEqual(subtitles.decode(), '0\tひとつ目です。\n2500\tふたつ目、みっつ目です。\n')
         long = 'あ' * 40 + '。'
         body = s.subtitle_only_body(long)
         self.assertEqual([line.split('\t')[1] for line in body.decode().splitlines()],

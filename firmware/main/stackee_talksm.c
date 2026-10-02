@@ -612,6 +612,12 @@ static void finish_recording(stackee_talk_t *t) {
         cleanup(t);
         to(t, STACKEE_TALK_IDLE);       // listening → idle (thinking を通らない)
         show(t, "送信しませんでした");
+        // ★ 録音中の案内はすぐ消さず、しばらく残す (押し方を読めるように)。
+        //   消すのは update_guide (時刻で見る。ここで待たない)。
+        if (t->guide_shown == STACKEE_TALK_GUIDE_REC) {
+            t->guide_linger = true;
+            t->guide_linger_since = now(t);
+        }
         return;
     }
     t->ops->wav_header(t->samples, t->count);
@@ -901,6 +907,12 @@ static void notice(stackee_talk_t *t, const char *text) {
                       t->notice, sizeof(t->notice));
     if (t->notice[0] == '\0') {
         return;
+    }
+    // ★ 破棄のあとで残していた録音中の案内は、知らせに帯を譲る
+    //   (あとで案内の後始末が知らせを消さないように)。
+    if (t->guide_linger) {
+        t->guide_linger = false;
+        t->guide_shown = STACKEE_TALK_GUIDE_NONE;
     }
     t->notice_on = true;
     t->notice_since = now(t);
@@ -1968,7 +1980,8 @@ static void talk_step_inner(stackee_talk_t *t) {
 //   いないときだけ出す。持ち主が居るときは **触らない** (消しもしない)。
 static int guide_want(const stackee_talk_t *t) {
     if (t->state == STACKEE_TALK_IDLE) {
-        return STACKEE_TALK_GUIDE_NONE;
+        // 破棄のあと、録音中の案内を残している間 (update_guide が時刻を見る)。
+        return t->guide_linger ? STACKEE_TALK_GUIDE_REC : STACKEE_TALK_GUIDE_NONE;
     }
     // ★ 常時ポーリングで届いた発話は「考えています…」ではない (頼まれて
     //   考えているのではなく、知らせが届いた)。字幕が出るまで帯は空。
@@ -2005,7 +2018,30 @@ static int guide_want(const stackee_talk_t *t) {
     return STACKEE_TALK_GUIDE_THINK;
 }
 
+// 破棄のあとに残した録音中の案内の後始末。
+// ★ 押し直し (録音) なら案内はそのまま。ほかの往復が始まったら普通の規則に
+//   戻す。時間が来たら消すが、そのとき一次回答 / audio.play が帯を
+//   持っていれば触らない (向こうが消す)。
+static void guide_linger_step(stackee_talk_t *t) {
+    if (!t->guide_linger) {
+        return;
+    }
+    if (t->state != STACKEE_TALK_IDLE) {
+        t->guide_linger = false;
+        return;
+    }
+    if (since_ms(t, t->guide_linger_since) < STACKEE_TALK_GUIDE_LINGER_MS) {
+        return;
+    }
+    t->guide_linger = false;
+    if ((t->ops->ack_active != NULL && t->ops->ack_active()) ||
+        (t->ops->play_active != NULL && t->ops->play_active())) {
+        t->guide_shown = STACKEE_TALK_GUIDE_NONE;   // 帯は向こうのもの
+    }
+}
+
 static void update_guide(stackee_talk_t *t) {
+    guide_linger_step(t);
     int want = guide_want(t);
     if (want == t->guide_shown) {
         return;

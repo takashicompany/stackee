@@ -229,8 +229,10 @@ typedef struct {
 // ★ 帯が黒いだけだと「いま何をすればいいか」が分からない。会話の状態を
 //   そのまま言葉にして出す。
 //
-//   録音中 (STK_TALK を押している間) … 「マイクに向かって話しかけてください」
+//   録音中 (STK_TALK を押している間) … 「AI質問キーを押したまま」
+//                                        「話しかけてみてください」
 //   考え中 (送信〜返答待ち)          … 「考えています…」
+//                                        「しばらくお待ちください」
 //
 // ★ 行の割り方はサーバと同じ規則 (1 行 15 桁、句読点で行を始めない)。
 //   tools/ack_lines.py に文を渡して割った結果をそのまま書いてある
@@ -239,8 +241,14 @@ typedef struct {
 //   出ている間は案内を出さない (鳴り終わってから / 来たら置き換わる)。
 // ★ **MIC(kc) の押下 (PC 側のプッシュトゥトーク) では出さない。** あれは
 //   顔だけを変えるもので、会話の状態機械を通らない。
-#define STACKEE_TALK_GUIDE_RECORDING "マイクに向かって\n話しかけてください"
-#define STACKEE_TALK_GUIDE_THINKING  "考えています…"
+#define STACKEE_TALK_GUIDE_RECORDING "AI質問キーを押したまま\n話しかけてみてください"
+#define STACKEE_TALK_GUIDE_THINKING  "考えています…\nしばらくお待ちください"
+
+// ★ 送らずに終わった録音 (短押し・無音で破棄) のあとも、録音中の案内を
+//   この時間だけ残してから消す (2026-10-03)。押し方が分かるまで読めるように。
+//   その間に会話キーが押されたら普通に録音に入り、案内はそのまま。
+//   ほかの持ち主 (お知らせ・一次回答・audio.play など) が帯を取ったら手を引く。
+#define STACKEE_TALK_GUIDE_LINGER_MS 3000
 
 // 案内の状態 (talk.status の "guide")。
 typedef enum {
@@ -474,6 +482,9 @@ typedef struct {
     // 案内の字幕。文面は差し替えられるようにしておく (将来 settings から)。
     const char *guide_rec, *guide_think;
     int guide_shown;            // stackee_talk_guide_t
+    // 破棄のあとで録音中の案内を残している (STACKEE_TALK_GUIDE_LINGER_MS)。
+    bool guide_linger;
+    uint32_t guide_linger_since;
 
     // ---- Custom_0〜Custom_9 (POST /key、2026-09-27) ----
     char     key_path[STACKEE_TALK_PATH_MAX];   // "/key"。空 = 作れない

@@ -137,8 +137,8 @@ def subtitles(text):
 
 
 # 案内の字幕 (2026-09-22)。会話の状態をそのまま言葉にして帯へ出す。
-GUIDE_REC = r'マイクに向かって\n話しかけてください'
-GUIDE_THINK = '考えています…'
+GUIDE_REC = r'AI質問キーを押したまま\n話しかけてみてください'
+GUIDE_THINK = r'考えています…\nしばらくお待ちください'
 
 
 def reply_subs(text):
@@ -526,8 +526,9 @@ class RecordGateTest(unittest.TestCase):
 class GuideTest(unittest.TestCase):
     """案内の字幕 (2026-09-22)。会話の状態をそのまま言葉にして帯へ出す。
 
-      録音中 … 「マイクに向かって話しかけてください」(15 桁で 2 行)
-      考え中 … 「考えています…」
+      録音中 … 「AI質問キーを押したまま」「話しかけてみてください」(2 行)
+      考え中 … 「考えています…」「しばらくお待ちください」(2 行)
+      (どちらも 1 行 15 桁以内)
 
     ★ **帯の持ち主は 1 人。** 一次回答 (ack) が鳴っている間と、返答の字幕が
       出ている間は案内を出さない。持ち主が居るときは消しもしない。
@@ -561,13 +562,22 @@ class GuideTest(unittest.TestCase):
         rec_end = [i for i, s in enumerate(lines) if s == 'REC end'][0]
         self.assertLess(first, rec_end)
 
-    def test_the_recording_guide_is_two_lines_of_fifteen_columns(self):
+    def test_the_guides_are_two_lines_of_fifteen_columns(self):
         # サーバと同じ規則で割ってある (tools/ack_lines.py と突き合わせる)。
         import ack_lines
+        for guide, text in (
+                (GUIDE_REC, 'AI質問キーを押したまま話しかけてみてください'),
+                # 「…」は句読点ではないので、行の切れ目は改行で指定する。
+                (GUIDE_THINK, '考えています…\nしばらくお待ちください')):
+            lines = guide.replace('\\n', '\n').split('\n')
+            self.assertEqual(len(lines), 2, guide)
+            self.assertEqual(lines, ack_lines.subtitle_lines(text))
+            for line in lines:
+                self.assertLessEqual(ack_lines.page_width(line), 15, line)
         self.assertEqual(GUIDE_REC.replace('\\n', '\n').split('\n'),
-                         ack_lines.subtitle_lines('マイクに向かって話しかけてください'))
-        for line in GUIDE_REC.replace('\\n', '\n').split('\n'):
-            self.assertLessEqual(ack_lines.page_width(line), 15)
+                         ['AI質問キーを押したまま', '話しかけてみてください'])
+        self.assertEqual(GUIDE_THINK.replace('\\n', '\n').split('\n'),
+                         ['考えています…', 'しばらくお待ちください'])
 
     # ---- 表情: 一次回答の頭で考え中を挟まない (2026-10-02) -------------------
     def test_the_face_goes_from_listening_straight_to_the_first_reply(self):
@@ -619,18 +629,83 @@ class GuideTest(unittest.TestCase):
         self.assertEqual(subtitles(out)[-1], '-')
         self.assertEqual(last_print(out)['guide'], 0)   # GUIDE_NONE
 
-    # ---- 破棄 ------------------------------------------------------------
-    def test_a_discarded_recording_clears_the_guide(self):
-        """短押し / 無音で捨てたら案内も消す (帯は黒のまま文字なし)。"""
-        out = self.turn(ms=300, subs=self.SUBS)         # 短すぎ
-        self.assertEqual(last_print(out)['dropped_short'], 1)
-        self.assertEqual(subtitles(out), [GUIDE_REC, '-'])
-        self.assertEqual(last_print(out)['guide'], 0)
+    # ---- 破棄 (2026-10-03: 約 3 秒残してから消す) --------------------------
+    def discard(self, extra, level=None, ms=300):
+        """短押し (既定) / 無音で捨てる台本。release のあとに extra を足す。"""
+        script = 'ack 0\nrespdelay 10\nmic 40\n'
+        if level is not None:
+            script += 'miclevel %d\n' % level
+        script += 'press\nt %d\nrelease\n' % ms
+        return run(script + extra, legacy_gate=False)
 
-    def test_a_silent_recording_clears_the_guide_too(self):
-        out = self.turn(ms=1500, level=0, subs=self.SUBS)
+    @staticmethod
+    def subs_at_prints(out):
+        """print ごとに、それまでに出た SUB の並び。"""
+        seen, rows = [], []
+        for line in out.splitlines():
+            if line.startswith('SUB '):
+                seen.append(line[4:])
+            elif line.startswith('NOW '):
+                rows.append(list(seen))
+        return rows
+
+    def test_a_discarded_recording_keeps_the_guide_for_three_seconds(self):
+        """短押しで捨てても録音中の案内をすぐ消さず、約 3 秒で消す。"""
+        out = self.discard('t 2800\nprint\nt 400\nprint\n')
+        self.assertEqual(last_print(out)['dropped_short'], 1)
+        first, second = self.subs_at_prints(out)
+        self.assertEqual(first, [GUIDE_REC])            # 2.8 秒後はまだ出ている
+        self.assertEqual(prints(out)[0]['guide'], 1)    # GUIDE_REC
+        self.assertEqual(second, [GUIDE_REC, '-'])      # 3.2 秒後には消えた
+        self.assertEqual(last_print(out)['guide'], 0)
+        self.assertEqual(http_calls(out), [])           # 送っていない
+
+    def test_the_guide_is_cleared_three_seconds_after_the_discard(self):
+        # 10 ms ごとに print して、消えた時刻を測る (破棄 = idle に戻った時刻)。
+        out = self.discard('t 10\nprint\n' * 400)
+        dropped = [ms for name, ms in states(out) if name == 'idle'][-1]
+        rows = prints(out)
+        cleared = [r['now'] for r, subs in zip(rows, self.subs_at_prints(out))
+                   if '-' in subs][0]
+        self.assertGreaterEqual(cleared - dropped, 3000)
+        self.assertLess(cleared - dropped, 3000 + 20)
+
+    def test_a_silent_recording_keeps_the_guide_too(self):
+        out = self.discard('t 2800\nprint\nt 400\nprint\n', level=0, ms=1500)
         self.assertEqual(last_print(out)['dropped_silent'], 1)
-        self.assertEqual(subtitles(out), [GUIDE_REC, '-'])
+        first, second = self.subs_at_prints(out)
+        self.assertEqual(first, [GUIDE_REC])
+        self.assertEqual(second, [GUIDE_REC, '-'])
+
+    def test_pressing_again_while_the_guide_lingers_records_normally(self):
+        """残っている間に押し直したら普通に録音に入り、案内は出たまま。"""
+        out = run('ack 0\nrespdelay 10\nresp 202 %s\nresp 200 %s\n'
+                  'subs 200 %s\nresp 200 PCM:48000\nmic 40\n'
+                  'press\nt 300\nrelease\nt 1000\n'        # 短すぎ → 残す
+                  # 押し直して、案内が消えるはずだった時刻 (約 3.3 秒) を
+                  # またいで押し続ける。
+                  'press\nt 3000\nprint\nrelease\nt 8000\nprint\n'
+                  % (ACCEPT_BODY, DONE_SUBS_BODY, self.SUBS),
+                  legacy_gate=False)
+        rows = prints(out)
+        self.assertEqual(rows[0]['state'], 'recording')
+        self.assertEqual(rows[0]['guide'], 1)
+        self.assertEqual(rows[-1]['dropped_short'], 1)
+        # 案内は一度も消えず、そのまま考え中 → 返答の字幕へ。
+        subs = subtitles(out)
+        self.assertEqual(subs[:2], [GUIDE_REC, GUIDE_THINK])
+        self.assertEqual(subs[2:], [r'こんにちは', r'こんにちは\nさようなら', '-'])
+        self.assertTrue([c for c in http_calls(out) if c[0] == 'POST'])
+
+    def test_another_owner_takes_the_band_while_the_guide_lingers(self):
+        """残している間にお知らせが帯を取ったら、案内の後始末で消さない。"""
+        out = self.discard('clipon\nt 1000\nclip\nt 2200\nprint\n'
+                           't 1500\nprint\n')
+        first, second = self.subs_at_prints(out)
+        # 約 3.3 秒 (案内が消えるはずの時刻) を過ぎても、お知らせが出たまま。
+        self.assertEqual(first, [GUIDE_REC, 'クリップがありません'])
+        # 消すのはお知らせ自身 (STACKEE_TALK_NOTICE_MS のあと)。1 回だけ。
+        self.assertEqual(second, [GUIDE_REC, 'クリップがありません', '-'])
 
     # ---- 字幕の無い返答 ---------------------------------------------------
     def test_a_reply_without_subtitles_clears_the_guide_when_it_starts(self):
